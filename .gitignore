@@ -1,0 +1,24 @@
+# Compiled Binaries
+ldpc_sim
+test_kernel_host
+test_kernel_ttsim
+test_unit_single_core
+test_ar4ja_host
+*.o
+*.so
+*.a
+
+# TT-Metal JIT Cache & Temp
+.cache/
+generated/
+*.log
+scratchpad/
+scratch/
+__pycache__/
+*.pyc
+
+# IDE & Editor files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
