@@ -345,11 +345,12 @@ int main(int argc, char** argv) {
             std::vector<uint32_t> w_args = {core_stats_addr, 0};
             SetRuntimeArgs(program, writer, core, w_args);
 
-            uint32_t seed = lockstep_verify ? 133742 : (1337 + core_id * 10007 + static_cast<uint32_t>(accumulated_blocks));
+            uint32_t seed_lo = lockstep_verify ? 133742 : (1337 + core_id * 10007 + static_cast<uint32_t>(accumulated_blocks));
+            uint32_t seed_hi = lockstep_verify ? 0x9E3779B9 : (core_id * 0x85EBCA6B + static_cast<uint32_t>(accumulated_blocks >> 32) + 0x12345678);
             std::vector<uint32_t> c_args = {
                 current_batch_per_core, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
-                mu_u32, sigma_u32, seed,
-                1, max_iterations
+                mu_u32, sigma_u32, seed_lo,
+                seed_hi, max_iterations
             };
             SetRuntimeArgs(program, compute, core, c_args);
         }

@@ -2,14 +2,46 @@
 #include "api/compute/cb_api.h"
 #include <cstring>
 
-// Fast Xorshift32 Uniform PRNG
-inline uint32_t xorshift32(uint32_t& state) {
-    uint32_t x = state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    return state = x;
+// Fast SplitMix32 for state initialization from 32-bit seeds
+inline uint32_t splitmix32(uint32_t& x) {
+    uint32_t z = (x += 0x9E3779B9);
+    z ^= z >> 16;
+    z *= 0x85EBCA6B;
+    z ^= z >> 13;
+    z *= 0xC2B2AE35;
+    z ^= z >> 16;
+    return z;
 }
+
+// Xoshiro128+ Uniform PRNG (period: 2^128 - 1 ≈ 3.4e38)
+// Pure 32-bit native RV32 arithmetic (shifts, adds, rotates) with zero 64-bit software emulation
+struct Xoshiro128Plus {
+    uint32_t s[4];
+
+    void init(uint32_t seed_lo, uint32_t seed_hi) {
+        uint32_t sm_lo = seed_lo;
+        uint32_t sm_hi = seed_hi;
+        s[0] = splitmix32(sm_lo);
+        s[1] = splitmix32(sm_lo);
+        s[2] = splitmix32(sm_hi);
+        s[3] = splitmix32(sm_hi);
+        if ((s[0] | s[1] | s[2] | s[3]) == 0) {
+            s[0] = 1;
+        }
+    }
+
+    inline uint32_t next() {
+        const uint32_t result = s[0] + s[3];
+        const uint32_t t = s[1] << 9;
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = (s[3] << 11) | (s[3] >> 21);
+        return result;
+    }
+};
 
 inline uint32_t float_as_uint(float f) {
     uint32_t u;
@@ -63,7 +95,7 @@ inline float fast_sqrt(float x) {
 // Marsaglia Polar AWGN Generator: completely eliminates trigonometric functions (sin/cos).
 // All operations are purely local to this Tensix core's pipeline with zero cross-core communication.
 inline void generate_awgn_llr_pair(
-    uint32_t& prng_state, 
+    Xoshiro128Plus& rng, 
     float mu_llr, 
     float sigma_llr, 
     float& llr0, 
@@ -73,8 +105,8 @@ inline void generate_awgn_llr_pair(
     constexpr float INT32_TO_UNIT = 4.656612875245797e-10f; // 1.0f / 2147483648.0f
     float v1, v2, s;
     do {
-        int32_t u1 = static_cast<int32_t>(xorshift32(prng_state));
-        int32_t u2 = static_cast<int32_t>(xorshift32(prng_state));
+        int32_t u1 = static_cast<int32_t>(rng.next());
+        int32_t u2 = static_cast<int32_t>(rng.next());
         v1 = static_cast<float>(u1) * INT32_TO_UNIT;
         v2 = static_cast<float>(u2) * INT32_TO_UNIT;
         s = v1 * v1 + v2 * v2;
@@ -98,10 +130,13 @@ void kernel_main() {
     uint32_t max_check_deg = get_arg_val<uint32_t>(4);
     uint32_t mu_bits       = get_arg_val<uint32_t>(5);
     uint32_t sigma_bits    = get_arg_val<uint32_t>(6);
-    uint32_t prng_state    = get_arg_val<uint32_t>(7);
-    uint32_t num_h_tiles   = get_arg_val<uint32_t>(8);
+    uint32_t seed_lo       = get_arg_val<uint32_t>(7);
+    uint32_t seed_hi       = get_arg_val<uint32_t>(8);
     uint32_t max_iter      = get_arg_val<uint32_t>(9);
     if (max_iter == 0) max_iter = 16;
+
+    Xoshiro128Plus rng;
+    rng.init(seed_lo, seed_hi);
 
     float mu_llr = 0.0f;
     float sigma_llr = 0.0f;
@@ -149,7 +184,7 @@ void kernel_main() {
             if (sigma_llr > 0.0f) {
                 for (uint32_t i = 0; i < unpunctured_nodes; i += 2) {
                     generate_awgn_llr_pair(
-                        prng_state, 
+                        rng, 
                         mu_llr, 
                         sigma_llr, 
                         channel_llrs[i], 

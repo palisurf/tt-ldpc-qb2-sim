@@ -199,7 +199,7 @@ int main() {
     std::vector<uint32_t> c_args = {
         num_test_cws, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
         mu_u32, sigma_u32, 133742,
-        1, 16
+        0x9E3779B9, 16
     };
     SetRuntimeArgs(program, compute, core, c_args);
 
