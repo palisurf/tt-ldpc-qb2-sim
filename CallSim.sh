@@ -98,6 +98,10 @@ while [[ $# -gt 0 ]]; do
             PUNCTURED="$2"
             shift 2
             ;;
+        --nms|-n)
+            FORWARD_ARGS+=("--nms")
+            shift
+            ;;
         *)
             if parse_ebn0_tuple "$1" 2>/dev/null; then
                 shift

@@ -195,9 +195,10 @@ int main(int argc, char** argv) {
 
     bool single_core = false;
     bool lockstep_verify = false;
+    bool use_nms = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:sv")) != -1) {
+    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:svn")) != -1) {
         switch (opt) {
             case 'c': chinn_file = optarg; break;
             case 'e': eb_n0_db = std::stod(optarg); break;
@@ -209,6 +210,7 @@ int main(int argc, char** argv) {
             case 'i': max_iterations = std::stoul(optarg); break;
             case 's': single_core = true; break;
             case 'v': lockstep_verify = true; break;
+            case 'n': use_nms = true; break;
             default: break;
         }
     }
@@ -250,6 +252,7 @@ int main(int argc, char** argv) {
     std::cout << "[CONFIG] Stopping criteria: min " << target_frame_errors << " block errors OR max " 
               << blocks_per_core << " blocks/core (Batch size/core: " << batch_per_core 
               << ", max mesh blocks: " << max_blocks << ", max iters: " << max_iterations << ")" << std::endl;
+    std::cout << "[CONFIG] Decoder algorithm: " << (use_nms ? "Normalized Min-Sum (alpha=0.75)" : "Approximate-Min* (Christopher Jones MILCOM 2003)") << std::endl;
 
     uint32_t tile_bytes = sizeof(bfloat16) * TILE_ELEMENTS;
     uint32_t h_bytes = h_mat.flattened_indices.size() * sizeof(uint16_t);
@@ -330,9 +333,18 @@ int main(int argc, char** argv) {
             DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default}
         );
 
+        std::map<std::string, std::string> compute_defines;
+        if (use_nms) {
+            compute_defines["USE_NORMALIZED_MIN_SUM"] = "1";
+        }
+
         auto compute = CreateKernel(
             program, "kernel/compute_trisc_ldpc_awgn_sim.cpp", core_grid,
-            ComputeConfig{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = true}
+            ComputeConfig{
+                .math_fidelity = MathFidelity::HiFi4,
+                .fp32_dest_acc_en = true,
+                .defines = compute_defines
+            }
         );
 
         for (uint32_t core_id = 0; core_id < cores_per_chip; core_id++) {

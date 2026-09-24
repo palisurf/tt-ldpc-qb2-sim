@@ -70,6 +70,7 @@ def main():
     parser.add_argument("--binary", type=str, default="./ldpc_sim", help="Path to compiled C++ binary")
     parser.add_argument("--output", type=str, default=None, help="Output CSV file path (defaults to auto-generated from parameters)")
     parser.add_argument("--single_core", action="store_true", help="Run on a single Tensix core only")
+    parser.add_argument("--nms", action="store_true", help="Use Normalized Min-Sum (alpha=0.75) instead of default Approximate-Min*")
     
     args = parser.parse_args()
 
@@ -83,6 +84,9 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
 
     # Auto-generate descriptive CSV filename if not explicitly provided
+    algo_str = "nms" if args.nms else "amin"
+    algo_desc = "Normalized Min-Sum (alpha=0.75)" if args.nms else "Approximate-Min* (Christopher Jones MILCOM 2003)"
+
     if args.output:
         if os.path.dirname(args.output):
             output_filename = args.output
@@ -99,6 +103,7 @@ def main():
         output_filename = os.path.join(
             results_dir,
             f"results_{matrix_base}"
+            f"_{algo_str}"
             f"_ebn0_{args.ebn0_start:.2f}_{args.ebn0_end:.2f}_step{args.ebn0_step:.2f}"
             f"_max{args.max_blocks_per_core}"
             f"_min{args.min_errors}"
@@ -110,6 +115,7 @@ def main():
     print("      Tenstorrent QB2 LDPC Monte Carlo Simulation         ")
     print("==========================================================")
     print(f"Matrix File        : {args.chinn}")
+    print(f"Decoder Algorithm  : {algo_desc}")
     print(f"Code Dimensions    : N={N}, M={M} (Rate = {rate:.4f})")
     print(f"Punctured Nodes    : {args.punctured} (Transmitted N = {unpunctured_N} symbols/code)")
     print(f"Eb/N0 Range        : {args.ebn0_start:.2f} dB to {args.ebn0_end:.2f} dB (step {args.ebn0_step:.2f} dB)")
@@ -139,6 +145,8 @@ def main():
         ]
         if args.single_core:
             cmd.append("-s")
+        if args.nms:
+            cmd.append("-n")
         if args.batch_size is not None:
             cmd.extend(["-b", str(args.batch_size)])
 

@@ -4,6 +4,8 @@ test_kernel_host
 test_kernel_ttsim
 test_unit_single_core
 test_ar4ja_host
+test_amin_star
+test_quantized_ar4ja
 *.o
 *.so
 *.a

@@ -209,9 +209,11 @@ void kernel_main() {
                 }
             }
 
-            // STEP 3: Layered Normalized Min-Sum Decoder
+            // STEP 3: Layered Decoder (Approximate-Min* by default, or Normalized Min-Sum)
             for (uint32_t iter = 0; iter < max_iter; iter++) {
                 for (uint32_t m = 0; m < M_check_nodes; m++) {
+#ifdef USE_NORMALIZED_MIN_SUM
+                    // --- Algorithm: Normalized Min-Sum (alpha = 0.75) ---
                     float min1 = 999.0f, min2 = 999.0f;
                     uint32_t min_idx = 0, global_sign = 0;
                     float q_val[MAX_DEG];
@@ -249,6 +251,69 @@ void kernel_main() {
                         channel_llrs[vn] = q_val[d] + r_new;
                         r_msg[m][d] = r_new;
                     }
+#else
+                    // --- Algorithm: Christopher Jones Approximate-Min* (MILCOM 2003) ---
+                    float min1 = 999.0f, min2 = 999.0f, min3 = 999.0f;
+                    uint32_t min_idx = 0, global_sign = 0;
+                    float q_val[MAX_DEG];
+                    uint32_t actual_deg = 0;
+
+                    for (uint32_t d = 0; d < max_check_deg; d++) {
+                        uint16_t vn = h_col_idx[m * max_check_deg + d];
+                        if (vn == 0xFFFF) break; // Sentinel check for irregular graphs
+                        actual_deg++;
+
+                        q_val[d] = channel_llrs[vn] - r_msg[m][d];
+
+                        uint32_t q_u = float_as_uint(q_val[d]);
+                        uint32_t sign = q_u >> 31;
+                        global_sign ^= sign;
+                        float abs_q = uint_as_float(q_u & 0x7FFFFFFF);
+
+                        if (abs_q < min1) {
+                            min3 = min2; min2 = min1; min1 = abs_q; min_idx = d;
+                        } else if (abs_q < min2) {
+                            min3 = min2; min2 = abs_q;
+                        } else if (abs_q < min3) {
+                            min3 = abs_q;
+                        }
+                    }
+
+                    // Approximate-Min* two outgoing magnitudes:
+                    float delta1 = min2 - min1;
+                    float delta2 = (actual_deg > 2) ? (min3 - min2) : delta1;
+
+                    // Piecewise-linear LUT-free correction g(delta) = ln(1 + e^(-delta))
+                    float corr1 = 0.0f;
+                    if (delta1 < 0.5f) {
+                        corr1 = 0.69315f - 0.40f * delta1;
+                    } else if (delta1 < 2.0f) {
+                        corr1 = 0.49315f - 0.328f * (delta1 - 0.5f);
+                    }
+
+                    float corr2 = 0.0f;
+                    if (delta2 < 0.5f) {
+                        corr2 = 0.69315f - 0.40f * delta2;
+                    } else if (delta2 < 2.0f) {
+                        corr2 = 0.49315f - 0.328f * (delta2 - 0.5f);
+                    }
+
+                    float r_mag_all = (min1 > corr1) ? (min1 - corr1) : 0.0f;
+                    float r_mag_min = (min2 > corr2) ? (min2 - corr2) : 0.0f;
+
+                    for (uint32_t d = 0; d < actual_deg; d++) {
+                        uint16_t vn = h_col_idx[m * max_check_deg + d];
+                        float r_mag = (d == min_idx) ? r_mag_min : r_mag_all;
+                        uint32_t node_sign = float_as_uint(q_val[d]) >> 31;
+                        uint32_t msg_sign = global_sign ^ node_sign;
+
+                        uint32_t r_u = float_as_uint(r_mag) | (msg_sign << 31);
+                        float r_new = uint_as_float(r_u);
+
+                        channel_llrs[vn] = q_val[d] + r_new;
+                        r_msg[m][d] = r_new;
+                    }
+#endif
                 }
 
                 // STEP 4: Inline Syndrome Check (H * c^T == 0)
