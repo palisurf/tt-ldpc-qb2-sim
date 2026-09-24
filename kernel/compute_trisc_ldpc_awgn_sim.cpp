@@ -55,6 +55,19 @@ inline float uint_as_float(uint32_t u) {
     return f;
 }
 
+inline float bf16_to_fp32(uint16_t bf) {
+    uint32_t u = static_cast<uint32_t>(bf) << 16;
+    return uint_as_float(u);
+}
+
+inline uint16_t fp32_to_bf16(float f) {
+    uint32_t u = float_as_uint(f);
+    uint32_t lsb = (u >> 16) & 1u;
+    uint32_t bias = 0x7FFFu + lsb;
+    u += bias;
+    return static_cast<uint16_t>(u >> 16);
+}
+
 // Fast natural logarithm ln(s) using IEEE-754 bit extraction and a 6th-degree minimax polynomial.
 // Max absolute error < 6.1e-6 across the full range (0.0001, 1.0).
 // Avoids software emulation of <cmath> std::log on RV32 TRISC.
@@ -159,8 +172,9 @@ void kernel_main() {
     const auto* h_col_idx = reinterpret_cast<const uint16_t*>(get_tile_address(cb_h, 0));
 
     // Map arrays to L1 Circular Buffers (zero TRISC stack overhead)
-    float* channel_llrs = reinterpret_cast<float*>(get_tile_address(tt::CBIndex::c_0, 0));
-    auto* r_msg = reinterpret_cast<float(*)[MAX_DEG]>(get_tile_address(tt::CBIndex::c_1, 0));
+    // Both channel_llrs and r_msg are stored in native bfloat16 (uint16_t) representation
+    uint16_t* channel_llrs = reinterpret_cast<uint16_t*>(get_tile_address(tt::CBIndex::c_0, 0));
+    auto* r_msg = reinterpret_cast<uint16_t(*)[MAX_DEG]>(get_tile_address(tt::CBIndex::c_1, 0));
 
     uint32_t unpunctured_nodes = N_var_nodes - P_punctured;
     uint32_t total_bit_errors   = 0;
@@ -183,29 +197,33 @@ void kernel_main() {
             // STEP 1: AWGN Noise Generation (Trigonometry-free Polar Box-Muller)
             if (sigma_llr > 0.0f) {
                 for (uint32_t i = 0; i < unpunctured_nodes; i += 2) {
+                    float l0 = 0.0f, l1 = 0.0f;
                     generate_awgn_llr_pair(
                         rng, 
                         mu_llr, 
                         sigma_llr, 
-                        channel_llrs[i], 
-                        channel_llrs[i + 1]
+                        l0, 
+                        l1
                     );
+                    channel_llrs[i] = fp32_to_bf16(l0);
+                    channel_llrs[i + 1] = fp32_to_bf16(l1);
                 }
             } else {
+                uint16_t mu_bf = fp32_to_bf16(mu_llr);
                 for (uint32_t i = 0; i < unpunctured_nodes; i++) {
-                    channel_llrs[i] = mu_llr;
+                    channel_llrs[i] = mu_bf;
                 }
             }
 
             // STEP 2: Puncturing (Neutral LLR = 0)
             for (uint32_t i = unpunctured_nodes; i < N_var_nodes; i++) {
-                channel_llrs[i] = 0.0f;
+                channel_llrs[i] = 0;
             }
 
             // Reset check-node memory: only clear active check degree entries to avoid 384 KB memset
             for (uint32_t m = 0; m < M_check_nodes; m++) {
                 for (uint32_t d = 0; d < max_check_deg; d++) {
-                    r_msg[m][d] = 0.0f;
+                    r_msg[m][d] = 0;
                 }
             }
 
@@ -224,7 +242,7 @@ void kernel_main() {
                         if (vn == 0xFFFF) break; // Sentinel check for irregular graphs
                         actual_deg++;
 
-                        q_val[d] = channel_llrs[vn] - r_msg[m][d];
+                        q_val[d] = bf16_to_fp32(channel_llrs[vn]) - bf16_to_fp32(r_msg[m][d]);
 
                         uint32_t q_u = float_as_uint(q_val[d]);
                         uint32_t sign = q_u >> 31;
@@ -248,8 +266,8 @@ void kernel_main() {
                         uint32_t r_u = float_as_uint(r_mag) | (msg_sign << 31);
                         float r_new = uint_as_float(r_u);
 
-                        channel_llrs[vn] = q_val[d] + r_new;
-                        r_msg[m][d] = r_new;
+                        channel_llrs[vn] = fp32_to_bf16(q_val[d] + r_new);
+                        r_msg[m][d] = fp32_to_bf16(r_new);
                     }
 #else
                     // --- Algorithm: Christopher Jones Approximate-Min* (MILCOM 2003) ---
@@ -263,7 +281,7 @@ void kernel_main() {
                         if (vn == 0xFFFF) break; // Sentinel check for irregular graphs
                         actual_deg++;
 
-                        q_val[d] = channel_llrs[vn] - r_msg[m][d];
+                        q_val[d] = bf16_to_fp32(channel_llrs[vn]) - bf16_to_fp32(r_msg[m][d]);
 
                         uint32_t q_u = float_as_uint(q_val[d]);
                         uint32_t sign = q_u >> 31;
@@ -310,8 +328,8 @@ void kernel_main() {
                         uint32_t r_u = float_as_uint(r_mag) | (msg_sign << 31);
                         float r_new = uint_as_float(r_u);
 
-                        channel_llrs[vn] = q_val[d] + r_new;
-                        r_msg[m][d] = r_new;
+                        channel_llrs[vn] = fp32_to_bf16(q_val[d] + r_new);
+                        r_msg[m][d] = fp32_to_bf16(r_new);
                     }
 #endif
                 }
@@ -323,7 +341,7 @@ void kernel_main() {
                     for (uint32_t d = 0; d < max_check_deg; d++) {
                         uint16_t vn = h_col_idx[m * max_check_deg + d];
                         if (vn == 0xFFFF) break;
-                        row_parity ^= (float_as_uint(channel_llrs[vn]) >> 31);
+                        row_parity ^= (channel_llrs[vn] >> 15);
                     }
                     syndrome_errors |= row_parity;
                     if (syndrome_errors != 0) break;
@@ -346,7 +364,7 @@ void kernel_main() {
             // STEP 5: Tally Bit and Frame Errors
             uint32_t cw_bit_errors = 0;
             for (uint32_t i = 0; i < unpunctured_nodes; i++) {
-                cw_bit_errors += (float_as_uint(channel_llrs[i]) >> 31);
+                cw_bit_errors += (channel_llrs[i] >> 15);
             }
 
             if (cw_bit_errors > 0) {
@@ -361,7 +379,7 @@ void kernel_main() {
         stats_out[0] = total_bit_errors;
         stats_out[1] = total_frame_errors;
         stats_out[2] = cw0_iters;
-        stats_out[3] = float_as_uint(channel_llrs[0]);
+        stats_out[3] = static_cast<uint32_t>(channel_llrs[0]) << 16;
 
         mailbox_write(ckernel::ThreadId::MathThreadId, 1);
         mailbox_write(ckernel::ThreadId::PackThreadId, 1);

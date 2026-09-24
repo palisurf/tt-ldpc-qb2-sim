@@ -309,15 +309,15 @@ int main(int argc, char** argv) {
 
         Program program = CreateProgram();
 
-        std::map<uint8_t, tt::DataFormat> cb0_spec = {{0, tt::DataFormat::Float32}};
-        std::map<uint8_t, tt::DataFormat> cb1_spec = {{1, tt::DataFormat::Float32}};
+        std::map<uint8_t, tt::DataFormat> cb0_spec = {{0, tt::DataFormat::Float16_b}};
+        std::map<uint8_t, tt::DataFormat> cb1_spec = {{1, tt::DataFormat::Float16_b}};
         std::map<uint8_t, tt::DataFormat> cb2_spec = {{2, tt::DataFormat::RawUInt16}};
         std::map<uint8_t, tt::DataFormat> cb16_spec = {{16, tt::DataFormat::RawUInt32}};
 
-        // CB 0: Channel LLR Scratchpad (64 KB)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(64 * 1024, cb0_spec).set_page_size(0, 64 * 1024));
-        // CB 1: Check Message r_msg Scratchpad (384 KB)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(384 * 1024, cb1_spec).set_page_size(1, 384 * 1024));
+        // CB 0: Channel LLR Scratchpad (32 KB - bfloat16)
+        CreateCircularBuffer(program, core_grid, CircularBufferConfig(32 * 1024, cb0_spec).set_page_size(0, 32 * 1024));
+        // CB 1: Check Message r_msg Scratchpad (128 KB - bfloat16)
+        CreateCircularBuffer(program, core_grid, CircularBufferConfig(128 * 1024, cb1_spec).set_page_size(1, 128 * 1024));
         // CB 2: Sparse Parity Matrix Input
         CreateCircularBuffer(program, core_grid, CircularBufferConfig(h_cb_bytes, cb2_spec).set_page_size(2, h_cb_bytes));
         // CB 16: Error Statistics Output

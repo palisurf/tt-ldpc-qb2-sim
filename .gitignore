@@ -6,6 +6,7 @@ test_unit_single_core
 test_ar4ja_host
 test_amin_star
 test_quantized_ar4ja
+test_bf16_amin
 *.o
 *.so
 *.a
