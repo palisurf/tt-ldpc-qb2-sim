@@ -151,37 +151,74 @@ def main():
             cmd.extend(["-b", str(args.batch_size)])
 
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            data = None
-            for line in res.stdout.splitlines():
-                line = line.strip()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            is_tty = sys.stdout.isatty()
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
                 if line.startswith("{") and "ebn0" in line:
                     try:
                         data = json.loads(line)
-                        break
+                        if data.get("progress"):
+                            pct = (data['blocks'] / data['max_blocks'] * 100.0) if data.get('max_blocks', 0) > 0 else 0.0
+                            progress_str = (
+                                f"  [{ebn0:.2f} dB] Blocks: {data['blocks']:,}/{data['max_blocks']:,} ({pct:5.1f}%) "
+                                f"| FE: {data['frame_errors']}/{data['target_errors']} "
+                                f"| FER: {data['fer']:.2e} "
+                                f"| BER: {data['ber']:.2e} "
+                                f"| {data['throughput_msps']:.1f} Msps "
+                                f"| {data['elapsed_sec']:.1f}s"
+                            )
+                            if is_tty:
+                                print(f"\r{progress_str:<104}", end="", flush=True)
+                            else:
+                                print(progress_str, flush=True)
+                        else:
+                            final_data = data
                     except Exception:
                         pass
-            if data is None:
-                raise RuntimeError(f"Could not parse simulation output JSON. Full stdout:\n{res.stdout}")
+                else:
+                    if is_tty:
+                        print(f"\n{line}")
+                    else:
+                        print(line)
 
-            blocks = data["blocks"]
-            bit_errors = data["bit_errors"]
-            frame_errors = data["frame_errors"]
-            elapsed_sec = data.get("elapsed_sec", 0.0)
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"Simulation process exited with code {proc.returncode}")
+            if final_data is None:
+                raise RuntimeError("Could not parse final simulation output JSON.")
+
+            blocks = final_data["blocks"]
+            bit_errors = final_data["bit_errors"]
+            frame_errors = final_data["frame_errors"]
+            elapsed_sec = final_data.get("elapsed_sec", 0.0)
 
             total_symbols = blocks * unpunctured_N
             ber = bit_errors / total_symbols if total_symbols > 0 else 0.0
             fer = frame_errors / blocks if blocks > 0 else 0.0
             throughput_msps = (total_symbols / elapsed_sec) / 1e6 if elapsed_sec > 0.0 else 0.0
 
-            print(f"{ebn0:<10.2f} | {blocks:<12d} | {bit_errors:<12d} | {frame_errors:<14d} | {ber:<12.4e} | {fer:<12.4e} | {throughput_msps:<18.2f}")
+            summary_row = f"{ebn0:<10.2f} | {blocks:<12d} | {bit_errors:<12d} | {frame_errors:<14d} | {ber:<12.4e} | {fer:<12.4e} | {throughput_msps:<18.2f}"
+            if is_tty:
+                print(f"\r{summary_row:<104}")
+            else:
+                print(f"-> Final: {summary_row}")
 
             # Note: Throughput is printed to console only, not stored in the CSV file
             with open(output_filename, 'a') as out_file:
                 out_file.write(f"{ebn0:.2f},{blocks},{bit_errors},{frame_errors},{ber:.6e},{fer:.6e}\n")
+                out_file.flush()
 
         except Exception as e:
-            print(f"Error simulating Eb/N0 = {ebn0:.2f} dB: {e}", file=sys.stderr)
+            print(f"\nError simulating Eb/N0 = {ebn0:.2f} dB: {e}", file=sys.stderr)
             break
 
     print(f"\nSimulation complete. Output saved to: {output_filename}")

@@ -12,6 +12,7 @@ fi
 
 # Set TT-Metal runtime root for device firmware & descriptors
 export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-/home/ttuser/tt-metal}"
+export TT_METAL_LOGGER_LEVEL="${TT_METAL_LOGGER_LEVEL:-WARN}"
 
 # Ensure C++ binary is compiled
 make ldpc_sim -j

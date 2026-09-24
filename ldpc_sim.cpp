@@ -446,6 +446,21 @@ int main(int argc, char** argv) {
         }
 
         accumulated_blocks += current_batch_total;
+
+        double curr_elapsed = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - sim_start).count();
+        double curr_ber = accumulated_blocks > 0 ? static_cast<double>(accumulated_bit_errs) / (accumulated_blocks * (h_mat.N - P_punctured)) : 0.0;
+        double curr_fer = accumulated_blocks > 0 ? static_cast<double>(accumulated_frame_errs) / accumulated_blocks : 0.0;
+        double curr_msps = curr_elapsed > 0 ? (accumulated_blocks * (h_mat.N - P_punctured) / curr_elapsed) / 1e6 : 0.0;
+        std::cout << "{\"progress\": true, \"ebn0\": " << eb_n0_db 
+                  << ", \"blocks\": " << accumulated_blocks 
+                  << ", \"max_blocks\": " << max_blocks
+                  << ", \"bit_errors\": " << accumulated_bit_errs 
+                  << ", \"frame_errors\": " << accumulated_frame_errs
+                  << ", \"target_errors\": " << target_frame_errors
+                  << ", \"ber\": " << curr_ber
+                  << ", \"fer\": " << curr_fer
+                  << ", \"throughput_msps\": " << curr_msps
+                  << ", \"elapsed_sec\": " << curr_elapsed << "}" << std::endl;
     }
 
     auto sim_end = std::chrono::high_resolution_clock::now();
