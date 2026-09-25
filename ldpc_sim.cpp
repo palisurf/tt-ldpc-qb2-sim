@@ -30,6 +30,71 @@ inline uint32_t float_as_uint(float f) {
     return u;
 }
 
+struct Xoshiro128Plus {
+    uint32_t s[4];
+
+    static inline uint32_t splitmix32(uint32_t& x) {
+        uint32_t z = (x += 0x9e3779b9);
+        z ^= z >> 16;
+        z *= 0x21f0aaad;
+        z ^= z >> 15;
+        z *= 0x735a2d97;
+        z ^= z >> 15;
+        return z;
+    }
+
+    void init_from_seed(uint32_t seed) {
+        uint32_t sm = seed;
+        s[0] = splitmix32(sm);
+        s[1] = splitmix32(sm);
+        s[2] = splitmix32(sm);
+        s[3] = splitmix32(sm);
+        if ((s[0] | s[1] | s[2] | s[3]) == 0) s[0] = 1;
+    }
+
+    inline uint32_t next() {
+        const uint32_t result = s[0] + s[3];
+        const uint32_t t = s[1] << 9;
+        s[2] ^= s[0];
+        s[3] ^= s[1];
+        s[1] ^= s[2];
+        s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = (s[3] << 11) | (s[3] >> 21);
+        return result;
+    }
+
+    // Equivalent to 2^64 calls to next()
+    void jump() {
+        static const uint32_t JUMP[] = { 0x8764000b, 0xf542d2d3, 0x6fa035c3, 0x77f2db5b };
+        uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 4; i++) {
+            for (int b = 0; b < 32; b++) {
+                if (JUMP[i] & (1U << b)) {
+                    s0 ^= s[0]; s1 ^= s[1]; s2 ^= s[2]; s3 ^= s[3];
+                }
+                next();
+            }
+        }
+        s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3;
+    }
+
+    // Equivalent to 2^96 calls to next()
+    void long_jump() {
+        static const uint32_t LONG_JUMP[] = { 0xb523952e, 0x0b6f099f, 0xccf5a0ef, 0x1c580662 };
+        uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 4; i++) {
+            for (int b = 0; b < 32; b++) {
+                if (LONG_JUMP[i] & (1U << b)) {
+                    s0 ^= s[0]; s1 ^= s[1]; s2 ^= s[2]; s3 ^= s[3];
+                }
+                next();
+            }
+        }
+        s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3;
+    }
+};
+
 struct ChinnMatrix {
     uint32_t N = 0;
     uint32_t M = 0;
@@ -310,6 +375,22 @@ int main(int argc, char** argv) {
     uint64_t accumulated_bit_errs = 0;
     uint64_t accumulated_frame_errs = 0;
 
+    // Initialize 440 Tensix core PRNG streams separated by 2^96 steps (~7.9e28 draws)
+    std::vector<Xoshiro128Plus> core_generators(total_mesh_cores);
+    {
+        Xoshiro128Plus root;
+        root.init_from_seed(133742);
+        Xoshiro128Plus curr = root;
+        for (uint32_t c = 0; c < total_mesh_cores; c++) {
+            if (lockstep_verify) {
+                core_generators[c] = root; // Lockstep verification mode: identical initial state
+            } else {
+                core_generators[c] = curr;
+                curr.long_jump();          // 2^96 step separation between adjacent Tensix cores
+            }
+        }
+    }
+
     auto sim_start = std::chrono::high_resolution_clock::now();
 
     while (accumulated_frame_errs < target_frame_errors && accumulated_blocks < max_blocks) {
@@ -370,14 +451,16 @@ int main(int argc, char** argv) {
             std::vector<uint32_t> w_args = {core_stats_addr, 0};
             SetRuntimeArgs(program, writer, core, w_args);
 
-            uint32_t seed_lo = lockstep_verify ? 133742 : (1337 + core_id * 10007 + static_cast<uint32_t>(accumulated_blocks));
-            uint32_t seed_hi = lockstep_verify ? 0x9E3779B9 : (core_id * 0x85EBCA6B + static_cast<uint32_t>(accumulated_blocks >> 32) + 0x12345678);
+            uint32_t s0 = core_generators[core_id].s[0];
+            uint32_t s1 = core_generators[core_id].s[1];
+            uint32_t s2 = core_generators[core_id].s[2];
+            uint32_t s3 = core_generators[core_id].s[3];
             uint32_t l_max_u32 = float_as_uint(l_max);
             uint32_t r_max_u32 = float_as_uint(r_max);
             std::vector<uint32_t> c_args = {
                 current_batch_per_core, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
-                mu_u32, sigma_u32, seed_lo,
-                seed_hi, max_iterations,
+                mu_u32, sigma_u32, s0, s1, s2, s3,
+                max_iterations,
                 l_max_u32, r_max_u32
             };
             SetRuntimeArgs(program, compute, core, c_args);
@@ -462,6 +545,13 @@ int main(int argc, char** argv) {
         }
 
         accumulated_blocks += current_batch_total;
+
+        // Advance each core's PRNG state by 2^64 steps (~1.84e19 draws) for the next batch
+        if (!lockstep_verify) {
+            for (uint32_t c = 0; c < total_mesh_cores; c++) {
+                core_generators[c].jump();
+            }
+        }
 
         double curr_elapsed = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - sim_start).count();
         double curr_ber = accumulated_blocks > 0 ? static_cast<double>(accumulated_bit_errs) / (accumulated_blocks * (h_mat.N - P_punctured)) : 0.0;

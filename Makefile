@@ -53,6 +53,10 @@ test_unit_single_core: tests/test_unit_single_core.cpp
 sim_uncoded_bpsk: sim_uncoded_bpsk.cpp
 	$(CXX) -std=c++20 -O3 -Wall -Wextra -pthread $< -o $@
 
+# Standalone PRNG Jump Separation Test
+test_xoshiro_jump: tests/test_xoshiro_jump.cpp
+	$(CXX) -std=c++20 -O3 -Wall -Wextra $< -o $@
+
 
 # Execute single-core unit test under Tenstorrent ttsim emulator
 sim: test_ttsim

@@ -18,13 +18,11 @@ inline uint32_t splitmix32(uint32_t& x) {
 struct Xoshiro128Plus {
     uint32_t s[4];
 
-    void init(uint32_t seed_lo, uint32_t seed_hi) {
-        uint32_t sm_lo = seed_lo;
-        uint32_t sm_hi = seed_hi;
-        s[0] = splitmix32(sm_lo);
-        s[1] = splitmix32(sm_lo);
-        s[2] = splitmix32(sm_hi);
-        s[3] = splitmix32(sm_hi);
+    void init_state(uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3) {
+        s[0] = s0;
+        s[1] = s1;
+        s[2] = s2;
+        s[3] = s3;
         if ((s[0] | s[1] | s[2] | s[3]) == 0) {
             s[0] = 1;
         }
@@ -143,12 +141,14 @@ void kernel_main() {
     uint32_t max_check_deg = get_arg_val<uint32_t>(4);
     uint32_t mu_bits       = get_arg_val<uint32_t>(5);
     uint32_t sigma_bits    = get_arg_val<uint32_t>(6);
-    uint32_t seed_lo       = get_arg_val<uint32_t>(7);
-    uint32_t seed_hi       = get_arg_val<uint32_t>(8);
-    uint32_t max_iter      = get_arg_val<uint32_t>(9);
+    uint32_t s0            = get_arg_val<uint32_t>(7);
+    uint32_t s1            = get_arg_val<uint32_t>(8);
+    uint32_t s2            = get_arg_val<uint32_t>(9);
+    uint32_t s3            = get_arg_val<uint32_t>(10);
+    uint32_t max_iter      = get_arg_val<uint32_t>(11);
     if (max_iter == 0) max_iter = 16;
-    uint32_t l_max_bits    = get_arg_val<uint32_t>(10);
-    uint32_t r_max_bits    = get_arg_val<uint32_t>(11);
+    uint32_t l_max_bits    = get_arg_val<uint32_t>(12);
+    uint32_t r_max_bits    = get_arg_val<uint32_t>(13);
 
     float l_max = 0.0f;
     float r_max = 0.0f;
@@ -156,7 +156,7 @@ void kernel_main() {
     std::memcpy(&r_max, &r_max_bits, sizeof(float));
 
     Xoshiro128Plus rng;
-    rng.init(seed_lo, seed_hi);
+    rng.init_state(s0, s1, s2, s3);
 
     float mu_llr = 0.0f;
     float sigma_llr = 0.0f;

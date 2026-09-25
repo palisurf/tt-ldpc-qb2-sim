@@ -9,6 +9,7 @@ test_quantized_ar4ja
 test_bf16_amin
 sim_uncoded_bpsk
 test_clipping_sweep
+test_xoshiro_jump
 *.o
 *.so
 *.a
