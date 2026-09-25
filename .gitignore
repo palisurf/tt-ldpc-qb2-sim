@@ -7,6 +7,8 @@ test_ar4ja_host
 test_amin_star
 test_quantized_ar4ja
 test_bf16_amin
+sim_uncoded_bpsk
+test_clipping_sweep
 *.o
 *.so
 *.a
@@ -25,3 +27,20 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local private docs & results
+docs/*
+AGENTS.md
+
+Results/*.csv
+Results/*.png
+Results/*backup*/
+*.png
+
+# Whitelist validation artifacts for BPSK noise benchmark
+!Results/results_uncoded_bpsk_awgn.csv
+!Results/uncoded_bpsk_waterfall.png
+!docs/uncoded_bpsk_validation.md
+
+
+

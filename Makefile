@@ -49,6 +49,11 @@ test_ttsim: $(TTSIM_TEST_SRCS)
 test_unit_single_core: tests/test_unit_single_core.cpp
 	$(CXX) $(CXXFLAGS) $(DEFINES) $(INCLUDES) $< -o $@ $(LIBDIRS) $(LIBS)
 
+# Standalone High-Speed Uncoded BPSK AWGN Simulator
+sim_uncoded_bpsk: sim_uncoded_bpsk.cpp
+	$(CXX) -std=c++20 -O3 -Wall -Wextra -pthread $< -o $@
+
+
 # Execute single-core unit test under Tenstorrent ttsim emulator
 sim: test_ttsim
 	@if [ -z "$$TT_METAL_SIMULATOR" ]; then \
