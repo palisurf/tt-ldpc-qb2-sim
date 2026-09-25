@@ -71,6 +71,8 @@ def main():
     parser.add_argument("--output", type=str, default=None, help="Output CSV file path (defaults to auto-generated from parameters)")
     parser.add_argument("--single_core", action="store_true", help="Run on a single Tensix core only")
     parser.add_argument("--nms", action="store_true", help="Use Normalized Min-Sum (alpha=0.75) instead of default Approximate-Min*")
+    parser.add_argument("--l_max", type=float, default=0.0, help="Maximum variable node LLR magnitude (0.0 = unclipped)")
+    parser.add_argument("--r_max", type=float, default=0.0, help="Maximum check node message magnitude (0.0 = unclipped)")
     
     args = parser.parse_args()
 
@@ -100,10 +102,12 @@ def main():
                 matrix_base = matrix_base[:-len(ext)]
                 break
         core_str = "1core" if args.single_core else "440cores"
+        clip_str = f"_clipL{args.l_max:.1f}R{args.r_max:.1f}" if (args.l_max > 0.0 or args.r_max > 0.0) else ""
         output_filename = os.path.join(
             results_dir,
             f"results_{matrix_base}"
             f"_{algo_str}"
+            f"{clip_str}"
             f"_ebn0_{args.ebn0_start:.2f}_{args.ebn0_end:.2f}_step{args.ebn0_step:.2f}"
             f"_max{args.max_blocks_per_core}"
             f"_min{args.min_errors}"
@@ -122,6 +126,8 @@ def main():
     print(f"Stopping Criteria  : Min {args.min_errors} block errors OR max {args.max_blocks_per_core} blocks/core")
     print(f"Batch Size/Core    : {args.batch_size} blocks per core per evaluation step")
     print(f"Max Decoder Iters  : {args.max_iter}")
+    if args.l_max > 0.0 or args.r_max > 0.0:
+        print(f"LLR Clipping       : L_max={args.l_max:.2f}, R_max={args.r_max:.2f}")
     print(f"Output File        : {output_filename}")
     print("==========================================================\n")
 
@@ -149,6 +155,10 @@ def main():
             cmd.append("-n")
         if args.batch_size is not None:
             cmd.extend(["-b", str(args.batch_size)])
+        if args.l_max > 0.0:
+            cmd.extend(["-L", str(args.l_max)])
+        if args.r_max > 0.0:
+            cmd.extend(["-R", str(args.r_max)])
 
         try:
             proc = subprocess.Popen(

@@ -147,6 +147,13 @@ void kernel_main() {
     uint32_t seed_hi       = get_arg_val<uint32_t>(8);
     uint32_t max_iter      = get_arg_val<uint32_t>(9);
     if (max_iter == 0) max_iter = 16;
+    uint32_t l_max_bits    = get_arg_val<uint32_t>(10);
+    uint32_t r_max_bits    = get_arg_val<uint32_t>(11);
+
+    float l_max = 0.0f;
+    float r_max = 0.0f;
+    std::memcpy(&l_max, &l_max_bits, sizeof(float));
+    std::memcpy(&r_max, &r_max_bits, sizeof(float));
 
     Xoshiro128Plus rng;
     rng.init(seed_lo, seed_hi);
@@ -205,11 +212,19 @@ void kernel_main() {
                         l0, 
                         l1
                     );
+                    if (l_max > 0.0f) {
+                        if (l0 > l_max) l0 = l_max;
+                        else if (l0 < -l_max) l0 = -l_max;
+                        if (l1 > l_max) l1 = l_max;
+                        else if (l1 < -l_max) l1 = -l_max;
+                    }
                     channel_llrs[i] = fp32_to_bf16(l0);
                     channel_llrs[i + 1] = fp32_to_bf16(l1);
                 }
             } else {
-                uint16_t mu_bf = fp32_to_bf16(mu_llr);
+                float mu_val = mu_llr;
+                if (l_max > 0.0f && mu_val > l_max) mu_val = l_max;
+                uint16_t mu_bf = fp32_to_bf16(mu_val);
                 for (uint32_t i = 0; i < unpunctured_nodes; i++) {
                     channel_llrs[i] = mu_bf;
                 }
@@ -263,10 +278,14 @@ void kernel_main() {
                         uint32_t msg_sign = global_sign ^ node_sign;
 
                         float r_mag = alpha * current_min;
+                        if (r_max > 0.0f && r_mag > r_max) {
+                            r_mag = r_max;
+                        }
                         uint32_t r_u = float_as_uint(r_mag) | (msg_sign << 31);
                         float r_new = uint_as_float(r_u);
 
-                        channel_llrs[vn] = fp32_to_bf16(q_val[d] + r_new);
+                        float new_llr = q_val[d] + r_new;
+                        channel_llrs[vn] = fp32_to_bf16(new_llr);
                         r_msg[m][d] = fp32_to_bf16(r_new);
                     }
 #else
@@ -322,13 +341,17 @@ void kernel_main() {
                     for (uint32_t d = 0; d < actual_deg; d++) {
                         uint16_t vn = h_col_idx[m * max_check_deg + d];
                         float r_mag = (d == min_idx) ? r_mag_min : r_mag_all;
+                        if (r_max > 0.0f && r_mag > r_max) {
+                            r_mag = r_max;
+                        }
                         uint32_t node_sign = float_as_uint(q_val[d]) >> 31;
                         uint32_t msg_sign = global_sign ^ node_sign;
 
                         uint32_t r_u = float_as_uint(r_mag) | (msg_sign << 31);
                         float r_new = uint_as_float(r_u);
 
-                        channel_llrs[vn] = fp32_to_bf16(q_val[d] + r_new);
+                        float new_llr = q_val[d] + r_new;
+                        channel_llrs[vn] = fp32_to_bf16(new_llr);
                         r_msg[m][d] = fp32_to_bf16(r_new);
                     }
 #endif

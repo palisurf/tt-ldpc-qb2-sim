@@ -24,6 +24,12 @@ constexpr uint32_t MAX_M = 8192;
 constexpr uint32_t MAX_DEG = 12;
 constexpr uint32_t TILE_ELEMENTS = 1024;
 
+inline uint32_t float_as_uint(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
 struct ChinnMatrix {
     uint32_t N = 0;
     uint32_t M = 0;
@@ -192,13 +198,15 @@ int main(int argc, char** argv) {
     uint64_t max_blocks = 0;
     uint32_t batch_per_core = 1000; // Dispatch batch size per core for error threshold evaluation
     uint32_t max_iterations = 16;   // Max decoder iterations per codeword (default: 16)
+    float l_max = 0.0f;             // Max variable LLR magnitude (0.0 = unclipped)
+    float r_max = 0.0f;             // Max check message magnitude (0.0 = unclipped)
 
     bool single_core = false;
     bool lockstep_verify = false;
     bool use_nms = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:svn")) != -1) {
+    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:svnL:R:")) != -1) {
         switch (opt) {
             case 'c': chinn_file = optarg; break;
             case 'e': eb_n0_db = std::stod(optarg); break;
@@ -211,6 +219,8 @@ int main(int argc, char** argv) {
             case 's': single_core = true; break;
             case 'v': lockstep_verify = true; break;
             case 'n': use_nms = true; break;
+            case 'L': l_max = std::stof(optarg); break;
+            case 'R': r_max = std::stof(optarg); break;
             default: break;
         }
     }
@@ -253,6 +263,9 @@ int main(int argc, char** argv) {
               << blocks_per_core << " blocks/core (Batch size/core: " << batch_per_core 
               << ", max mesh blocks: " << max_blocks << ", max iters: " << max_iterations << ")" << std::endl;
     std::cout << "[CONFIG] Decoder algorithm: " << (use_nms ? "Normalized Min-Sum (alpha=0.75)" : "Approximate-Min* (Christopher Jones MILCOM 2003)") << std::endl;
+    if (l_max > 0.0f || r_max > 0.0f) {
+        std::cout << "[CONFIG] LLR Clipping: L_ch_max=" << l_max << ", R_max=" << r_max << std::endl;
+    }
 
     uint32_t tile_bytes = sizeof(bfloat16) * TILE_ELEMENTS;
     uint32_t h_bytes = h_mat.flattened_indices.size() * sizeof(uint16_t);
@@ -359,10 +372,13 @@ int main(int argc, char** argv) {
 
             uint32_t seed_lo = lockstep_verify ? 133742 : (1337 + core_id * 10007 + static_cast<uint32_t>(accumulated_blocks));
             uint32_t seed_hi = lockstep_verify ? 0x9E3779B9 : (core_id * 0x85EBCA6B + static_cast<uint32_t>(accumulated_blocks >> 32) + 0x12345678);
+            uint32_t l_max_u32 = float_as_uint(l_max);
+            uint32_t r_max_u32 = float_as_uint(r_max);
             std::vector<uint32_t> c_args = {
                 current_batch_per_core, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
                 mu_u32, sigma_u32, seed_lo,
-                seed_hi, max_iterations
+                seed_hi, max_iterations,
+                l_max_u32, r_max_u32
             };
             SetRuntimeArgs(program, compute, core, c_args);
         }
