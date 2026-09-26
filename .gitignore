@@ -18,6 +18,7 @@ test_xoshiro_jump
 .cache/
 generated/
 *.log
+*.deb
 scratchpad/
 scratch/
 __pycache__/
@@ -42,6 +43,9 @@ Results/*backup*/
 !Results/results_uncoded_bpsk_awgn.csv
 !Results/uncoded_bpsk_waterfall.png
 !docs/uncoded_bpsk_validation.md
+!docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.md
+!docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.html
+!docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.pdf
 
 
 

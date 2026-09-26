@@ -265,13 +265,14 @@ int main(int argc, char** argv) {
     uint32_t max_iterations = 16;   // Max decoder iterations per codeword (default: 16)
     float l_max = 0.0f;             // Max variable LLR magnitude (0.0 = unclipped)
     float r_max = 0.0f;             // Max check message magnitude (0.0 = unclipped)
+    float gamma_ratio = 0.0f;       // Proportional clipping factor (L_max = gamma * mu_llr)
 
     bool single_core = false;
     bool lockstep_verify = false;
     bool use_nms = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:svnL:R:")) != -1) {
+    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:svnL:R:G:")) != -1) {
         switch (opt) {
             case 'c': chinn_file = optarg; break;
             case 'e': eb_n0_db = std::stod(optarg); break;
@@ -286,6 +287,7 @@ int main(int argc, char** argv) {
             case 'n': use_nms = true; break;
             case 'L': l_max = std::stof(optarg); break;
             case 'R': r_max = std::stof(optarg); break;
+            case 'G': gamma_ratio = std::stof(optarg); break;
             default: break;
         }
     }
@@ -328,8 +330,20 @@ int main(int argc, char** argv) {
               << blocks_per_core << " blocks/core (Batch size/core: " << batch_per_core 
               << ", max mesh blocks: " << max_blocks << ", max iters: " << max_iterations << ")" << std::endl;
     std::cout << "[CONFIG] Decoder algorithm: " << (use_nms ? "Normalized Min-Sum (alpha=0.75)" : "Approximate-Min* (Christopher Jones MILCOM 2003)") << std::endl;
-    if (l_max > 0.0f || r_max > 0.0f) {
-        std::cout << "[CONFIG] LLR Clipping: L_ch_max=" << l_max << ", R_max=" << r_max << std::endl;
+
+    // True Punctured Code Rate: R = (N - M) / (N - P)
+    double rate = static_cast<double>(h_mat.N - h_mat.M) / static_cast<double>(h_mat.N - P_punctured);
+    double snr_lin = std::pow(10.0, eb_n0_db / 10.0);
+    float mu_llr = static_cast<float>(4.0 * rate * snr_lin);
+    float sigma_llr = static_cast<float>(std::sqrt(8.0 * rate * snr_lin));
+
+    if (gamma_ratio > 0.0f) {
+        l_max = gamma_ratio * mu_llr;
+        std::cout << "[CONFIG] LLR Clipping (Proportional): gamma=" << gamma_ratio 
+                  << " (mu_llr=" << mu_llr << ") -> L_ch_max=" << l_max 
+                  << ", R_max=" << r_max << std::endl;
+    } else if (l_max > 0.0f || r_max > 0.0f) {
+        std::cout << "[CONFIG] LLR Clipping (Fixed): L_ch_max=" << l_max << ", R_max=" << r_max << std::endl;
     }
 
     uint32_t tile_bytes = sizeof(bfloat16) * TILE_ELEMENTS;
@@ -359,12 +373,6 @@ int main(int argc, char** argv) {
 
     h_mat.flattened_indices.resize(h_cb_bytes / sizeof(uint16_t), 0xFFFF);
     EnqueueWriteMeshBuffer(cq, h_dram, h_mat.flattened_indices, false);
-
-    // True Punctured Code Rate: R = (N - M) / (N - P)
-    double rate = static_cast<double>(h_mat.N - h_mat.M) / static_cast<double>(h_mat.N - P_punctured);
-    double snr_lin = std::pow(10.0, eb_n0_db / 10.0);
-    float mu_llr = static_cast<float>(4.0 * rate * snr_lin);
-    float sigma_llr = static_cast<float>(std::sqrt(8.0 * rate * snr_lin));
 
     uint32_t mu_u32 = 0;
     uint32_t sigma_u32 = 0;

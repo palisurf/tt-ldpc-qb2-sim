@@ -164,6 +164,13 @@ To run with Normalized Min-Sum ($\alpha = 0.75$), append `--nms` or `-n`:
 
 ---
 
+## Architecture & Roadmap
+
+For in-depth hardware design details, memory layouts, experimental findings (including the resolution of the 2.0 dB knee and 2.40 dB error-floor analysis), and the multi-phase throughput scaling roadmap (Multi-TRISC, Double Buffering, SWAR, and SFPU Vectorization), refer to:
+- [Architecture & Throughput Roadmap](docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.md)
+
+---
+
 ## References
 
 1. **C. Jones, E. Valles, M. Smith, and J. Villasenor**, *"Approximate-Min\* constraint node updating for LDPC and turbo decoding,"* in *Proceedings of the IEEE Military Communications Conference (MILCOM)*, Boston, MA, USA, Oct. 2003, vol. 1, pp. 157–162. doi: [10.1109/MILCOM.2003.1290100](https://doi.org/10.1109/MILCOM.2003.1290100).
