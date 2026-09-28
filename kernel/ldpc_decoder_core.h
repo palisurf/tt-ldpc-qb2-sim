@@ -238,19 +238,23 @@ inline void run_ldpc_worker(
         }
 
         // STEP 3: Row-Layered Decoder (Approximate-Min* by default, or Normalized Min-Sum)
+        uint32_t row_stride = max_check_deg + 1;
         for (uint32_t iter = 0; iter < max_iter; iter++) {
             for (uint32_t m = 0; m < M_check_nodes; m++) {
+                uint32_t row_base = m * row_stride;
+                uint32_t deg = h_col_idx[row_base];
+                const uint16_t* vn_list = &h_col_idx[row_base + 1];
+                uint16_t vn_cache[MAX_LOCAL_DEG];
+
 #ifdef USE_NORMALIZED_MIN_SUM
                 // --- Algorithm: Normalized Min-Sum (alpha = 0.75) ---
                 float min1 = 999.0f, min2 = 999.0f;
                 uint32_t min_idx = 0, global_sign = 0;
                 float q_val[MAX_LOCAL_DEG];
-                uint32_t actual_deg = 0;
 
-                for (uint32_t d = 0; d < max_check_deg; d++) {
-                    uint16_t vn = h_col_idx[m * max_check_deg + d];
-                    if (vn == 0xFFFF) break; // Sentinel check
-                    actual_deg++;
+                for (uint32_t d = 0; d < deg; d++) {
+                    uint16_t vn = vn_list[d];
+                    vn_cache[d] = vn;
 
                     q_val[d] = bf16_to_fp32(channel_llrs[vn]) - bf16_to_fp32(r_msg[m][d]);
 
@@ -266,8 +270,8 @@ inline void run_ldpc_worker(
                     }
                 }
 
-                for (uint32_t d = 0; d < actual_deg; d++) {
-                    uint16_t vn = h_col_idx[m * max_check_deg + d];
+                for (uint32_t d = 0; d < deg; d++) {
+                    uint16_t vn = vn_cache[d];
                     float current_min = (d == min_idx) ? min2 : min1;
                     uint32_t node_sign = float_as_uint(q_val[d]) >> 31;
                     uint32_t msg_sign = global_sign ^ node_sign;
@@ -285,19 +289,14 @@ inline void run_ldpc_worker(
                 }
 #else
                 // --- Algorithm: Christopher Jones Approximate-Min* (MILCOM 2003) ---
-                // True recursive formulation:
-                // 1. Find edge with minimum magnitude (min_idx, min_mag)
-                // 2. Accumulate recursion of ALL edges OTHER than min_idx with PWL correction -> m_others (sent on min_idx)
-                // 3. Combine m_others with min_mag via final AMin* step -> m_all (sent on all other edges)
+                // Pre-loaded row degree: zero sentinels, zero 0xFFFF branches
                 uint32_t min_idx = 0, global_sign = 0;
                 float q_val[MAX_LOCAL_DEG];
-                uint32_t actual_deg = 0;
                 float min_mag = 9999.0f;
 
-                for (uint32_t d = 0; d < max_check_deg; d++) {
-                    uint16_t vn = h_col_idx[m * max_check_deg + d];
-                    if (vn == 0xFFFF) break; // Sentinel check
-                    actual_deg++;
+                for (uint32_t d = 0; d < deg; d++) {
+                    uint16_t vn = vn_list[d];
+                    vn_cache[d] = vn; // Register cache: zero SRAM reads in writeback
 
                     q_val[d] = bf16_to_fp32(channel_llrs[vn]) - bf16_to_fp32(r_msg[m][d]);
 
@@ -312,42 +311,51 @@ inline void run_ldpc_worker(
                     }
                 }
 
-                // Step 2: Recursive AMin* across all edges other than the identified minimum edge
-                uint32_t first_idx = (min_idx == 0) ? 1 : 0;
-                float m_others = (actual_deg > 1) ? uint_as_float(float_as_uint(q_val[first_idx]) & 0x7FFFFFFF) : min_mag;
+                float r_mag_min, r_mag_all;
+                if (deg == 3) {
+                    // Fully unrolled branch-free fast path for degree-3 check nodes
+                    float other0 = (min_idx == 0) ? uint_as_float(float_as_uint(q_val[1]) & 0x7FFFFFFF) : uint_as_float(float_as_uint(q_val[0]) & 0x7FFFFFFF);
+                    float other1 = (min_idx == 2) ? uint_as_float(float_as_uint(q_val[1]) & 0x7FFFFFFF) : uint_as_float(float_as_uint(q_val[2]) & 0x7FFFFFFF);
+                    float diff = (other0 > other1) ? (other0 - other1) : (other1 - other0);
+                    float m_min = (other0 < other1) ? other0 : other1;
+                    float corr = (diff >= 2.0f) ? 0.0f : ((diff < 0.5f) ? (0.69315f - 0.40f * diff) : (0.49315f - 0.328f * (diff - 0.5f)));
+                    float m_others = (m_min > corr) ? (m_min - corr) : 0.0f;
 
-                for (uint32_t d = first_idx + 1; d < actual_deg; d++) {
-                    if (d == min_idx) continue;
-                    float abs_qd = uint_as_float(float_as_uint(q_val[d]) & 0x7FFFFFFF);
-                    float diff = (m_others > abs_qd) ? (m_others - abs_qd) : (abs_qd - m_others);
-                    float m_curr = (m_others < abs_qd) ? m_others : abs_qd;
-                    float corr = 0.0f;
-                    if (diff < 0.5f) {
-                        corr = 0.69315f - 0.40f * diff;
-                    } else if (diff < 2.0f) {
-                        corr = 0.49315f - 0.328f * (diff - 0.5f);
+                    float diff_all = (m_others > min_mag) ? (m_others - min_mag) : (min_mag - m_others);
+                    float m_all_min = (m_others < min_mag) ? m_others : min_mag;
+                    float corr_all = (diff_all >= 2.0f) ? 0.0f : ((diff_all < 0.5f) ? (0.69315f - 0.40f * diff_all) : (0.49315f - 0.328f * (diff_all - 0.5f)));
+                    float m_all = (m_all_min > corr_all) ? (m_all_min - corr_all) : 0.0f;
+
+                    r_mag_min = m_others;
+                    r_mag_all = m_all;
+                } else {
+                    // General path for arbitrary degree graphs
+                    uint32_t first_idx = (min_idx == 0) ? 1 : 0;
+                    float m_others = (deg > 1) ? uint_as_float(float_as_uint(q_val[first_idx]) & 0x7FFFFFFF) : min_mag;
+
+                    for (uint32_t d = first_idx + 1; d < deg; d++) {
+                        if (d == min_idx) continue;
+                        float abs_qd = uint_as_float(float_as_uint(q_val[d]) & 0x7FFFFFFF);
+                        float diff = (m_others > abs_qd) ? (m_others - abs_qd) : (abs_qd - m_others);
+                        float m_curr = (m_others < abs_qd) ? m_others : abs_qd;
+                        float corr = (diff >= 2.0f) ? 0.0f : ((diff < 0.5f) ? (0.69315f - 0.40f * diff) : (0.49315f - 0.328f * (diff - 0.5f)));
+                        float next_m = m_curr - corr;
+                        m_others = (next_m > 0.0f) ? next_m : 0.0f;
                     }
-                    float next_m = m_curr - corr;
-                    m_others = (next_m > 0.0f) ? next_m : 0.0f;
+
+                    float diff_all = (m_others > min_mag) ? (m_others - min_mag) : (min_mag - m_others);
+                    float m_all_curr = (m_others < min_mag) ? m_others : min_mag;
+                    float corr_all = (diff_all >= 2.0f) ? 0.0f : ((diff_all < 0.5f) ? (0.69315f - 0.40f * diff_all) : (0.49315f - 0.328f * (diff_all - 0.5f)));
+                    float next_m_all = m_all_curr - corr_all;
+                    float m_all = (next_m_all > 0.0f) ? next_m_all : 0.0f;
+
+                    r_mag_min = m_others;
+                    r_mag_all = m_all;
                 }
 
-                // Step 3: Final closure: combine m_others with the minimum edge magnitude
-                float diff_all = (m_others > min_mag) ? (m_others - min_mag) : (min_mag - m_others);
-                float m_all_curr = (m_others < min_mag) ? m_others : min_mag;
-                float corr_all = 0.0f;
-                if (diff_all < 0.5f) {
-                    corr_all = 0.69315f - 0.40f * diff_all;
-                } else if (diff_all < 2.0f) {
-                    corr_all = 0.49315f - 0.328f * (diff_all - 0.5f);
-                }
-                float next_m_all = m_all_curr - corr_all;
-                float m_all = (next_m_all > 0.0f) ? next_m_all : 0.0f;
-
-                float r_mag_min = m_others;
-                float r_mag_all = m_all;
-
-                for (uint32_t d = 0; d < actual_deg; d++) {
-                    uint16_t vn = h_col_idx[m * max_check_deg + d];
+                // Step 4: Writeback with zero L1 memory reads for vn
+                for (uint32_t d = 0; d < deg; d++) {
+                    uint16_t vn = vn_cache[d];
                     float r_mag = (d == min_idx) ? r_mag_min : r_mag_all;
                     if (r_max > 0.0f && r_mag > r_max) {
                         r_mag = r_max;
@@ -366,21 +374,25 @@ inline void run_ldpc_worker(
             }
 
             // STEP 4: Inline Syndrome Check (H * c^T == 0)
-            uint32_t syndrome_errors = 0;
-            for (uint32_t m = 0; m < M_check_nodes; m++) {
-                uint32_t row_parity = 0;
-                for (uint32_t d = 0; d < max_check_deg; d++) {
-                    uint16_t vn = h_col_idx[m * max_check_deg + d];
-                    if (vn == 0xFFFF) break;
-                    row_parity ^= (channel_llrs[vn] >> 15);
+            // Adaptive check: bypass iterations 0 and 1
+            if (iter >= 2) {
+                uint32_t syndrome_errors = 0;
+                for (uint32_t m = 0; m < M_check_nodes; m++) {
+                    uint32_t r_base = m * row_stride;
+                    uint32_t d_count = h_col_idx[r_base];
+                    const uint16_t* v_nodes = &h_col_idx[r_base + 1];
+                    uint32_t row_parity = 0;
+                    for (uint32_t d = 0; d < d_count; d++) {
+                        row_parity ^= (channel_llrs[v_nodes[d]] >> 15);
+                    }
+                    syndrome_errors |= row_parity;
+                    if (syndrome_errors != 0) break;
                 }
-                syndrome_errors |= row_parity;
-                if (syndrome_errors != 0) break;
-            }
 
-            if (syndrome_errors == 0) {
-                if (cw == 0) cw0_iters = iter + 1;
-                break; // Early termination on valid codeword
+                if (syndrome_errors == 0) {
+                    if (cw == 0) cw0_iters = iter + 1;
+                    break; // Early termination on valid codeword
+                }
             }
         }
         if (cw == 0 && cw0_iters == 0) cw0_iters = max_iter;

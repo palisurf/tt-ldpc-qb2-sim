@@ -179,10 +179,12 @@ ChinnMatrix parse_chinn_out(const std::string& filepath) {
                                  ") exceeds MAX_DEG (" + std::to_string(MAX_DEG) + ")");
     }
 
-    chinn.flattened_indices.assign(chinn.M * chinn.max_check_deg, 0xFFFF);
+    uint32_t stride = chinn.max_check_deg + 1;
+    chinn.flattened_indices.assign(chinn.M * stride, 0xFFFF);
     for (uint32_t m = 0; m < chinn.M; m++) {
+        chinn.flattened_indices[m * stride] = static_cast<uint16_t>(check_nodes[m].size());
         for (size_t d = 0; d < check_nodes[m].size(); d++) {
-            chinn.flattened_indices[m * chinn.max_check_deg + d] = check_nodes[m][d];
+            chinn.flattened_indices[m * stride + 1 + d] = check_nodes[m][d];
         }
     }
 
@@ -235,19 +237,21 @@ ChinnMatrix parse_chinn(const std::string& filepath) {
         throw std::runtime_error("Matrix dimensions exceed supported device limits");
     }
 
-    chinn.flattened_indices.assign(chinn.M * chinn.max_check_deg, 0xFFFF); // Sentinel initialized
+    uint32_t stride = chinn.max_check_deg + 1;
+    chinn.flattened_indices.assign(chinn.M * stride, 0xFFFF); // Sentinel initialized
 
     for (uint32_t m = 0; m < chinn.M; m++) {
         if (!get_clean_line()) throw std::runtime_error("Unexpected EOF reading check node row " + std::to_string(m));
         std::stringstream row_ss(line);
         uint32_t deg = 0;
         row_ss >> deg;
+        chinn.flattened_indices[m * stride] = static_cast<uint16_t>(deg);
         for (uint32_t d = 0; d < deg; d++) {
             uint32_t vn_idx = 0;
             row_ss >> vn_idx;
             if (vn_idx > 0) vn_idx -= 1; // Convert 1-indexed to 0-indexed
             if (d < chinn.max_check_deg) {
-                chinn.flattened_indices[m * chinn.max_check_deg + d] = static_cast<uint16_t>(vn_idx);
+                chinn.flattened_indices[m * stride + 1 + d] = static_cast<uint16_t>(vn_idx);
             }
         }
     }
