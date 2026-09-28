@@ -189,17 +189,44 @@ int main() {
     std::memcpy(&mu_u32, &mu_llr, sizeof(float));
     std::memcpy(&sigma_u32, &sigma_llr, sizeof(float));
 
-    std::vector<uint32_t> r_args = {static_cast<uint32_t>(h_dram->address()), 0, h_bytes, 1};
+    uint32_t num_test_cws = 100;
+    uint32_t b_base   = num_test_cws / 5;
+    uint32_t b_rem    = num_test_cws % 5;
+    uint32_t b_brisc  = b_base;
+    uint32_t b_ncrisc = b_base;
+    uint32_t b_trisc0 = b_base;
+    uint32_t b_trisc1 = b_base;
+    uint32_t b_trisc2 = b_base + b_rem;
+
+    uint32_t s0 = 0x12345678, s1 = 0x87654321, s2 = 0xabcdef01, s3 = 0x10fedcba;
+    float l_max = 4.2f;
+    float r_max = 50.0f;
+    uint32_t l_max_u32 = 0, r_max_u32 = 0;
+    std::memcpy(&l_max_u32, &l_max, sizeof(float));
+    std::memcpy(&r_max_u32, &r_max, sizeof(float));
+    uint32_t max_iterations = 16;
+
+    std::vector<uint32_t> r_args = {
+        static_cast<uint32_t>(h_dram->address()), 0, h_bytes, 1,
+        b_brisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+        mu_u32, sigma_u32, s0, s1, s2, s3,
+        max_iterations, l_max_u32, r_max_u32
+    };
     SetRuntimeArgs(program, reader, core, r_args);
 
-    std::vector<uint32_t> w_args = {static_cast<uint32_t>(stats_dram->address()), 0};
+    std::vector<uint32_t> w_args = {
+        static_cast<uint32_t>(stats_dram->address()), 0,
+        b_ncrisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+        mu_u32, sigma_u32, s0, s1, s2, s3,
+        max_iterations, l_max_u32, r_max_u32
+    };
     SetRuntimeArgs(program, writer, core, w_args);
 
-    uint32_t num_test_cws = 100;
     std::vector<uint32_t> c_args = {
-        num_test_cws, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
-        mu_u32, sigma_u32, 133742,
-        0x9E3779B9, 16
+        b_trisc0, b_trisc1, b_trisc2,
+        h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+        mu_u32, sigma_u32, s0, s1, s2, s3,
+        max_iterations, l_max_u32, r_max_u32
     };
     SetRuntimeArgs(program, compute, core, c_args);
 

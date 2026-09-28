@@ -103,6 +103,22 @@ while [[ $# -gt 0 ]]; do
             FORWARD_ARGS+=("--nms")
             shift
             ;;
+        --max_blocks|-m)
+            FORWARD_ARGS+=("--max_blocks" "$2")
+            shift 2
+            ;;
+        --min_errors|-t)
+            MIN_ERRORS="$2"
+            shift 2
+            ;;
+        --batch_size|-b)
+            BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --max_blocks_per_core|-k)
+            MAX_BLOCKS_PER_CORE="$2"
+            shift 2
+            ;;
         --l_max|-L)
             FORWARD_ARGS+=("--l_max" "$2")
             shift 2

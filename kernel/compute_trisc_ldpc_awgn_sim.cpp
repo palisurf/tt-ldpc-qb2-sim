@@ -60,8 +60,8 @@ void kernel_main() {
         mailbox_write(ckernel::ThreadId::PackThreadId, 1);
 
         // Execute Worker 2 (TRISC0)
-        uint16_t* channel_llrs = reinterpret_cast<uint16_t*>(cb0_base + 2 * LLR_WORKER_STRIDE_BYTES);
-        uint16_t* r_msg = reinterpret_cast<uint16_t*>(cb1_base + 2 * R_WORKER_STRIDE_BYTES);
+        uint32_t* channel_llrs = reinterpret_cast<uint32_t*>(cb0_base + 2 * LLR_WORKER_STRIDE_BYTES);
+        uint32_t* r_msg = reinterpret_cast<uint32_t*>(cb1_base + 2 * R_WORKER_STRIDE_BYTES);
         const uint16_t* h_col_idx = reinterpret_cast<const uint16_t*>(cb2_base);
         uint32_t* stats_out = reinterpret_cast<uint32_t*>(cb16_base + WORKER_STATS_OFFSET + 2 * 16);
 
@@ -98,8 +98,8 @@ void kernel_main() {
         mailbox_read(ckernel::ThreadId::UnpackThreadId);
 
         // Execute Worker 3 (TRISC1)
-        uint16_t* channel_llrs = reinterpret_cast<uint16_t*>(cb0_base + 3 * LLR_WORKER_STRIDE_BYTES);
-        uint16_t* r_msg = reinterpret_cast<uint16_t*>(cb1_base + 3 * R_WORKER_STRIDE_BYTES);
+        uint32_t* channel_llrs = reinterpret_cast<uint32_t*>(cb0_base + 3 * LLR_WORKER_STRIDE_BYTES);
+        uint32_t* r_msg = reinterpret_cast<uint32_t*>(cb1_base + 3 * R_WORKER_STRIDE_BYTES);
         const uint16_t* h_col_idx = reinterpret_cast<const uint16_t*>(cb2_base);
         uint32_t* stats_out = reinterpret_cast<uint32_t*>(cb16_base + WORKER_STATS_OFFSET + 3 * 16);
 
@@ -134,8 +134,8 @@ void kernel_main() {
         mailbox_read(ckernel::ThreadId::UnpackThreadId);
 
         // Execute Worker 4 (TRISC2)
-        uint16_t* channel_llrs = reinterpret_cast<uint16_t*>(cb0_base + 4 * LLR_WORKER_STRIDE_BYTES);
-        uint16_t* r_msg = reinterpret_cast<uint16_t*>(cb1_base + 4 * R_WORKER_STRIDE_BYTES);
+        uint32_t* channel_llrs = reinterpret_cast<uint32_t*>(cb0_base + 4 * LLR_WORKER_STRIDE_BYTES);
+        uint32_t* r_msg = reinterpret_cast<uint32_t*>(cb1_base + 4 * R_WORKER_STRIDE_BYTES);
         const uint16_t* h_col_idx = reinterpret_cast<const uint16_t*>(cb2_base);
         uint32_t* stats_out = reinterpret_cast<uint32_t*>(cb16_base + WORKER_STATS_OFFSET + 4 * 16);
 

@@ -53,8 +53,8 @@ void kernel_main() {
     uint32_t cb2_base = get_read_ptr(tt::CBIndex::c_2);
     uint32_t cb16_base = get_read_ptr(tt::CBIndex::c_16);
 
-    uint16_t* channel_llrs = reinterpret_cast<uint16_t*>(cb0_base + 1 * LLR_WORKER_STRIDE_BYTES);
-    uint16_t* r_msg = reinterpret_cast<uint16_t*>(cb1_base + 1 * R_WORKER_STRIDE_BYTES);
+    uint32_t* channel_llrs = reinterpret_cast<uint32_t*>(cb0_base + 1 * LLR_WORKER_STRIDE_BYTES);
+    uint32_t* r_msg = reinterpret_cast<uint32_t*>(cb1_base + 1 * R_WORKER_STRIDE_BYTES);
     const uint16_t* h_col_idx = reinterpret_cast<const uint16_t*>(cb2_base);
     uint32_t* stats_out = reinterpret_cast<uint32_t*>(cb16_base + WORKER_STATS_OFFSET + 1 * 16);
 

@@ -10,6 +10,7 @@ test_bf16_amin
 sim_uncoded_bpsk
 test_clipping_sweep
 test_xoshiro_jump
+test_freeze_host
 *.o
 *.so
 *.a

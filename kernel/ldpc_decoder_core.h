@@ -5,8 +5,8 @@
 
 // Memory layout constants for 5 concurrent RISC-V workers per Tensix core
 constexpr uint32_t NUM_WORKERS              = 5;
-constexpr uint32_t LLR_WORKER_STRIDE_BYTES  = 6144;   // 6 KB per worker (2560 * 2 = 5120 bytes) -> 5 * 6KB = 30 KB <= 32 KB CB0
-constexpr uint32_t R_WORKER_STRIDE_BYTES    = 25600;  // 25 KB per worker (1536 * 8 * 2 = 24576 bytes) -> 5 * 25KB = 125 KB <= 128 KB CB1
+constexpr uint32_t LLR_WORKER_STRIDE_BYTES  = 12288;  // 12 KB per worker (2560 * 4 = 10240 bytes) -> 5 * 12KB = 60 KB <= 64 KB CB0
+constexpr uint32_t R_WORKER_STRIDE_BYTES    = 51200;  // 50 KB per worker (1536 * 8 * 4 = 49152 bytes) -> 5 * 50KB = 250 KB <= 256 KB CB1
 constexpr uint32_t MAX_DEG_STRIDE           = 8;      // Support graphs up to check degree 8
 constexpr uint32_t WORKER_STATS_OFFSET      = 64;     // Offset in CB16 for 5 workers * 4 words = 80 bytes
 
@@ -151,12 +151,66 @@ inline void generate_awgn_llr_pair(
     llr1 = mu_llr + sigma_llr * (v2 * factor);
 }
 
-// Unified LDPC decoding worker executed on any of the 5 RISC-V processors:
+// True Recursive Approximate-Min* (MILCOM 2003) for degree-3 check nodes
+inline void compute_amin_star_deg3(
+    const float* q_val, uint32_t min_idx, float min_mag,
+    float& r_mag_min, float& r_mag_all
+) {
+    float other0 = (min_idx == 0) ? uint_as_float(float_as_uint(q_val[1]) & 0x7FFFFFFF) : uint_as_float(float_as_uint(q_val[0]) & 0x7FFFFFFF);
+    float other1 = (min_idx == 2) ? uint_as_float(float_as_uint(q_val[1]) & 0x7FFFFFFF) : uint_as_float(float_as_uint(q_val[2]) & 0x7FFFFFFF);
+    float diff = (other0 > other1) ? (other0 - other1) : (other1 - other0);
+    float m_min = (other0 < other1) ? other0 : other1;
+    float corr = (diff >= 2.0f) ? 0.0f : ((diff < 0.5f) ? (0.69315f - 0.40f * diff) : (0.49315f - 0.328f * (diff - 0.5f)));
+    float m_others = (m_min > corr) ? (m_min - corr) : 0.0f;
+
+    float diff_all = (m_others > min_mag) ? (m_others - min_mag) : (min_mag - m_others);
+    float m_all_min = (m_others < min_mag) ? m_others : min_mag;
+    float corr_all = (diff_all >= 2.0f) ? 0.0f : ((diff_all < 0.5f) ? (0.69315f - 0.40f * diff_all) : (0.49315f - 0.328f * (diff_all - 0.5f)));
+    float m_all = (m_all_min > corr_all) ? (m_all_min - corr_all) : 0.0f;
+
+    r_mag_min = m_others;
+    r_mag_all = m_all;
+}
+
+// True Recursive Approximate-Min* (MILCOM 2003) for arbitrary-degree check nodes
+inline void compute_amin_star_general(
+    const float* q_val, uint32_t deg, uint32_t min_idx, float min_mag,
+    float& r_mag_min, float& r_mag_all
+) {
+    uint32_t first_idx = (min_idx == 0) ? 1 : 0;
+    float m_others = (deg > 1) ? uint_as_float(float_as_uint(q_val[first_idx]) & 0x7FFFFFFF) : min_mag;
+
+    for (uint32_t d = first_idx + 1; d < deg; d++) {
+        if (d == min_idx) continue;
+        float abs_qd = uint_as_float(float_as_uint(q_val[d]) & 0x7FFFFFFF);
+        float diff = (m_others > abs_qd) ? (m_others - abs_qd) : (abs_qd - m_others);
+        float m_curr = (m_others < abs_qd) ? m_others : abs_qd;
+        float corr = (diff >= 2.0f) ? 0.0f : ((diff < 0.5f) ? (0.69315f - 0.40f * diff) : (0.49315f - 0.328f * (diff - 0.5f)));
+        float next_m = m_curr - corr;
+        m_others = (next_m > 0.0f) ? next_m : 0.0f;
+    }
+
+    float diff_all = (m_others > min_mag) ? (m_others - min_mag) : (min_mag - m_others);
+    float m_all_curr = (m_others < min_mag) ? m_others : min_mag;
+    float corr_all = (diff_all >= 2.0f) ? 0.0f : ((diff_all < 0.5f) ? (0.69315f - 0.40f * diff_all) : (0.49315f - 0.328f * (diff_all - 0.5f)));
+    float next_m_all = m_all_curr - corr_all;
+    float m_all = (next_m_all > 0.0f) ? next_m_all : 0.0f;
+
+    r_mag_min = m_others;
+    r_mag_all = m_all;
+}
+
+// Unified 2-Codeword Interleaved LDPC decoding worker executed on any of the 5 RISC-V processors:
 // Worker 0: BRISC (DataMovement 0)
 // Worker 1: NCRISC (DataMovement 1)
 // Worker 2: TRISC0 (Compute UNPACK)
 // Worker 3: TRISC1 (Compute MATH)
 // Worker 4: TRISC2 (Compute PACK)
+//
+// Processes pairs of codewords packed into 32-bit words:
+// [15:0]  = Codeword 0 (bfloat16)
+// [31:16] = Codeword 1 (bfloat16)
+// Incorporates in-place state freezing upon per-codeword convergence to eliminate post-convergence quantization drift.
 inline void run_ldpc_worker(
     uint32_t worker_id,
     uint32_t num_codewords,
@@ -171,8 +225,8 @@ inline void run_ldpc_worker(
     float r_max,
     uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3,
     const uint16_t* h_col_idx,
-    uint16_t* channel_llrs,
-    uint16_t* r_msg_base,
+    uint32_t* channel_llrs_pair,
+    uint32_t* r_msg_base,
     uint32_t* stats_out
 ) {
     if (num_codewords == 0) {
@@ -192,7 +246,7 @@ inline void run_ldpc_worker(
 
     constexpr uint32_t MAX_LOCAL_DEG = 12;
     constexpr float alpha            = 0.75f;
-    auto* r_msg = reinterpret_cast<uint16_t(*)[MAX_DEG_STRIDE]>(r_msg_base);
+    auto* r_msg = reinterpret_cast<uint32_t(*)[MAX_DEG_STRIDE]>(r_msg_base);
 
     uint32_t unpunctured_nodes  = N_var_nodes - P_punctured;
     uint32_t total_bit_errors   = 0;
@@ -200,34 +254,45 @@ inline void run_ldpc_worker(
     uint32_t cw0_iters          = 0;
     uint32_t sample_llr         = 0;
 
-    for (uint32_t cw = 0; cw < num_codewords; cw++) {
+    for (uint32_t cw = 0; cw < num_codewords; cw += 2) {
+        bool has_cw1 = (cw + 1 < num_codewords);
 
         // STEP 1: AWGN Noise Generation (Trigonometry-free Polar Box-Muller)
         if (sigma_llr > 0.0f) {
             for (uint32_t i = 0; i < unpunctured_nodes; i += 2) {
-                float l0 = 0.0f, l1 = 0.0f;
-                generate_awgn_llr_pair(rng, mu_llr, sigma_llr, l0, l1);
+                float l0_cw0 = 0.0f, l1_cw0 = 0.0f;
+                generate_awgn_llr_pair(rng, mu_llr, sigma_llr, l0_cw0, l1_cw0);
                 if (l_max > 0.0f) {
-                    if (l0 > l_max) l0 = l_max;
-                    else if (l0 < -l_max) l0 = -l_max;
-                    if (l1 > l_max) l1 = l_max;
-                    else if (l1 < -l_max) l1 = -l_max;
+                    if (l0_cw0 > l_max) l0_cw0 = l_max; else if (l0_cw0 < -l_max) l0_cw0 = -l_max;
+                    if (l1_cw0 > l_max) l1_cw0 = l_max; else if (l1_cw0 < -l_max) l1_cw0 = -l_max;
                 }
-                channel_llrs[i]     = fp32_to_bf16(l0);
-                channel_llrs[i + 1] = fp32_to_bf16(l1);
+                float l0_cw1 = 0.0f, l1_cw1 = 0.0f;
+                generate_awgn_llr_pair(rng, mu_llr, sigma_llr, l0_cw1, l1_cw1);
+                if (l_max > 0.0f) {
+                    if (l0_cw1 > l_max) l0_cw1 = l_max; else if (l0_cw1 < -l_max) l0_cw1 = -l_max;
+                    if (l1_cw1 > l_max) l1_cw1 = l_max; else if (l1_cw1 < -l_max) l1_cw1 = -l_max;
+                }
+                uint16_t bf_l0_cw0 = fp32_to_bf16(l0_cw0);
+                uint16_t bf_l1_cw0 = fp32_to_bf16(l1_cw0);
+                uint16_t bf_l0_cw1 = fp32_to_bf16(l0_cw1);
+                uint16_t bf_l1_cw1 = fp32_to_bf16(l1_cw1);
+
+                channel_llrs_pair[i]     = static_cast<uint32_t>(bf_l0_cw0) | (static_cast<uint32_t>(bf_l0_cw1) << 16);
+                channel_llrs_pair[i + 1] = static_cast<uint32_t>(bf_l1_cw0) | (static_cast<uint32_t>(bf_l1_cw1) << 16);
             }
         } else {
             float mu_val = mu_llr;
             if (l_max > 0.0f && mu_val > l_max) mu_val = l_max;
             uint16_t mu_bf = fp32_to_bf16(mu_val);
+            uint32_t mu_pair = static_cast<uint32_t>(mu_bf) | (static_cast<uint32_t>(mu_bf) << 16);
             for (uint32_t i = 0; i < unpunctured_nodes; i++) {
-                channel_llrs[i] = mu_bf;
+                channel_llrs_pair[i] = mu_pair;
             }
         }
 
         // STEP 2: Puncturing (Neutral LLR = 0)
         for (uint32_t i = unpunctured_nodes; i < N_var_nodes; i++) {
-            channel_llrs[i] = 0;
+            channel_llrs_pair[i] = 0;
         }
 
         // Reset check-node memory
@@ -237,9 +302,14 @@ inline void run_ldpc_worker(
             }
         }
 
-        // STEP 3: Row-Layered Decoder (Approximate-Min* by default, or Normalized Min-Sum)
+        // STEP 3: Row-Layered Decoder with In-Place Freezing
         uint32_t row_stride = max_check_deg + 1;
+        bool done0 = false;
+        bool done1 = !has_cw1;
+
         for (uint32_t iter = 0; iter < max_iter; iter++) {
+            if (done0 && done1) break;
+
             for (uint32_t m = 0; m < M_check_nodes; m++) {
                 uint32_t row_base = m * row_stride;
                 uint32_t deg = h_col_idx[row_base];
@@ -248,127 +318,188 @@ inline void run_ldpc_worker(
 
 #ifdef USE_NORMALIZED_MIN_SUM
                 // --- Algorithm: Normalized Min-Sum (alpha = 0.75) ---
-                float min1 = 999.0f, min2 = 999.0f;
-                uint32_t min_idx = 0, global_sign = 0;
-                float q_val[MAX_LOCAL_DEG];
+                float min1_0 = 999.0f, min2_0 = 999.0f;
+                uint32_t min_idx0 = 0, global_sign0 = 0;
+                float q_val0[MAX_LOCAL_DEG];
+
+                float min1_1 = 999.0f, min2_1 = 999.0f;
+                uint32_t min_idx1 = 0, global_sign1 = 0;
+                float q_val1[MAX_LOCAL_DEG];
 
                 for (uint32_t d = 0; d < deg; d++) {
                     uint16_t vn = vn_list[d];
                     vn_cache[d] = vn;
 
-                    q_val[d] = bf16_to_fp32(channel_llrs[vn]) - bf16_to_fp32(r_msg[m][d]);
+                    uint32_t llr_pair = channel_llrs_pair[vn];
+                    uint32_t r_pair = r_msg[m][d];
 
-                    uint32_t q_u = float_as_uint(q_val[d]);
-                    uint32_t sign = q_u >> 31;
-                    global_sign ^= sign;
-                    float abs_q = uint_as_float(q_u & 0x7FFFFFFF);
+                    if (!done0) {
+                        float llr0 = uint_as_float(llr_pair << 16);
+                        float r0   = uint_as_float(r_pair << 16);
+                        float q0   = llr0 - r0;
+                        q_val0[d]  = q0;
+                        uint32_t q0_u = float_as_uint(q0);
+                        global_sign0 ^= (q0_u >> 31);
+                        float abs_q0 = uint_as_float(q0_u & 0x7FFFFFFF);
+                        if (abs_q0 < min1_0) {
+                            min2_0 = min1_0; min1_0 = abs_q0; min_idx0 = d;
+                        } else if (abs_q0 < min2_0) {
+                            min2_0 = abs_q0;
+                        }
+                    }
 
-                    if (abs_q < min1) {
-                        min2 = min1; min1 = abs_q; min_idx = d;
-                    } else if (abs_q < min2) {
-                        min2 = abs_q;
+                    if (!done1) {
+                        float llr1 = uint_as_float(llr_pair & 0xFFFF0000);
+                        float r1   = uint_as_float(r_pair & 0xFFFF0000);
+                        float q1   = llr1 - r1;
+                        q_val1[d]  = q1;
+                        uint32_t q1_u = float_as_uint(q1);
+                        global_sign1 ^= (q1_u >> 31);
+                        float abs_q1 = uint_as_float(q1_u & 0x7FFFFFFF);
+                        if (abs_q1 < min1_1) {
+                            min2_1 = min1_1; min1_1 = abs_q1; min_idx1 = d;
+                        } else if (abs_q1 < min2_1) {
+                            min2_1 = abs_q1;
+                        }
                     }
                 }
 
                 for (uint32_t d = 0; d < deg; d++) {
                     uint16_t vn = vn_cache[d];
-                    float current_min = (d == min_idx) ? min2 : min1;
-                    uint32_t node_sign = float_as_uint(q_val[d]) >> 31;
-                    uint32_t msg_sign = global_sign ^ node_sign;
+                    uint32_t old_llr = channel_llrs_pair[vn];
+                    uint32_t old_r   = r_msg[m][d];
 
-                    float r_mag = alpha * current_min;
-                    if (r_max > 0.0f && r_mag > r_max) {
-                        r_mag = r_max;
+                    uint32_t bf_llr0 = old_llr & 0xFFFF;
+                    uint32_t bf_r0   = old_r   & 0xFFFF;
+                    if (!done0) {
+                        float curr_min0 = (d == min_idx0) ? min2_0 : min1_0;
+                        uint32_t node_sign0 = float_as_uint(q_val0[d]) >> 31;
+                        uint32_t msg_sign0 = global_sign0 ^ node_sign0;
+                        float r_mag0 = alpha * curr_min0;
+                        if (r_max > 0.0f && r_mag0 > r_max) r_mag0 = r_max;
+                        float r_new0 = uint_as_float(float_as_uint(r_mag0) | (msg_sign0 << 31));
+                        float new_llr0 = q_val0[d] + r_new0;
+                        bf_llr0 = fp32_to_bf16(new_llr0);
+                        bf_r0   = fp32_to_bf16(r_new0);
                     }
-                    uint32_t r_u = float_as_uint(r_mag) | (msg_sign << 31);
-                    float r_new = uint_as_float(r_u);
 
-                    float new_llr = q_val[d] + r_new;
-                    channel_llrs[vn] = fp32_to_bf16(new_llr);
-                    r_msg[m][d] = fp32_to_bf16(r_new);
+                    uint32_t bf_llr1 = old_llr >> 16;
+                    uint32_t bf_r1   = old_r   >> 16;
+                    if (!done1) {
+                        float curr_min1 = (d == min_idx1) ? min2_1 : min1_1;
+                        uint32_t node_sign1 = float_as_uint(q_val1[d]) >> 31;
+                        uint32_t msg_sign1 = global_sign1 ^ node_sign1;
+                        float r_mag1 = alpha * curr_min1;
+                        if (r_max > 0.0f && r_mag1 > r_max) r_mag1 = r_max;
+                        float r_new1 = uint_as_float(float_as_uint(r_mag1) | (msg_sign1 << 31));
+                        float new_llr1 = q_val1[d] + r_new1;
+                        bf_llr1 = fp32_to_bf16(new_llr1);
+                        bf_r1   = fp32_to_bf16(r_new1);
+                    }
+
+                    channel_llrs_pair[vn] = bf_llr0 | (bf_llr1 << 16);
+                    r_msg[m][d]           = bf_r0   | (bf_r1 << 16);
                 }
 #else
                 // --- Algorithm: Christopher Jones Approximate-Min* (MILCOM 2003) ---
-                // Pre-loaded row degree: zero sentinels, zero 0xFFFF branches
-                uint32_t min_idx = 0, global_sign = 0;
-                float q_val[MAX_LOCAL_DEG];
-                float min_mag = 9999.0f;
+                uint32_t min_idx0 = 0, global_sign0 = 0;
+                float q_val0[MAX_LOCAL_DEG];
+                float min_mag0 = 9999.0f;
+
+                uint32_t min_idx1 = 0, global_sign1 = 0;
+                float q_val1[MAX_LOCAL_DEG];
+                float min_mag1 = 9999.0f;
 
                 for (uint32_t d = 0; d < deg; d++) {
                     uint16_t vn = vn_list[d];
-                    vn_cache[d] = vn; // Register cache: zero SRAM reads in writeback
+                    vn_cache[d] = vn;
 
-                    q_val[d] = bf16_to_fp32(channel_llrs[vn]) - bf16_to_fp32(r_msg[m][d]);
+                    uint32_t llr_pair = channel_llrs_pair[vn];
+                    uint32_t r_pair = r_msg[m][d];
 
-                    uint32_t q_u = float_as_uint(q_val[d]);
-                    uint32_t sign = q_u >> 31;
-                    global_sign ^= sign;
-                    float abs_q = uint_as_float(q_u & 0x7FFFFFFF);
+                    if (!done0) {
+                        float llr0 = uint_as_float(llr_pair << 16);
+                        float r0   = uint_as_float(r_pair << 16);
+                        float q0   = llr0 - r0;
+                        q_val0[d]  = q0;
+                        uint32_t q0_u = float_as_uint(q0);
+                        global_sign0 ^= (q0_u >> 31);
+                        float abs_q0 = uint_as_float(q0_u & 0x7FFFFFFF);
+                        if (abs_q0 < min_mag0) {
+                            min_mag0 = abs_q0;
+                            min_idx0 = d;
+                        }
+                    }
 
-                    if (abs_q < min_mag) {
-                        min_mag = abs_q;
-                        min_idx = d;
+                    if (!done1) {
+                        float llr1 = uint_as_float(llr_pair & 0xFFFF0000);
+                        float r1   = uint_as_float(r_pair & 0xFFFF0000);
+                        float q1   = llr1 - r1;
+                        q_val1[d]  = q1;
+                        uint32_t q1_u = float_as_uint(q1);
+                        global_sign1 ^= (q1_u >> 31);
+                        float abs_q1 = uint_as_float(q1_u & 0x7FFFFFFF);
+                        if (abs_q1 < min_mag1) {
+                            min_mag1 = abs_q1;
+                            min_idx1 = d;
+                        }
                     }
                 }
 
-                float r_mag_min, r_mag_all;
-                if (deg == 3) {
-                    // Fully unrolled branch-free fast path for degree-3 check nodes
-                    float other0 = (min_idx == 0) ? uint_as_float(float_as_uint(q_val[1]) & 0x7FFFFFFF) : uint_as_float(float_as_uint(q_val[0]) & 0x7FFFFFFF);
-                    float other1 = (min_idx == 2) ? uint_as_float(float_as_uint(q_val[1]) & 0x7FFFFFFF) : uint_as_float(float_as_uint(q_val[2]) & 0x7FFFFFFF);
-                    float diff = (other0 > other1) ? (other0 - other1) : (other1 - other0);
-                    float m_min = (other0 < other1) ? other0 : other1;
-                    float corr = (diff >= 2.0f) ? 0.0f : ((diff < 0.5f) ? (0.69315f - 0.40f * diff) : (0.49315f - 0.328f * (diff - 0.5f)));
-                    float m_others = (m_min > corr) ? (m_min - corr) : 0.0f;
+                float r_mag_min0 = 0.0f, r_mag_all0 = 0.0f;
+                float r_mag_min1 = 0.0f, r_mag_all1 = 0.0f;
 
-                    float diff_all = (m_others > min_mag) ? (m_others - min_mag) : (min_mag - m_others);
-                    float m_all_min = (m_others < min_mag) ? m_others : min_mag;
-                    float corr_all = (diff_all >= 2.0f) ? 0.0f : ((diff_all < 0.5f) ? (0.69315f - 0.40f * diff_all) : (0.49315f - 0.328f * (diff_all - 0.5f)));
-                    float m_all = (m_all_min > corr_all) ? (m_all_min - corr_all) : 0.0f;
-
-                    r_mag_min = m_others;
-                    r_mag_all = m_all;
-                } else {
-                    // General path for arbitrary degree graphs
-                    uint32_t first_idx = (min_idx == 0) ? 1 : 0;
-                    float m_others = (deg > 1) ? uint_as_float(float_as_uint(q_val[first_idx]) & 0x7FFFFFFF) : min_mag;
-
-                    for (uint32_t d = first_idx + 1; d < deg; d++) {
-                        if (d == min_idx) continue;
-                        float abs_qd = uint_as_float(float_as_uint(q_val[d]) & 0x7FFFFFFF);
-                        float diff = (m_others > abs_qd) ? (m_others - abs_qd) : (abs_qd - m_others);
-                        float m_curr = (m_others < abs_qd) ? m_others : abs_qd;
-                        float corr = (diff >= 2.0f) ? 0.0f : ((diff < 0.5f) ? (0.69315f - 0.40f * diff) : (0.49315f - 0.328f * (diff - 0.5f)));
-                        float next_m = m_curr - corr;
-                        m_others = (next_m > 0.0f) ? next_m : 0.0f;
+                if (!done0) {
+                    if (deg == 3) {
+                        compute_amin_star_deg3(q_val0, min_idx0, min_mag0, r_mag_min0, r_mag_all0);
+                    } else {
+                        compute_amin_star_general(q_val0, deg, min_idx0, min_mag0, r_mag_min0, r_mag_all0);
                     }
-
-                    float diff_all = (m_others > min_mag) ? (m_others - min_mag) : (min_mag - m_others);
-                    float m_all_curr = (m_others < min_mag) ? m_others : min_mag;
-                    float corr_all = (diff_all >= 2.0f) ? 0.0f : ((diff_all < 0.5f) ? (0.69315f - 0.40f * diff_all) : (0.49315f - 0.328f * (diff_all - 0.5f)));
-                    float next_m_all = m_all_curr - corr_all;
-                    float m_all = (next_m_all > 0.0f) ? next_m_all : 0.0f;
-
-                    r_mag_min = m_others;
-                    r_mag_all = m_all;
                 }
 
-                // Step 4: Writeback with zero L1 memory reads for vn
+                if (!done1) {
+                    if (deg == 3) {
+                        compute_amin_star_deg3(q_val1, min_idx1, min_mag1, r_mag_min1, r_mag_all1);
+                    } else {
+                        compute_amin_star_general(q_val1, deg, min_idx1, min_mag1, r_mag_min1, r_mag_all1);
+                    }
+                }
+
+                // Writeback phase: single 32-bit packed writes with frozen preservation
                 for (uint32_t d = 0; d < deg; d++) {
                     uint16_t vn = vn_cache[d];
-                    float r_mag = (d == min_idx) ? r_mag_min : r_mag_all;
-                    if (r_max > 0.0f && r_mag > r_max) {
-                        r_mag = r_max;
+                    uint32_t old_llr = channel_llrs_pair[vn];
+                    uint32_t old_r   = r_msg[m][d];
+
+                    uint32_t bf_llr0 = old_llr & 0xFFFF;
+                    uint32_t bf_r0   = old_r   & 0xFFFF;
+                    if (!done0) {
+                        float r_mag0 = (d == min_idx0) ? r_mag_min0 : r_mag_all0;
+                        if (r_max > 0.0f && r_mag0 > r_max) r_mag0 = r_max;
+                        uint32_t node_sign0 = float_as_uint(q_val0[d]) >> 31;
+                        uint32_t msg_sign0 = global_sign0 ^ node_sign0;
+                        float r_new0 = uint_as_float(float_as_uint(r_mag0) | (msg_sign0 << 31));
+                        float new_llr0 = q_val0[d] + r_new0;
+                        bf_llr0 = fp32_to_bf16(new_llr0);
+                        bf_r0   = fp32_to_bf16(r_new0);
                     }
-                    uint32_t node_sign = float_as_uint(q_val[d]) >> 31;
-                    uint32_t msg_sign = global_sign ^ node_sign;
 
-                    uint32_t r_u = float_as_uint(r_mag) | (msg_sign << 31);
-                    float r_new = uint_as_float(r_u);
+                    uint32_t bf_llr1 = old_llr >> 16;
+                    uint32_t bf_r1   = old_r   >> 16;
+                    if (!done1) {
+                        float r_mag1 = (d == min_idx1) ? r_mag_min1 : r_mag_all1;
+                        if (r_max > 0.0f && r_mag1 > r_max) r_mag1 = r_max;
+                        uint32_t node_sign1 = float_as_uint(q_val1[d]) >> 31;
+                        uint32_t msg_sign1 = global_sign1 ^ node_sign1;
+                        float r_new1 = uint_as_float(float_as_uint(r_mag1) | (msg_sign1 << 31));
+                        float new_llr1 = q_val1[d] + r_new1;
+                        bf_llr1 = fp32_to_bf16(new_llr1);
+                        bf_r1   = fp32_to_bf16(r_new1);
+                    }
 
-                    float new_llr = q_val[d] + r_new;
-                    channel_llrs[vn] = fp32_to_bf16(new_llr);
-                    r_msg[m][d] = fp32_to_bf16(r_new);
+                    // Single 32-bit packed writes to L1 SRAM
+                    channel_llrs_pair[vn] = bf_llr0 | (bf_llr1 << 16);
+                    r_msg[m][d]           = bf_r0   | (bf_r1 << 16);
                 }
 #endif
             }
@@ -376,40 +507,60 @@ inline void run_ldpc_worker(
             // STEP 4: Inline Syndrome Check (H * c^T == 0)
             // Adaptive check: bypass iterations 0 and 1
             if (iter >= 2) {
-                uint32_t syndrome_errors = 0;
+                uint32_t syndrome_errors_packed = 0;
                 for (uint32_t m = 0; m < M_check_nodes; m++) {
                     uint32_t r_base = m * row_stride;
                     uint32_t d_count = h_col_idx[r_base];
                     const uint16_t* v_nodes = &h_col_idx[r_base + 1];
-                    uint32_t row_parity = 0;
+                    uint32_t row_parity_packed = 0;
                     for (uint32_t d = 0; d < d_count; d++) {
-                        row_parity ^= (channel_llrs[v_nodes[d]] >> 15);
+                        row_parity_packed ^= channel_llrs_pair[v_nodes[d]];
                     }
-                    syndrome_errors |= row_parity;
-                    if (syndrome_errors != 0) break;
+                    syndrome_errors_packed |= (row_parity_packed & 0x80008000);
+                    if ((done0 || (syndrome_errors_packed & 0x8000)) &&
+                        (done1 || (syndrome_errors_packed & 0x80000000))) {
+                        break;
+                    }
                 }
 
-                if (syndrome_errors == 0) {
-                    if (cw == 0) cw0_iters = iter + 1;
-                    break; // Early termination on valid codeword
+                if (!done0 && (syndrome_errors_packed & 0x8000) == 0) {
+                    done0 = true;
+                    if (cw == 0 && cw0_iters == 0) cw0_iters = iter + 1;
+                }
+                if (!done1 && (syndrome_errors_packed & 0x80000000) == 0) {
+                    done1 = true;
+                }
+                if (done0 && done1) {
+                    break; // Both codewords converged!
                 }
             }
         }
+
         if (cw == 0 && cw0_iters == 0) cw0_iters = max_iter;
 
         // STEP 5: Tally Bit and Frame Errors
-        uint32_t cw_bit_errors = 0;
+        uint32_t cw_bit_errors0 = 0;
         for (uint32_t i = 0; i < unpunctured_nodes; i++) {
-            cw_bit_errors += (channel_llrs[i] >> 15);
+            cw_bit_errors0 += (channel_llrs_pair[i] >> 15) & 1;
+        }
+        if (cw_bit_errors0 > 0) {
+            total_bit_errors += cw_bit_errors0;
+            total_frame_errors++;
         }
 
-        if (cw_bit_errors > 0) {
-            total_bit_errors += cw_bit_errors;
-            total_frame_errors++;
+        if (has_cw1) {
+            uint32_t cw_bit_errors1 = 0;
+            for (uint32_t i = 0; i < unpunctured_nodes; i++) {
+                cw_bit_errors1 += (channel_llrs_pair[i] >> 31);
+            }
+            if (cw_bit_errors1 > 0) {
+                total_bit_errors += cw_bit_errors1;
+                total_frame_errors++;
+            }
         }
     }
 
-    sample_llr = static_cast<uint32_t>(channel_llrs[0]) << 16;
+    sample_llr = (channel_llrs_pair[0] & 0xFFFF) << 16;
 
     stats_out[0] = total_bit_errors;
     stats_out[1] = total_frame_errors;

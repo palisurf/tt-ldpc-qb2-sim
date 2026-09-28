@@ -422,10 +422,10 @@ int main(int argc, char** argv) {
         std::map<uint8_t, tt::DataFormat> cb4_spec = {{4, tt::DataFormat::RawUInt32}};
         std::map<uint8_t, tt::DataFormat> cb16_spec = {{16, tt::DataFormat::RawUInt32}};
 
-        // CB 0: Channel LLR Scratchpad (32 KB - bfloat16, partitioned for 5 workers: 5 * 6 KB = 30 KB)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(32 * 1024, cb0_spec).set_page_size(0, 32 * 1024));
-        // CB 1: Check Message r_msg Scratchpad (128 KB - bfloat16, partitioned for 5 workers: 5 * 25 KB = 125 KB)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(128 * 1024, cb1_spec).set_page_size(1, 128 * 1024));
+        // CB 0: Channel LLR Scratchpad (64 KB - bfloat16, partitioned for 5 workers: 5 * 12 KB = 60 KB)
+        CreateCircularBuffer(program, core_grid, CircularBufferConfig(64 * 1024, cb0_spec).set_page_size(0, 64 * 1024));
+        // CB 1: Check Message r_msg Scratchpad (256 KB - bfloat16, partitioned for 5 workers: 5 * 50 KB = 250 KB)
+        CreateCircularBuffer(program, core_grid, CircularBufferConfig(256 * 1024, cb1_spec).set_page_size(1, 256 * 1024));
         // CB 2: Shared Sparse Parity Matrix Input (read-only for all 5 workers)
         CreateCircularBuffer(program, core_grid, CircularBufferConfig(h_cb_bytes, cb2_spec).set_page_size(2, h_cb_bytes));
         // CB 3: Sync BRISC -> NCRISC (H loaded in L1)

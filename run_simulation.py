@@ -64,6 +64,7 @@ def main():
     parser.add_argument("--ebn0_step", type=float, default=0.25, help="Eb/N0 step size in dB")
     parser.add_argument("--punctured", type=int, default=0, help="Number of punctured variable nodes")
     parser.add_argument("--min_errors", "--target_errors", dest="min_errors", type=int, default=50, help="Minimum errored blocks to find per SNR point (default: 50)")
+    parser.add_argument("--max_blocks", type=int, default=None, help="Maximum total blocks across all cores (overrides max_blocks_per_core)")
     parser.add_argument("--max_blocks_per_core", "--blocks_per_core", dest="max_blocks_per_core", type=int, default=100000, help="Maximum blocks to simulate per core (default: 100000)")
     parser.add_argument("--batch_size", type=int, default=1000, help="Batch size per core between error checks (default: 1000)")
     parser.add_argument("--max_iter", "--max_iterations", dest="max_iter", type=int, default=16, help="Maximum decoder iterations per codeword (default: 16)")
@@ -75,6 +76,10 @@ def main():
     parser.add_argument("--r_max", type=float, default=0.0, help="Maximum check node message magnitude (0.0 = unclipped)")
     
     args = parser.parse_args()
+
+    total_cores = 1 if args.single_core else 440
+    if args.max_blocks is not None:
+        args.max_blocks_per_core = max(1, args.max_blocks // total_cores)
 
     N, M, max_vdeg, max_cdeg = parse_matrix_header(args.chinn)
     unpunctured_N = N - args.punctured
