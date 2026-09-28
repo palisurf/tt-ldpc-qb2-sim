@@ -315,7 +315,7 @@ int main(int argc, char** argv) {
     distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
 
     CoreCoord grid_size = single_core ? CoreCoord{1, 1} : mesh_device->compute_with_storage_grid_size();
-    CoreRange core_grid({0, 0}, {grid_size.x - 1, grid_size.y - 1});
+    tt::tt_metal::CoreRange core_grid({0, 0}, {grid_size.x - 1, grid_size.y - 1});
     uint32_t cores_per_chip = grid_size.x * grid_size.y;
     uint32_t total_mesh_cores = cores_per_chip * mesh_device->num_rows() * mesh_device->num_cols();
 
@@ -413,7 +413,7 @@ int main(int argc, char** argv) {
         }
         uint32_t current_batch_total = current_batch_per_core * total_mesh_cores;
 
-        Program program = CreateProgram();
+        distributed::MeshWorkload workload;
 
         std::map<uint8_t, tt::DataFormat> cb0_spec = {{0, tt::DataFormat::Float16_b}};
         std::map<uint8_t, tt::DataFormat> cb1_spec = {{1, tt::DataFormat::Float16_b}};
@@ -422,95 +422,98 @@ int main(int argc, char** argv) {
         std::map<uint8_t, tt::DataFormat> cb4_spec = {{4, tt::DataFormat::RawUInt32}};
         std::map<uint8_t, tt::DataFormat> cb16_spec = {{16, tt::DataFormat::RawUInt32}};
 
-        // CB 0: Channel LLR Scratchpad (64 KB - bfloat16, partitioned for 5 workers: 5 * 12 KB = 60 KB)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(64 * 1024, cb0_spec).set_page_size(0, 64 * 1024));
-        // CB 1: Check Message r_msg Scratchpad (256 KB - bfloat16, partitioned for 5 workers: 5 * 50 KB = 250 KB)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(256 * 1024, cb1_spec).set_page_size(1, 256 * 1024));
-        // CB 2: Shared Sparse Parity Matrix Input (read-only for all 5 workers)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(h_cb_bytes, cb2_spec).set_page_size(2, h_cb_bytes));
-        // CB 3: Sync BRISC -> NCRISC (H loaded in L1)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb3_spec).set_page_size(3, tile_bytes));
-        // CB 4: Sync BRISC -> NCRISC (BRISC decoding completed)
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb4_spec).set_page_size(4, tile_bytes));
-        // CB 16: Error Statistics & Sync TRISC -> NCRISC
-        CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb16_spec).set_page_size(16, tile_bytes));
-
-        auto reader = CreateKernel(
-            program, "kernel/reader_ldpc.cpp", core_grid,
-            DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default}
-        );
-
-        auto writer = CreateKernel(
-            program, "kernel/writer_ldpc.cpp", core_grid,
-            DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default}
-        );
-
         std::map<std::string, std::string> compute_defines;
         if (use_nms) {
             compute_defines["USE_NORMALIZED_MIN_SUM"] = "1";
         }
 
-        auto compute = CreateKernel(
-            program, "kernel/compute_trisc_ldpc_awgn_sim.cpp", core_grid,
-            ComputeConfig{
-                .math_fidelity = MathFidelity::HiFi4,
-                .fp32_dest_acc_en = true,
-                .defines = compute_defines
+        for (uint32_t chip_row = 0; chip_row < mesh_device->num_rows(); chip_row++) {
+            for (uint32_t chip_col = 0; chip_col < mesh_device->num_cols(); chip_col++) {
+                uint32_t chip_idx = chip_row * mesh_device->num_cols() + chip_col;
+                Program program = CreateProgram();
+
+                // CB 0: Channel LLR Scratchpad (64 KB - bfloat16, partitioned for 5 workers: 5 * 12 KB = 60 KB)
+                CreateCircularBuffer(program, core_grid, CircularBufferConfig(64 * 1024, cb0_spec).set_page_size(0, 64 * 1024));
+                // CB 1: Check Message r_msg Scratchpad (256 KB - bfloat16, partitioned for 5 workers: 5 * 50 KB = 250 KB)
+                CreateCircularBuffer(program, core_grid, CircularBufferConfig(256 * 1024, cb1_spec).set_page_size(1, 256 * 1024));
+                // CB 2: Shared Sparse Parity Matrix Input (read-only for all 5 workers)
+                CreateCircularBuffer(program, core_grid, CircularBufferConfig(h_cb_bytes, cb2_spec).set_page_size(2, h_cb_bytes));
+                // CB 3: Sync BRISC -> NCRISC (H loaded in L1)
+                CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb3_spec).set_page_size(3, tile_bytes));
+                // CB 4: Sync BRISC -> NCRISC (BRISC decoding completed)
+                CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb4_spec).set_page_size(4, tile_bytes));
+                // CB 16: Error Statistics & Sync TRISC -> NCRISC
+                CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb16_spec).set_page_size(16, tile_bytes));
+
+                auto reader = CreateKernel(
+                    program, "kernel/reader_ldpc.cpp", core_grid,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default}
+                );
+
+                auto writer = CreateKernel(
+                    program, "kernel/writer_ldpc.cpp", core_grid,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default}
+                );
+
+                auto compute = CreateKernel(
+                    program, "kernel/compute_trisc_ldpc_awgn_sim.cpp", core_grid,
+                    ComputeConfig{
+                        .math_fidelity = tt::tt_metal::MathFidelity::HiFi4,
+                        .fp32_dest_acc_en = true,
+                        .defines = compute_defines
+                    }
+                );
+
+                for (uint32_t local_core = 0; local_core < cores_per_chip; local_core++) {
+                    uint32_t global_core_id = chip_idx * cores_per_chip + local_core;
+                    CoreCoord core = {local_core % grid_size.x, local_core / grid_size.x};
+                    uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + (local_core * 4 * sizeof(uint32_t));
+
+                    uint32_t b_base   = current_batch_per_core / 5;
+                    uint32_t b_rem    = current_batch_per_core % 5;
+                    uint32_t b_brisc  = b_base;
+                    uint32_t b_ncrisc = b_base;
+                    uint32_t b_trisc0 = b_base;
+                    uint32_t b_trisc1 = b_base;
+                    uint32_t b_trisc2 = b_base + b_rem; // gets remainder
+
+                    uint32_t s0 = core_generators[global_core_id].s[0];
+                    uint32_t s1 = core_generators[global_core_id].s[1];
+                    uint32_t s2 = core_generators[global_core_id].s[2];
+                    uint32_t s3 = core_generators[global_core_id].s[3];
+                    uint32_t l_max_u32 = float_as_uint(l_max);
+                    uint32_t r_max_u32 = float_as_uint(r_max);
+
+                    std::vector<uint32_t> r_args = {
+                        static_cast<uint32_t>(h_dram->address()), 0, h_bytes, 1,
+                        b_brisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+                        mu_u32, sigma_u32, s0, s1, s2, s3,
+                        max_iterations, l_max_u32, r_max_u32
+                    };
+                    SetRuntimeArgs(program, reader, core, r_args);
+
+                    std::vector<uint32_t> w_args = {
+                        core_stats_addr, 0,
+                        b_ncrisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+                        mu_u32, sigma_u32, s0, s1, s2, s3,
+                        max_iterations, l_max_u32, r_max_u32
+                    };
+                    SetRuntimeArgs(program, writer, core, w_args);
+
+                    std::vector<uint32_t> c_args = {
+                        b_trisc0, b_trisc1, b_trisc2,
+                        h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+                        mu_u32, sigma_u32, s0, s1, s2, s3,
+                        max_iterations, l_max_u32, r_max_u32
+                    };
+                    SetRuntimeArgs(program, compute, core, c_args);
+                }
+
+                auto coord = distributed::MeshCoordinate(chip_row, chip_col);
+                workload.add_program(distributed::MeshCoordinateRange(coord), std::move(program));
             }
-        );
-
-        for (uint32_t core_id = 0; core_id < cores_per_chip; core_id++) {
-            CoreCoord core = {core_id % grid_size.x, core_id / grid_size.x};
-            uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + (core_id * 4 * sizeof(uint32_t));
-
-            // Divide current_batch_per_core across all 5 RISC-V processors:
-            // Worker 0: BRISC (DataMovement 0)
-            // Worker 1: NCRISC (DataMovement 1)
-            // Worker 2: TRISC0 (Compute UNPACK)
-            // Worker 3: TRISC1 (Compute MATH)
-            // Worker 4: TRISC2 (Compute PACK)
-            uint32_t b_base   = current_batch_per_core / 5;
-            uint32_t b_rem    = current_batch_per_core % 5;
-            uint32_t b_brisc  = b_base;
-            uint32_t b_ncrisc = b_base;
-            uint32_t b_trisc0 = b_base;
-            uint32_t b_trisc1 = b_base;
-            uint32_t b_trisc2 = b_base + b_rem; // gets remainder
-
-            uint32_t s0 = core_generators[core_id].s[0];
-            uint32_t s1 = core_generators[core_id].s[1];
-            uint32_t s2 = core_generators[core_id].s[2];
-            uint32_t s3 = core_generators[core_id].s[3];
-            uint32_t l_max_u32 = float_as_uint(l_max);
-            uint32_t r_max_u32 = float_as_uint(r_max);
-
-            std::vector<uint32_t> r_args = {
-                static_cast<uint32_t>(h_dram->address()), 0, h_bytes, 1,
-                b_brisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
-                mu_u32, sigma_u32, s0, s1, s2, s3,
-                max_iterations, l_max_u32, r_max_u32
-            };
-            SetRuntimeArgs(program, reader, core, r_args);
-
-            std::vector<uint32_t> w_args = {
-                core_stats_addr, 0,
-                b_ncrisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
-                mu_u32, sigma_u32, s0, s1, s2, s3,
-                max_iterations, l_max_u32, r_max_u32
-            };
-            SetRuntimeArgs(program, writer, core, w_args);
-
-            std::vector<uint32_t> c_args = {
-                b_trisc0, b_trisc1, b_trisc2,
-                h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
-                mu_u32, sigma_u32, s0, s1, s2, s3,
-                max_iterations, l_max_u32, r_max_u32
-            };
-            SetRuntimeArgs(program, compute, core, c_args);
         }
 
-        distributed::MeshWorkload workload;
-        workload.add_program(distributed::MeshCoordinateRange(mesh_device->shape()), std::move(program));
         distributed::EnqueueMeshWorkload(cq, workload, false);
         cq.finish();
 

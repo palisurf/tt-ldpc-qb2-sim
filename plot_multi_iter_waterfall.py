@@ -8,7 +8,7 @@ csv_uncl_16iter = "Results/results_AR4JA_r45_4c_128c_r12_amin_ebn0_0.00_3.00_ste
 csv_100iter = "Results/results_AR4JA_r45_4c_128c_r12_amin_clipL4.2R0.0_ebn0_1.20_2.60_step0.10_max2275000_min25_iter100_440cores.csv"
 csv_200iter = "Results/results_AR4JA_r45_4c_128c_r12_amin_clipL4.2R0.0_ebn0_1.20_2.60_step0.10_max2275000_min25_iter200_440cores.csv"
 csv_200iter_uncl = "Results/results_AR4JA_r45_4c_128c_r12_amin_ebn0_1.20_2.60_step0.10_max2275000_min25_iter200_440cores.csv"
-csv_200iter_recursive = "Results/results_AR4JA_r45_4c_128c_r12_amin_ebn0_1.20_2.20_step0.10_max2275000_min25_iter200_440cores.csv"
+csv_200iter_recursive = "Results/results_AR4JA_r45_4c_128c_r12_amin_ebn0_1.20_2.20_step0.10_max4545454_min25_iter200_440cores.csv"
 output_plot = "Results/waterfall_iter_comparison_200_100_16.png"
 
 df_16 = pd.read_csv(csv_16iter) if os.path.exists(csv_16iter) else None
@@ -17,18 +17,6 @@ df_100 = pd.read_csv(csv_100iter) if os.path.exists(csv_100iter) else None
 df_200_clip = pd.read_csv(csv_200iter) if os.path.exists(csv_200iter) else None
 df_200_uncl = pd.read_csv(csv_200iter_uncl) if os.path.exists(csv_200iter_uncl) else None
 df_200_rec = pd.read_csv(csv_200iter_recursive) if os.path.exists(csv_200iter_recursive) else None
-
-# If 2.10 dB is in progress, include latest telemetry point
-if df_200_rec is not None and (df_200_rec['EbN0_dB'] == 2.10).sum() == 0:
-    prog_row = pd.DataFrame([{
-        'EbN0_dB': 2.10,
-        'Total_Blocks': 40216000,
-        'Total_Bit_Errors': 3140,
-        'Total_Block_Errors': 12,
-        'BER': 3.82e-08,
-        'FER': 2.98e-07
-    }])
-    df_200_rec = pd.concat([df_200_rec, prog_row], ignore_index=True)
 
 if df_200_clip is not None:
     df_200_clip = df_200_clip[df_200_clip['EbN0_dB'] <= 2.30].copy()
@@ -90,6 +78,16 @@ if df_200_rec is not None:
                      xy=(r21['EbN0_dB'], r21['FER']),
                      xytext=(-15, -20), textcoords="offset points",
                      ha='right', fontweight='bold', fontsize=8.5, color=c_rec_fer,
+                     arrowprops=dict(arrowstyle="->", color=c_rec_fer, lw=1.5))
+
+    # Annotate 2.20 dB point
+    pt_22 = df_200_rec[df_200_rec['EbN0_dB'] == 2.20]
+    if not pt_22.empty:
+        r22 = pt_22.iloc[0]
+        ax1.annotate(f"2.20 dB Recursive:\nFER={r22['FER']:.2e}\n(391.2M blocks, 28 FE)",
+                     xy=(r22['EbN0_dB'], r22['FER']),
+                     xytext=(15, -12), textcoords="offset points",
+                     ha='left', fontweight='bold', fontsize=8.5, color=c_rec_fer,
                      arrowprops=dict(arrowstyle="->", color=c_rec_fer, lw=1.5))
 
     # Annotate 2.40 dB point
@@ -154,10 +152,11 @@ if df_16 is not None and df_200_uncl is not None:
                 ax2.plot(m_rec['EbN0_dB'], r_rec, 'D-', color=c_rec_fer, linewidth=2.6, markersize=7, label=r'$\mathbf{200\ Iter\ True\ Recursive\ Gain}$')
                 for _, r_row in m_rec.iterrows():
                     ratio_r = r_row['FER_16'] / r_row['FER_rec']
-                    if r_row['EbN0_dB'] in [1.8, 1.9, 2.0, 2.1]:
-                        ax2.annotate(f"{ratio_r:.1f}x", 
+                    if r_row['EbN0_dB'] in [1.8, 1.9, 2.0, 2.1, 2.2]:
+                        offset_y = 12 if r_row['EbN0_dB'] != 2.2 else -18
+                        ax2.annotate(f"{ratio_r:.0f}x", 
                                      xy=(r_row['EbN0_dB'], ratio_r),
-                                     xytext=(0, 10), textcoords="offset points",
+                                     xytext=(0, offset_y), textcoords="offset points",
                                      ha='center', fontweight='bold', fontsize=9.5, color=c_rec_fer)
 
         for _, row in merged_uncl.iterrows():
