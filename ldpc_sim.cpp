@@ -414,15 +414,21 @@ int main(int argc, char** argv) {
         std::map<uint8_t, tt::DataFormat> cb0_spec = {{0, tt::DataFormat::Float16_b}};
         std::map<uint8_t, tt::DataFormat> cb1_spec = {{1, tt::DataFormat::Float16_b}};
         std::map<uint8_t, tt::DataFormat> cb2_spec = {{2, tt::DataFormat::RawUInt16}};
+        std::map<uint8_t, tt::DataFormat> cb3_spec = {{3, tt::DataFormat::RawUInt32}};
+        std::map<uint8_t, tt::DataFormat> cb4_spec = {{4, tt::DataFormat::RawUInt32}};
         std::map<uint8_t, tt::DataFormat> cb16_spec = {{16, tt::DataFormat::RawUInt32}};
 
-        // CB 0: Channel LLR Scratchpad (32 KB - bfloat16)
+        // CB 0: Channel LLR Scratchpad (32 KB - bfloat16, partitioned for 5 workers: 5 * 6 KB = 30 KB)
         CreateCircularBuffer(program, core_grid, CircularBufferConfig(32 * 1024, cb0_spec).set_page_size(0, 32 * 1024));
-        // CB 1: Check Message r_msg Scratchpad (128 KB - bfloat16)
+        // CB 1: Check Message r_msg Scratchpad (128 KB - bfloat16, partitioned for 5 workers: 5 * 25 KB = 125 KB)
         CreateCircularBuffer(program, core_grid, CircularBufferConfig(128 * 1024, cb1_spec).set_page_size(1, 128 * 1024));
-        // CB 2: Sparse Parity Matrix Input
+        // CB 2: Shared Sparse Parity Matrix Input (read-only for all 5 workers)
         CreateCircularBuffer(program, core_grid, CircularBufferConfig(h_cb_bytes, cb2_spec).set_page_size(2, h_cb_bytes));
-        // CB 16: Error Statistics Output
+        // CB 3: Sync BRISC -> NCRISC (H loaded in L1)
+        CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb3_spec).set_page_size(3, tile_bytes));
+        // CB 4: Sync BRISC -> NCRISC (BRISC decoding completed)
+        CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb4_spec).set_page_size(4, tile_bytes));
+        // CB 16: Error Statistics & Sync TRISC -> NCRISC
         CreateCircularBuffer(program, core_grid, CircularBufferConfig(tile_bytes, cb16_spec).set_page_size(16, tile_bytes));
 
         auto reader = CreateKernel(
@@ -453,11 +459,19 @@ int main(int argc, char** argv) {
             CoreCoord core = {core_id % grid_size.x, core_id / grid_size.x};
             uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + (core_id * 4 * sizeof(uint32_t));
 
-            std::vector<uint32_t> r_args = {static_cast<uint32_t>(h_dram->address()), 0, h_bytes, 1};
-            SetRuntimeArgs(program, reader, core, r_args);
-
-            std::vector<uint32_t> w_args = {core_stats_addr, 0};
-            SetRuntimeArgs(program, writer, core, w_args);
+            // Divide current_batch_per_core across all 5 RISC-V processors:
+            // Worker 0: BRISC (DataMovement 0)
+            // Worker 1: NCRISC (DataMovement 1)
+            // Worker 2: TRISC0 (Compute UNPACK)
+            // Worker 3: TRISC1 (Compute MATH)
+            // Worker 4: TRISC2 (Compute PACK)
+            uint32_t b_base   = current_batch_per_core / 5;
+            uint32_t b_rem    = current_batch_per_core % 5;
+            uint32_t b_brisc  = b_base;
+            uint32_t b_ncrisc = b_base;
+            uint32_t b_trisc0 = b_base;
+            uint32_t b_trisc1 = b_base;
+            uint32_t b_trisc2 = b_base + b_rem; // gets remainder
 
             uint32_t s0 = core_generators[core_id].s[0];
             uint32_t s1 = core_generators[core_id].s[1];
@@ -465,11 +479,28 @@ int main(int argc, char** argv) {
             uint32_t s3 = core_generators[core_id].s[3];
             uint32_t l_max_u32 = float_as_uint(l_max);
             uint32_t r_max_u32 = float_as_uint(r_max);
-            std::vector<uint32_t> c_args = {
-                current_batch_per_core, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+
+            std::vector<uint32_t> r_args = {
+                static_cast<uint32_t>(h_dram->address()), 0, h_bytes, 1,
+                b_brisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
                 mu_u32, sigma_u32, s0, s1, s2, s3,
-                max_iterations,
-                l_max_u32, r_max_u32
+                max_iterations, l_max_u32, r_max_u32
+            };
+            SetRuntimeArgs(program, reader, core, r_args);
+
+            std::vector<uint32_t> w_args = {
+                core_stats_addr, 0,
+                b_ncrisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+                mu_u32, sigma_u32, s0, s1, s2, s3,
+                max_iterations, l_max_u32, r_max_u32
+            };
+            SetRuntimeArgs(program, writer, core, w_args);
+
+            std::vector<uint32_t> c_args = {
+                b_trisc0, b_trisc1, b_trisc2,
+                h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
+                mu_u32, sigma_u32, s0, s1, s2, s3,
+                max_iterations, l_max_u32, r_max_u32
             };
             SetRuntimeArgs(program, compute, core, c_args);
         }
@@ -554,10 +585,12 @@ int main(int argc, char** argv) {
 
         accumulated_blocks += current_batch_total;
 
-        // Advance each core's PRNG state by 2^64 steps (~1.84e19 draws) for the next batch
+        // Advance each core's PRNG state by 5 * 2^64 steps for the next batch (one jump per worker)
         if (!lockstep_verify) {
             for (uint32_t c = 0; c < total_mesh_cores; c++) {
-                core_generators[c].jump();
+                for (uint32_t j = 0; j < 5; j++) {
+                    core_generators[c].jump();
+                }
             }
         }
 
