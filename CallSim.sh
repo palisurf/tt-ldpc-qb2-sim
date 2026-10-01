@@ -127,6 +127,10 @@ while [[ $# -gt 0 ]]; do
             FORWARD_ARGS+=("--r_max" "$2")
             shift 2
             ;;
+        --l_post_max|-V)
+            FORWARD_ARGS+=("--l_post_max" "$2")
+            shift 2
+            ;;
         *)
             if parse_ebn0_tuple "$1" 2>/dev/null; then
                 shift

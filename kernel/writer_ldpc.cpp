@@ -20,6 +20,7 @@ void kernel_main() {
     // 13: max_iter
     // 14: l_max_bits
     // 15: r_max_bits
+    // 16: l_post_max_bits
     uint32_t stats_dram_addr       = get_arg_val<uint32_t>(0);
     uint32_t dram_bank             = get_arg_val<uint32_t>(1);
     uint32_t num_codewords_ncrisc = get_arg_val<uint32_t>(2);
@@ -36,11 +37,13 @@ void kernel_main() {
     uint32_t max_iter              = get_arg_val<uint32_t>(13);
     uint32_t l_max_bits            = get_arg_val<uint32_t>(14);
     uint32_t r_max_bits            = get_arg_val<uint32_t>(15);
+    uint32_t l_post_max_bits       = get_arg_val<uint32_t>(16);
 
     float mu_llr = uint_as_float(mu_bits);
     float sigma_llr = uint_as_float(sigma_bits);
     float l_max = uint_as_float(l_max_bits);
     float r_max = uint_as_float(r_max_bits);
+    float l_post_max = uint_as_float(l_post_max_bits);
 
     // STEP 1: Wait for BRISC to load shared H matrix into L1 via CB 3
     constexpr uint32_t cb_sync_hn = tt::CBIndex::c_3;
@@ -70,6 +73,7 @@ void kernel_main() {
         sigma_llr,
         l_max,
         r_max,
+        l_post_max,
         s0, s1, s2, s3,
         h_col_idx,
         channel_llrs,

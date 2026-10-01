@@ -74,6 +74,7 @@ def main():
     parser.add_argument("--nms", action="store_true", help="Use Normalized Min-Sum (alpha=0.75) instead of default Approximate-Min*")
     parser.add_argument("--l_max", type=float, default=0.0, help="Maximum variable node LLR magnitude (0.0 = unclipped)")
     parser.add_argument("--r_max", type=float, default=0.0, help="Maximum check node message magnitude (0.0 = unclipped)")
+    parser.add_argument("--l_post_max", "--v_max", dest="l_post_max", type=float, default=0.0, help="Maximum posterior variable accumulation magnitude (0.0 = unclipped)")
     
     args = parser.parse_args()
 
@@ -107,7 +108,14 @@ def main():
                 matrix_base = matrix_base[:-len(ext)]
                 break
         core_str = "1core" if args.single_core else "440cores"
-        clip_str = f"_clipL{args.l_max:.1f}R{args.r_max:.1f}" if (args.l_max > 0.0 or args.r_max > 0.0) else ""
+        clip_parts = []
+        if args.l_max > 0.0:
+            clip_parts.append(f"L{args.l_max:.1f}")
+        if args.r_max > 0.0:
+            clip_parts.append(f"R{args.r_max:.1f}")
+        if args.l_post_max > 0.0:
+            clip_parts.append(f"V{args.l_post_max:.1f}")
+        clip_str = f"_clip{''.join(clip_parts)}" if clip_parts else ""
         output_filename = os.path.join(
             results_dir,
             f"results_{matrix_base}"
@@ -131,8 +139,8 @@ def main():
     print(f"Stopping Criteria  : Min {args.min_errors} block errors OR max {args.max_blocks_per_core} blocks/core")
     print(f"Batch Size/Core    : {args.batch_size} blocks per core per evaluation step")
     print(f"Max Decoder Iters  : {args.max_iter}")
-    if args.l_max > 0.0 or args.r_max > 0.0:
-        print(f"LLR Clipping       : L_max={args.l_max:.2f}, R_max={args.r_max:.2f}")
+    if args.l_max > 0.0 or args.r_max > 0.0 or args.l_post_max > 0.0:
+        print(f"LLR Clipping       : L_max={args.l_max:.2f}, R_max={args.r_max:.2f}, L_post_max={args.l_post_max:.2f}")
     print(f"Output File        : {output_filename}")
     print("==========================================================\n")
 
@@ -164,6 +172,8 @@ def main():
             cmd.extend(["-L", str(args.l_max)])
         if args.r_max > 0.0:
             cmd.extend(["-R", str(args.r_max)])
+        if args.l_post_max > 0.0:
+            cmd.extend(["-V", str(args.l_post_max)])
 
         try:
             proc = subprocess.Popen(

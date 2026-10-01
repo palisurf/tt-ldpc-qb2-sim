@@ -269,6 +269,7 @@ int main(int argc, char** argv) {
     uint32_t max_iterations = 16;   // Max decoder iterations per codeword (default: 16)
     float l_max = 0.0f;             // Max variable LLR magnitude (0.0 = unclipped)
     float r_max = 0.0f;             // Max check message magnitude (0.0 = unclipped)
+    float l_post_max = 0.0f;        // Max posterior variable accumulation magnitude (0.0 = unclipped)
     float gamma_ratio = 0.0f;       // Proportional clipping factor (L_max = gamma * mu_llr)
 
     bool single_core = false;
@@ -276,7 +277,7 @@ int main(int argc, char** argv) {
     bool use_nms = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:svnL:R:G:")) != -1) {
+    while ((opt = getopt(argc, argv, "c:e:p:t:m:b:k:i:svnL:R:G:V:")) != -1) {
         switch (opt) {
             case 'c': chinn_file = optarg; break;
             case 'e': eb_n0_db = std::stod(optarg); break;
@@ -291,6 +292,7 @@ int main(int argc, char** argv) {
             case 'n': use_nms = true; break;
             case 'L': l_max = std::stof(optarg); break;
             case 'R': r_max = std::stof(optarg); break;
+            case 'V': l_post_max = std::stof(optarg); break;
             case 'G': gamma_ratio = std::stof(optarg); break;
             default: break;
         }
@@ -345,9 +347,9 @@ int main(int argc, char** argv) {
         l_max = gamma_ratio * mu_llr;
         std::cout << "[CONFIG] LLR Clipping (Proportional): gamma=" << gamma_ratio 
                   << " (mu_llr=" << mu_llr << ") -> L_ch_max=" << l_max 
-                  << ", R_max=" << r_max << std::endl;
-    } else if (l_max > 0.0f || r_max > 0.0f) {
-        std::cout << "[CONFIG] LLR Clipping (Fixed): L_ch_max=" << l_max << ", R_max=" << r_max << std::endl;
+                  << ", R_max=" << r_max << ", L_post_max=" << l_post_max << std::endl;
+    } else if (l_max > 0.0f || r_max > 0.0f || l_post_max > 0.0f) {
+        std::cout << "[CONFIG] LLR Clipping (Fixed): L_ch_max=" << l_max << ", R_max=" << r_max << ", L_post_max=" << l_post_max << std::endl;
     }
 
     uint32_t tile_bytes = sizeof(bfloat16) * TILE_ELEMENTS;
@@ -483,12 +485,13 @@ int main(int argc, char** argv) {
                     uint32_t s3 = core_generators[global_core_id].s[3];
                     uint32_t l_max_u32 = float_as_uint(l_max);
                     uint32_t r_max_u32 = float_as_uint(r_max);
+                    uint32_t l_post_max_u32 = float_as_uint(l_post_max);
 
                     std::vector<uint32_t> r_args = {
                         static_cast<uint32_t>(h_dram->address()), 0, h_bytes, 1,
                         b_brisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
                         mu_u32, sigma_u32, s0, s1, s2, s3,
-                        max_iterations, l_max_u32, r_max_u32
+                        max_iterations, l_max_u32, r_max_u32, l_post_max_u32
                     };
                     SetRuntimeArgs(program, reader, core, r_args);
 
@@ -496,7 +499,7 @@ int main(int argc, char** argv) {
                         core_stats_addr, 0,
                         b_ncrisc, h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
                         mu_u32, sigma_u32, s0, s1, s2, s3,
-                        max_iterations, l_max_u32, r_max_u32
+                        max_iterations, l_max_u32, r_max_u32, l_post_max_u32
                     };
                     SetRuntimeArgs(program, writer, core, w_args);
 
@@ -504,7 +507,7 @@ int main(int argc, char** argv) {
                         b_trisc0, b_trisc1, b_trisc2,
                         h_mat.N, h_mat.M, P_punctured, h_mat.max_check_deg,
                         mu_u32, sigma_u32, s0, s1, s2, s3,
-                        max_iterations, l_max_u32, r_max_u32
+                        max_iterations, l_max_u32, r_max_u32, l_post_max_u32
                     };
                     SetRuntimeArgs(program, compute, core, c_args);
                 }

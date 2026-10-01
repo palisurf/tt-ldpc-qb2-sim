@@ -223,6 +223,7 @@ inline void run_ldpc_worker(
     float sigma_llr,
     float l_max,
     float r_max,
+    float l_post_max,
     uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3,
     const uint16_t* h_col_idx,
     uint32_t* channel_llrs_pair,
@@ -379,6 +380,10 @@ inline void run_ldpc_worker(
                         if (r_max > 0.0f && r_mag0 > r_max) r_mag0 = r_max;
                         float r_new0 = uint_as_float(float_as_uint(r_mag0) | (msg_sign0 << 31));
                         float new_llr0 = q_val0[d] + r_new0;
+                        if (l_post_max > 0.0f) {
+                            if (new_llr0 > l_post_max) new_llr0 = l_post_max;
+                            else if (new_llr0 < -l_post_max) new_llr0 = -l_post_max;
+                        }
                         bf_llr0 = fp32_to_bf16(new_llr0);
                         bf_r0   = fp32_to_bf16(r_new0);
                     }
@@ -393,6 +398,10 @@ inline void run_ldpc_worker(
                         if (r_max > 0.0f && r_mag1 > r_max) r_mag1 = r_max;
                         float r_new1 = uint_as_float(float_as_uint(r_mag1) | (msg_sign1 << 31));
                         float new_llr1 = q_val1[d] + r_new1;
+                        if (l_post_max > 0.0f) {
+                            if (new_llr1 > l_post_max) new_llr1 = l_post_max;
+                            else if (new_llr1 < -l_post_max) new_llr1 = -l_post_max;
+                        }
                         bf_llr1 = fp32_to_bf16(new_llr1);
                         bf_r1   = fp32_to_bf16(r_new1);
                     }
@@ -480,6 +489,10 @@ inline void run_ldpc_worker(
                         uint32_t msg_sign0 = global_sign0 ^ node_sign0;
                         float r_new0 = uint_as_float(float_as_uint(r_mag0) | (msg_sign0 << 31));
                         float new_llr0 = q_val0[d] + r_new0;
+                        if (l_post_max > 0.0f) {
+                            if (new_llr0 > l_post_max) new_llr0 = l_post_max;
+                            else if (new_llr0 < -l_post_max) new_llr0 = -l_post_max;
+                        }
                         bf_llr0 = fp32_to_bf16(new_llr0);
                         bf_r0   = fp32_to_bf16(r_new0);
                     }
@@ -493,6 +506,10 @@ inline void run_ldpc_worker(
                         uint32_t msg_sign1 = global_sign1 ^ node_sign1;
                         float r_new1 = uint_as_float(float_as_uint(r_mag1) | (msg_sign1 << 31));
                         float new_llr1 = q_val1[d] + r_new1;
+                        if (l_post_max > 0.0f) {
+                            if (new_llr1 > l_post_max) new_llr1 = l_post_max;
+                            else if (new_llr1 < -l_post_max) new_llr1 = -l_post_max;
+                        }
                         bf_llr1 = fp32_to_bf16(new_llr1);
                         bf_r1   = fp32_to_bf16(r_new1);
                     }
