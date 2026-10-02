@@ -137,49 +137,59 @@ def main():
         df_live['Source'] = 'QuietBox 2 440 Tensix Cores (Christopher R. Jones, PhD, 2026 - Layered Decoder)'
         df_qb2 = pd.concat([df_qb2, df_live], ignore_index=True)
 
-    # Check for live 2.60 dB simulation point (query remote QB2 live via ssh or fallback to local log)
-    live_260 = None
-    try:
-        import subprocess
-        res = subprocess.run(['ssh', '-o', 'ConnectTimeout=2', 'ttuser@192.168.0.195', 'tmux capture-pane -pt ldpc_260 -J -S -5'],
-                             capture_output=True, text=True, timeout=5)
-        if res.returncode == 0 and res.stdout.strip():
-            for line in res.stdout.strip().splitlines():
-                if "dB]" in line and "Blocks:" in line and "FE:" in line:
-                    m_eb = re.search(r'\[\s*([-+]?\d*\.?\d+)\s*dB\]', line)
-                    m_bl = re.search(r'Blocks:\s*([\d,]+)/', line)
-                    m_fe = re.search(r'FE:\s*(\d+)/', line)
-                    m_fer = re.search(r'FER:\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)', line, re.IGNORECASE)
-                    m_ber = re.search(r'BER:\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)', line, re.IGNORECASE)
-                    if m_eb and m_bl and m_fe and m_fer and m_ber:
-                        eb = float(m_eb.group(1))
-                        bl = int(m_bl.group(1).replace(",", ""))
-                        fe = int(m_fe.group(1))
-                        fer = float(m_fer.group(1))
-                        r_ber = float(m_ber.group(1))
-                        bit_err = int(round(r_ber * bl * 2048))
-                        ser = bit_err / (bl * 2560.0) if bl > 0 else 0.0
-                        live_260 = {
-                            'EbN0_dB': eb,
-                            'Total_Blocks': bl,
-                            'Total_Bit_Errors': bit_err,
-                            'Total_Block_Errors': fe,
-                            'SER': ser,
-                            'FER': fer,
-                            'Is_Live': True
-                        }
-    except Exception:
-        pass
+    # Check for completed or live 2.60 dB simulation point
+    qb2_260_csv = "Results/results_AR4JA_r45_4c_128c_r12_amin_ebn0_2.60_2.60_step0.10_max22727273_min50_iter200_440cores.csv"
+    if os.path.exists(qb2_260_csv):
+        df_260 = pd.read_csv(qb2_260_csv)
+        if df_260['EbN0_dB'].iloc[0] not in df_qb2['EbN0_dB'].values:
+            print(f"Adding completed QB2 2.60 dB point: {df_260['EbN0_dB'].iloc[0]:.2f} dB (Blocks: {df_260['Total_Blocks'].iloc[0]:,}, FE: {df_260['Total_Block_Errors'].iloc[0]}, FER: {df_260['FER'].iloc[0]:.2e})")
+            df_260['Source'] = 'QuietBox 2 440 Tensix Cores (Christopher R. Jones, PhD, 2026 - Layered Decoder)'
+            df_260['Is_Live'] = False
+            df_260['SER'] = df_260['Total_Bit_Errors'] / (df_260['Total_Blocks'] * 2560.0)
+            df_qb2 = pd.concat([df_qb2, df_260], ignore_index=True)
+    else:
+        live_260 = None
+        try:
+            import subprocess
+            res = subprocess.run(['ssh', '-o', 'ConnectTimeout=2', 'ttuser@192.168.0.195', 'tmux capture-pane -pt ldpc_260 -J -S -5'],
+                                 capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                for line in res.stdout.strip().splitlines():
+                    if "dB]" in line and "Blocks:" in line and "FE:" in line:
+                        m_eb = re.search(r'\[\s*([-+]?\d*\.?\d+)\s*dB\]', line)
+                        m_bl = re.search(r'Blocks:\s*([\d,]+)/', line)
+                        m_fe = re.search(r'FE:\s*(\d+)/', line)
+                        m_fer = re.search(r'FER:\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)', line, re.IGNORECASE)
+                        m_ber = re.search(r'BER:\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)', line, re.IGNORECASE)
+                        if m_eb and m_bl and m_fe and m_fer and m_ber:
+                            eb = float(m_eb.group(1))
+                            bl = int(m_bl.group(1).replace(",", ""))
+                            fe = int(m_fe.group(1))
+                            fer = float(m_fer.group(1))
+                            r_ber = float(m_ber.group(1))
+                            bit_err = int(round(r_ber * bl * 2048))
+                            ser = bit_err / (bl * 2560.0) if bl > 0 else 0.0
+                            live_260 = {
+                                'EbN0_dB': eb,
+                                'Total_Blocks': bl,
+                                'Total_Bit_Errors': bit_err,
+                                'Total_Block_Errors': fe,
+                                'SER': ser,
+                                'FER': fer,
+                                'Is_Live': True
+                            }
+        except Exception:
+            pass
 
-    if live_260 is None:
-        log_260 = "Results/simulation_2.60dB_iter200_10B.log"
-        live_260 = get_live_qb2_point(log_260)
+        if live_260 is None:
+            log_260 = "Results/simulation_2.60dB_iter200_10B.log"
+            live_260 = get_live_qb2_point(log_260)
 
-    if live_260 and live_260['EbN0_dB'] not in df_qb2['EbN0_dB'].values:
-        print(f"Adding live QB2 2.60 dB point: {live_260['EbN0_dB']:.2f} dB (Blocks: {live_260['Total_Blocks']:,}, FE: {live_260['Total_Block_Errors']}, FER: {live_260['FER']:.2e})")
-        df_live_260 = pd.DataFrame([live_260])
-        df_live_260['Source'] = 'QuietBox 2 440 Tensix Cores (Christopher R. Jones, PhD, 2026 - Layered Decoder)'
-        df_qb2 = pd.concat([df_qb2, df_live_260], ignore_index=True)
+        if live_260 and live_260['EbN0_dB'] not in df_qb2['EbN0_dB'].values:
+            print(f"Adding live QB2 2.60 dB point: {live_260['EbN0_dB']:.2f} dB (Blocks: {live_260['Total_Blocks']:,}, FE: {live_260['Total_Block_Errors']}, FER: {live_260['FER']:.2e})")
+            df_live_260 = pd.DataFrame([live_260])
+            df_live_260['Source'] = 'QuietBox 2 440 Tensix Cores (Christopher R. Jones, PhD, 2026 - Layered Decoder)'
+            df_qb2 = pd.concat([df_qb2, df_live_260], ignore_index=True)
 
     # 2b. Load QB2 L_chan clipped results (L_max = 6.5) if available
     qb2_clip_csv = "Results/results_AR4JA_r45_4c_128c_r12_amin_clipL6.5R0.0_ebn0_2.50_2.50_step0.10_max22727272_min25_iter200_440cores.csv"
@@ -441,12 +451,13 @@ def main():
             arrowprops=dict(arrowstyle="->", color='#1e8449', lw=1.2, shrinkA=3, shrinkB=3)
         )
 
-    # 8. QB2 2.60 dB point (Active Simulation) - placed in right margin
+    # 8. QB2 2.60 dB point (Completed 10B Run) - placed in right margin
     pt_260 = qb2_valid_fer[qb2_valid_fer['EbN0_dB'] == 2.60]
     if not pt_260.empty:
         r26 = pt_260.iloc[0]
+        status_label = "completed" if not r26.get('Is_Live', False) else "active"
         ax2.annotate(
-            f"QB2 2.60 dB (Unclipped):\n{int(r26['Total_Block_Errors'])} FE ({r26['Total_Blocks']/1e9:.2f}B blks, active)\nFER = {r26['FER']:.2e} [{r26['FER_ci_lower']*1e11:.1f}e-11-{r26['FER_ci_upper']*1e9:.1f}e-9]\nSER = {r26['SER']:.2e} (Trapping Set)",
+            f"QB2 2.60 dB (Unclipped):\n{int(r26['Total_Block_Errors'])} FE ({r26['Total_Blocks']/1e9:.2f}B blks, {status_label})\nFER = {r26['FER']:.2e} [{r26['FER_ci_lower']*1e10:.2f}-{r26['FER_ci_upper']*1e10:.2f}]e-10\nSER = {r26['SER']:.2e} (Trapping Set)",
             xy=(2.60, r26['FER']),
             xytext=(16, 10), textcoords='offset points',
             fontsize=7.1, fontweight='bold', color='#145a32', ha='left',
@@ -457,6 +468,10 @@ def main():
     plt.tight_layout()
     fig.savefig(output_png, dpi=300, bbox_inches='tight')
     fig.savefig(jpl_folder_png, dpi=300, bbox_inches='tight')
+    doc_fig_png = "docs/figures/combined_ar4ja_r12_waterfall_iter200.png"
+    if os.path.exists("docs/figures"):
+        fig.savefig(doc_fig_png, dpi=300, bbox_inches='tight')
+        print(f"[OK] Saved copy to: {doc_fig_png}")
     print(f"[OK] Saved combined waterfall plot to: {output_png}")
     print(f"[OK] Saved duplicate to: {jpl_folder_png}")
     plt.close(fig)

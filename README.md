@@ -34,7 +34,7 @@ The baseline target code is the standard **CCSDS AR4JA Rate-1/2 LDPC code** ($N=
 
 ## Asymptotic Error Floor Results: JPL 2005 vs. QuietBox 2 (2026)
 
-The QuietBox 2 engine has completed over **18.5 BILLION codewords** ($>37\text{ Trillion}$ channel symbols) in a single continuous 200-iteration Monte Carlo campaign, penetrating deep into the $10^{-9}$ to $10^{-10}$ error floor regime.
+The QuietBox 2 engine has completed over **20.3 BILLION codewords** ($>41\text{ Trillion}$ channel symbols) in a single continuous 200-iteration Monte Carlo campaign, penetrating deep into the $10^{-9}$ to $10^{-10}$ error floor regime.
 
 ![AR4JA Rate-1/2 Waterfall Comparison: Historical JPL 2005 vs QuietBox 2 2026](Results/combined_ar4ja_r12_waterfall_iter200.png)
 
@@ -48,9 +48,9 @@ The QuietBox 2 engine has completed over **18.5 BILLION codewords** ($>37\text{ 
 | **2.30** | 1,354,760,000 | 25 | $1.85 \times 10^{-8}$ | $[1.20 - 2.72] \times 10^{-8}$ | $1.71 \times 10^{-9}$ | Completed |
 | **2.40** | **3,968,800,000** | **25** | **$6.30 \times 10^{-9}$** | $[4.08 - 9.29] \times 10^{-9}$ | **$5.09 \times 10^{-10}$** | Completed (3.97B blks) |
 | **2.50** | **4,667,520,000** | **11** | **$2.36 \times 10^{-9}$** | $[1.18 - 4.22] \times 10^{-9}$ | **$2.11 \times 10^{-10}$** | Completed (4.67B blks) |
-| **2.60** | **8,236,800,000** | **2** | **$2.43 \times 10^{-10}$** | $[2.94 \times 10^{-11} - 8.77 \times 10^{-10}]$ | **$1.99 \times 10^{-11}$** | **Active Live (172.1 Msps)** |
+| **2.60** | **10,000,000,120** | **3** | **$3.00 \times 10^{-10}$** | $[6.19 \times 10^{-11} - 8.77 \times 10^{-10}]$ | **$1.40 \times 10^{-11}$** | **Completed (10.0B Target)** |
 
-> **Key Finding:** Across more than 18.5 billion simulated blocks, the QuietBox 2 layered Approximate-Min\* decoder closely matches the slope of the historical JPL 2005 flood decoder benchmark down to $2.43 \times 10^{-10}$ FER within 95% Poisson confidence bounds. The empirical data exhibits a steep descent rate ($\approx 6.12\text{ decades/dB}$) through $2.60\ \mathrm{dB}$, and in $100\%$ of measured frame error events at $2.50$ and $2.60\ \mathrm{dB}$, the syndrome was unsatisfied ($H\hat{\mathbf{c}}^T \ne \mathbf{0}$), confirming that failures stem from trapping sets rather than undetected codeword errors and conclusively ruling out a hard error floor down to $2.43 \times 10^{-10}$ FER. Simulations are ongoing towards the 10 billion block target at $2.60\ \mathrm{dB}$.
+> **Key Finding:** Across more than 20.3 billion simulated blocks, the QuietBox 2 layered Approximate-Min\* decoder closely matches the slope of the historical JPL 2005 flood decoder benchmark down to $3.00 \times 10^{-10}$ FER within 95% Poisson confidence bounds. The empirical data exhibits a steep descent rate ($\approx 5.96\ \text{decades/dB}$) through $2.60\ \mathrm{dB}$ ($7.86\times$ reduction relative to $2.50\ \mathrm{dB}$), and in $100\%$ of measured frame error events at $2.50$ and $2.60\ \mathrm{dB}$ (14 out of 14), the syndrome was unsatisfied ($H\hat{\mathbf{c}}^T \ne \mathbf{0}$), confirming that failures stem from trapping sets rather than undetected codeword errors and conclusively ruling out a hard error floor down to $3.00 \times 10^{-10}$ FER.
 
 ---
 

@@ -67,11 +67,11 @@ def main():
         df_qb2 = pd.read_csv(qb2_unclipped_csv)
         df_260 = pd.DataFrame([{
             'EbN0_dB': 2.60,
-            'Total_Blocks': 7429840000,
-            'Total_Bit_Errors': 200,
-            'Total_Block_Errors': 2,
-            'BER': 2.20e-11,
-            'FER': 2.69e-10
+            'Total_Blocks': 10000000120,
+            'Total_Bit_Errors': 358,
+            'Total_Block_Errors': 3,
+            'BER': 1.75e-11,
+            'FER': 3.00e-10
         }])
         df_qb2 = pd.concat([df_qb2, df_260], ignore_index=True)
         ci_low, ci_high = [], []
@@ -278,10 +278,10 @@ def main():
     pt_260 = qb2_valid_fer[np.isclose(qb2_valid_fer['EbN0_dB'], 2.60, atol=0.01)]
     if not pt_260.empty:
         r26 = pt_260.iloc[0]
-        drop_factor = r25['FER'] / r26['FER'] if not pt_250.empty else 8.8
+        drop_factor = r25['FER'] / r26['FER'] if not pt_250.empty else 7.9
         ax2.annotate(
             r"$\mathbf{QB2\ 2.60\ dB\ (Unclipped)}$" + "\n" +
-            rf"${int(r26['Total_Block_Errors'])}\ \mathrm{{FE}}\ ({r26['Total_Blocks']/1e9:.2f}\ \mathrm{{Billion\ blocks,\ active}})$" + "\n" +
+            rf"${int(r26['Total_Block_Errors'])}\ \mathrm{{FE}}\ ({r26['Total_Blocks']/1e9:.2f}\ \mathrm{{Billion\ blocks,\ completed}})$" + "\n" +
             rf"$\mathrm{{FER}} = {r26['FER']:.2e}\ [{r26['FER_ci_lower']*1e10:.2f} - {r26['FER_ci_upper']*1e10:.2f}] \times 10^{{-10}}$" + "\n" +
             rf"$\mathbf{{Steep\ Descent}}$: ${drop_factor:.1f}\times$ drop from $2.50\ \mathrm{{dB}}$",
             xy=(2.60, r26['FER']), xytext=(28, -26), textcoords='offset points',
@@ -306,9 +306,9 @@ def main():
     info_box = (
         r"$\mathbf{Code}$: CCSDS AR4JA Rate-1/2 ($N=2560, K=1024, N_{\mathrm{tx}}=2048$)" + "\n"
         r"$\mathbf{Discrete\ Search}$: $d_{\min} \leq 52$ ($w=52$ valid codeword, Siegel)" + "\n"
-        rf"$\mathbf{{Waterfall\ Slope}}$: ${overall_slope:.2f}\ \mathrm{{dec/dB}}$ ($2.30\text{{--}}2.60\ \mathrm{{dB}}$, active)" + "\n"
+        rf"$\mathbf{{Waterfall\ Slope}}$: ${overall_slope:.2f}\ \mathrm{{dec/dB}}$ ($2.30\text{{--}}2.60\ \mathrm{{dB}}$, completed)" + "\n"
         r"$\mathbf{Slope\ Origin}$: Unresolved (waterfall roll-off vs. $d \approx 22$ ML approach)" + "\n"
-        r"$\mathbf{Observed\ Errors}$: $100\%\ H\hat{c}^T \neq 0\ (e_b \in [91, 301])$" + "\n"
+        r"$\mathbf{Observed\ Errors}$: $100\%\ H\hat{c}^T \neq 0\ (e_b \in [23, 301])$" + "\n"
         rf"$\mathbf{{Hard\ Floor\ Status}}$: Conclusively ruled out down to ${r26['FER']:.1e}$"
     )
     ax2.text(
