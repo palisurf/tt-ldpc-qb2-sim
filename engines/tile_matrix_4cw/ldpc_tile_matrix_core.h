@@ -1,0 +1,559 @@
+#pragma once
+
+#include <stdint.h>
+#include <cmath>
+
+inline float uint_as_float(uint32_t u) {
+    union { uint32_t u; float f; } converter;
+    converter.u = u;
+    return converter.f;
+}
+
+inline uint32_t float_as_uint(float f) {
+    union { uint32_t u; float f; } converter;
+    converter.f = f;
+    return converter.u;
+}
+// ==============================================================================
+// Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Engine
+// Architecture: Decoupled Access-Execute (DAE) with Native 32x32 Tensix Tiles
+// Target: Tenstorrent Blackhole (440 Tensix Cores, 2,200 RISC-V Processors)
+// ==============================================================================
+
+// ------------------------------------------------------------------------------
+// Circular Buffer (CB) Allocations in Tensix L1 SRAM (Total 1.5 MB Available)
+// ------------------------------------------------------------------------------
+namespace TileMatrixCB {
+    constexpr uint8_t CB_VNODE_A           = 0;   // 20 KB: Active evolving variable posterior LLRs (Batch k)
+    constexpr uint8_t CB_R_MSG             = 17;  // 68 KB: 7,680 check messages (34 tile-aligned circular FIFO)
+    constexpr uint8_t CB_H_OFFSET          = 2;   // 16 KB: Pre-shifted byte offsets (v * 8)
+    constexpr uint8_t CB_SCRATCH_GATHER_0  = 3;   // 4 KB: Stage 1 Gather Buffer (Double-buffered, 2 KB page)
+    constexpr uint8_t CB_SCRATCH_GATHER_1  = 4;   // 4 KB: Stage 1 Gather Buffer (Pong)
+    constexpr uint8_t CB_VNODE_B           = 5;   // 20 KB: Background AWGN pre-generation (Batch k+1)
+    constexpr uint8_t CB_SCRATCH_SCATTER_0 = 16;  // 4 KB: Stage 3 Scatter Buffer (Double-buffered, 2 KB page)
+    constexpr uint8_t CB_SCRATCH_SCATTER_1 = 18;  // 4 KB: Stage 3 Scatter Buffer (Pong)
+    constexpr uint8_t CB_TELEMETRY         = 24;  // 4 KB: Hardware semaphores, mailboxes, telemetry
+    constexpr uint32_t TELEMETRY_L1_BASE   = 0x3DC00;
+}
+
+// Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY
+namespace SyncSlot {
+    constexpr uint32_t BATCH_NOISE_READY   = 4;  // Incremented when AWGN noise is ready for batch
+    constexpr uint32_t GLOBAL_TILE_DONE    = 5;  // Incremented when a tile scatter finishes
+    constexpr uint32_t TRISC_CYCLES        = 6;  // TRISC elapsed cycles
+    constexpr uint32_t BRISC_CYCLES        = 7;  // BRISC elapsed cycles
+    constexpr uint32_t UNPACK_DRAIN_DONE   = 19; // TRISC0 UNPACK batch cleanup barrier
+    constexpr uint32_t EARLY_TERMINATION   = 20; // 1 if all 4 codewords converged early, 0 otherwise
+    constexpr uint32_t GATHER_BARRIER_W0   = 21; // Worker 0 gather sync
+    constexpr uint32_t GATHER_BARRIER_W1   = 22; // Worker 1 gather sync
+    constexpr uint32_t SCATTER_BARRIER_W0  = 23; // Worker 0 scatter sync
+    constexpr uint32_t SCATTER_BARRIER_W1  = 24; // Worker 1 scatter sync
+    constexpr uint32_t SCRATCH_GATHER_PTR  = 25; // Active gather L1 write pointer
+    constexpr uint32_t SCRATCH_SCATTER_PTR = 26; // Active scatter L1 read pointer
+    constexpr uint32_t ACTIVE_VNODE_CB     = 27; // Active variable node CB index (0 or 5)
+    constexpr uint32_t BATCH_BARRIER_BRISC  = 28; // BRISC batch rendezvous
+    constexpr uint32_t BATCH_BARRIER_NCRISC = 29; // NCRISC batch rendezvous
+    constexpr uint32_t BATCH_BARRIER_TRISC  = 30; // TRISC batch rendezvous
+    constexpr uint32_t ITER_DONE            = 31; // Iteration completion synchronization
+}
+
+// ------------------------------------------------------------------------------
+// Hardware PRNG for Channel AWGN Generation (Xoshiro128Plus)
+// ------------------------------------------------------------------------------
+struct Xoshiro128Plus {
+    uint32_t s[4];
+    void init(uint32_t seed) {
+        uint32_t z = seed;
+        for (int i = 0; i < 4; ++i) {
+            z += 0x9e3779b9;
+            z = (z ^ (z >> 16)) * 0x85ebca6b;
+            z = (z ^ (z >> 13)) * 0xc2b2ae35;
+            s[i] = z ^ (z >> 16);
+            if (s[i] == 0) s[i] = 1;
+        }
+    }
+    inline uint32_t next() {
+        const uint32_t result = s[0] + s[3];
+        const uint32_t t = s[1] << 9;
+        s[2] ^= s[0]; s[3] ^= s[1]; s[1] ^= s[2]; s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = (s[3] << 11) | (s[3] >> 21);
+        return result;
+    }
+    inline float next_uniform() {
+        uint32_t v = next();
+        if (v == 0) v = 1;
+        return static_cast<float>(v) * 2.3283064365386963e-10f;
+    }
+    // Advance PRNG by 2^64 draws via jump()
+    inline void jump() {
+        static const uint32_t JUMP[] = { 0x8764000b, 0xf542d2d3, 0x6fa035c3, 0x77f2db5b };
+        uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 4; i++) {
+            for (int b = 0; b < 32; b++) {
+                if (JUMP[i] & (1U << b)) {
+                    s0 ^= s[0]; s1 ^= s[1]; s2 ^= s[2]; s3 ^= s[3];
+                }
+                next();
+            }
+        }
+        s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3;
+    }
+};
+
+// ------------------------------------------------------------------------------
+// Fast Branchless SFPU-Style Transcendental Functions
+// Matches the minimax & Maclaurin polynomials of the Blackhole Tensix SFPU
+// ------------------------------------------------------------------------------
+inline float sfpu_fast_log(float a) {
+    if (a <= 1e-7f) return -16.11809565f;
+    uint32_t u = float_as_uint(a);
+    int32_t exp_val = static_cast<int32_t>((u >> 23) & 0xFF) - 127;
+    uint32_t m_bits = (u & 0x007FFFFF) | 0x3F800000;
+    float m = uint_as_float(m_bits);
+    float z = m - 1.0f;
+
+    float p = -0.0528f;
+    p = p * z + 0.1264f;
+    p = p * z - 0.1678f;
+    p = p * z + 0.2057f;
+    p = p * z - 0.2490f;
+    p = p * z + 0.3328f;
+    p = p * z - 0.5f;
+    p = p * z + 1.0f;
+    float ln_m = p * z;
+
+    return ln_m + static_cast<float>(exp_val) * 0.69314718f;
+}
+
+inline float sfpu_fast_sqrt(float val) {
+    if (val <= 1e-7f) return 0.0f;
+    uint32_t u = float_as_uint(val);
+    uint32_t magic = 0x5F375A86U;
+    uint32_t approx_u = magic - (u >> 1);
+    float approx = uint_as_float(approx_u);
+    float neg_half_val = val * -0.5f;
+    approx = ((approx * approx) * neg_half_val + 1.5f) * approx;
+    approx = ((approx * approx) * neg_half_val + 1.5f) * approx;
+    return approx * val;
+}
+
+inline float sfpu_fast_sin(float val) {
+    constexpr float PI = 3.14159265358979323846f;
+    constexpr float TWO_PI = 2.0f * PI;
+    while (val > PI) val -= TWO_PI;
+    while (val < -PI) val += TWO_PI;
+    float tmp = val;
+    float out = tmp;
+    tmp = tmp * val * val; out += -0.16666666666666666f * tmp;
+    tmp = tmp * val * val; out += 0.008333333333333333f * tmp;
+    tmp = tmp * val * val; out += -0.0001984126984126984f * tmp;
+    tmp = tmp * val * val; out += 0.0000027557319223985f * tmp;
+    return out;
+}
+
+inline float sfpu_fast_cos(float val) {
+    constexpr float PI = 3.14159265358979323846f;
+    constexpr float TWO_PI = 2.0f * PI;
+    while (val > PI) val -= TWO_PI;
+    while (val < -PI) val += TWO_PI;
+    float out = 1.0f;
+    float tmp = val * val; out += -0.5f * tmp;
+    tmp = tmp * val * val; out += 0.041666666666666664f * tmp;
+    tmp = tmp * val * val; out += -0.001388888888888889f * tmp;
+    tmp = tmp * val * val; out += 0.0000248015873015873f * tmp;
+    return out;
+}
+
+inline float fast_rsqrt(float x) {
+    uint32_t u = float_as_uint(x);
+    u = 0x5F3759DF - (u >> 1);
+    float y = uint_as_float(u);
+    float xhalf = 0.5f * x;
+    y = y * (1.5f - xhalf * y * y);
+    y = y * (1.5f - xhalf * y * y);
+    return y;
+}
+
+inline float fast_sqrt(float x) {
+    return x * fast_rsqrt(x);
+}
+
+inline float fast_ln(float s) {
+    uint32_t u = float_as_uint(s);
+    int32_t exp = static_cast<int32_t>((u >> 23) & 0xFF) - 127;
+    u = (u & 0x007FFFFF) | 0x3F800000;
+    float m = uint_as_float(u) - 1.0f;
+    float p = -0.02397957f;
+    p = p * m + 0.10150005f;
+    p = p * m - 0.21029369f;
+    p = p * m + 0.32529514f;
+    p = p * m - 0.49937260f;
+    p = p * m + 0.99999183f;
+    p = p * m;
+    return static_cast<float>(exp) * 0.69314718056f + p;
+}
+
+inline void generate_awgn_pair(Xoshiro128Plus& rng, float mu_llr, float sigma_llr, float& llr0, float& llr1) {
+    constexpr float INT32_TO_UNIT = 4.656612875245797e-10f;
+    float v1, v2, s;
+    do {
+        int32_t u1 = static_cast<int32_t>(rng.next());
+        int32_t u2 = static_cast<int32_t>(rng.next());
+        v1 = static_cast<float>(u1) * INT32_TO_UNIT;
+        v2 = static_cast<float>(u2) * INT32_TO_UNIT;
+        s = v1 * v1 + v2 * v2;
+    } while (s >= 1.0f || s <= 1e-15f);
+
+    float rsqrt_s = fast_rsqrt(s);
+    float ln_s = fast_ln(s);
+    float scale = sigma_llr * fast_sqrt(-2.0f * ln_s) * rsqrt_s;
+    llr0 = mu_llr + v1 * scale;
+    llr1 = mu_llr + v2 * scale;
+}
+
+inline float bf16_to_fp32(uint16_t bf) {
+    uint32_t u = static_cast<uint32_t>(bf) << 16;
+    float f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+inline uint16_t fp32_to_bf16(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(u));
+    // Hardware PACK unit truncates FP32 DEST register mantissa to bfloat16
+    return static_cast<uint16_t>(u >> 16);
+}
+
+inline void init_vnodes_worker0(
+    uint32_t vnode_l1,
+    float mu_llr,
+    float sigma_llr,
+    Xoshiro128Plus& rng
+) {
+    bool bench = (sigma_llr <= 0.0f);
+    uint16_t mu_bf = fp32_to_bf16(mu_llr);
+    uint32_t mu_word = static_cast<uint32_t>(mu_bf) | (static_cast<uint32_t>(mu_bf) << 16);
+
+    for (uint32_t t = 0; t < 8; ++t) {
+        uint32_t tile_base = vnode_l1 + t * 2048;
+        for (uint32_t p = 0; p < 16; ++p) {
+            auto* p32 = reinterpret_cast<uint32_t*>(tile_base + 128 * p);
+            if (bench) {
+                #pragma GCC unroll 4
+                for (int i = 0; i < 16; ++i) {
+                    p32[i] = mu_word;
+                }
+            } else {
+                for (int k = 0; k < 4; ++k) {
+                    for (int cw = 0; cw < 4; ++cw) {
+                        float l_even, l_odd;
+                        generate_awgn_pair(rng, mu_llr, sigma_llr, l_even, l_odd);
+                        uint16_t bf_e = fp32_to_bf16(l_even);
+                        uint16_t bf_o = fp32_to_bf16(l_odd);
+                        p32[4 * k + cw] = static_cast<uint32_t>(bf_e) | (static_cast<uint32_t>(bf_o) << 16);
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t t = 8; t < 10; ++t) {
+        uint32_t tile_base = vnode_l1 + t * 2048;
+        for (uint32_t p = 0; p < 16; ++p) {
+            auto* p32 = reinterpret_cast<uint32_t*>(tile_base + 128 * p);
+            #pragma GCC unroll 4
+            for (int i = 0; i < 16; ++i) {
+                p32[i] = 0;
+            }
+        }
+    }
+}
+
+inline void init_vnodes_worker1(
+    uint32_t vnode_l1,
+    float mu_llr,
+    float sigma_llr,
+    Xoshiro128Plus& rng
+) {
+    bool bench = (sigma_llr <= 0.0f);
+    uint16_t mu_bf = fp32_to_bf16(mu_llr);
+    uint32_t mu_word = static_cast<uint32_t>(mu_bf) | (static_cast<uint32_t>(mu_bf) << 16);
+
+    for (uint32_t t = 0; t < 8; ++t) {
+        uint32_t tile_base = vnode_l1 + t * 2048;
+        for (uint32_t p = 0; p < 16; ++p) {
+            auto* p32 = reinterpret_cast<uint32_t*>(tile_base + 128 * p + 64);
+            if (bench) {
+                #pragma GCC unroll 4
+                for (int i = 0; i < 16; ++i) {
+                    p32[i] = mu_word;
+                }
+            } else {
+                for (int k = 0; k < 4; ++k) {
+                    for (int cw = 0; cw < 4; ++cw) {
+                        float l_even, l_odd;
+                        generate_awgn_pair(rng, mu_llr, sigma_llr, l_even, l_odd);
+                        uint16_t bf_e = fp32_to_bf16(l_even);
+                        uint16_t bf_o = fp32_to_bf16(l_odd);
+                        p32[4 * k + cw] = static_cast<uint32_t>(bf_e) | (static_cast<uint32_t>(bf_o) << 16);
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t t = 8; t < 10; ++t) {
+        uint32_t tile_base = vnode_l1 + t * 2048;
+        for (uint32_t p = 0; p < 16; ++p) {
+            auto* p32 = reinterpret_cast<uint32_t*>(tile_base + 128 * p + 64);
+            #pragma GCC unroll 4
+            for (int i = 0; i < 16; ++i) {
+                p32[i] = 0;
+            }
+        }
+    }
+}
+
+
+// ------------------------------------------------------------------------------
+// Tile Geometry & Systolic Parameters
+// ------------------------------------------------------------------------------
+constexpr uint32_t TILE_WIDTH               = 32;  // Native Tensix Matrix FPU Tile Width
+constexpr uint32_t TILE_HEIGHT              = 32;  // Native Tensix Matrix FPU Tile Height
+constexpr uint32_t TILE_ELEMENTS            = 1024; // 32 * 32
+constexpr uint32_t NUM_CW_PARALLEL          = 4;   // 4 parallel codewords processed in lockstep
+
+// Check-Node Groupings per Tile Pass
+constexpr uint32_t CHECKS_PER_TILE_DEG6     = 32;  // 32 checks * 6 edges = 192 edges (4 faces x 8 checks)
+constexpr uint32_t CHECKS_PER_TILE_DEG3     = 64;  // 64 checks * 3 edges = 192 edges (4 faces x 16 checks)
+constexpr uint32_t BOUNDARY_CHECKS_DEG6     = 32;  // 32 checks * 6 edges = 192 edges
+constexpr uint32_t BOUNDARY_CHECKS_DEG3     = 64;  // 64 checks * 3 edges = 192 edges
+
+// Circulant-Aware Tile Snapping for CCSDS AR4JA Rate-1/2 (p = 512, p' = 128)
+// 16 tiles of 32 checks = 512 checks per deg-6 circulant block (2 blocks = 32 tiles)
+// 8 tiles of 64 checks = 512 checks per deg-3 circulant block (1 block = 8 tiles)
+constexpr uint32_t TILES_PER_DEG6_BLOCK     = 16;  // 16 * 32 = 512 checks (2 blocks = 32 tiles)
+constexpr uint32_t TILES_PER_DEG3_BLOCK     = 8;   // 8 * 64 = 512 checks (1 block = 8 tiles)
+constexpr uint32_t TOTAL_TILES_PER_ITER     = 40;  // 32 degree-6 tiles + 8 degree-3 tiles
+
+// Active Elements per Tile Type
+constexpr uint32_t ACTIVE_EDGES_FULL_TILE   = 192; // 192 edges * 4 codewords = 768 elements
+constexpr uint32_t ACTIVE_ROWS_FULL_TILE    = 24;  // 24 rows * 32 cols = 768 elements
+
+// Native Tensix Systolic Tile Element Addressing (32x32 bfloat16 tile format)
+inline uint32_t get_tile_index(uint32_t r_dst, uint32_t lane) {
+    uint32_t pair = r_dst / 2;
+    uint32_t is_odd_reg = r_dst % 2;
+    uint32_t row = (lane < 16) ? (2 * pair) : (2 * pair + 1);
+    uint32_t col = (lane < 16) ? (2 * lane + is_odd_reg) : (2 * (lane - 16) + is_odd_reg);
+    return row * 32 + col;
+}
+
+// ------------------------------------------------------------------------------
+// 4-Codeword Packed Data Structures
+// ------------------------------------------------------------------------------
+#pragma pack(push, 2)
+struct alignas(8) Packed4CW_BF16 {
+    uint16_t cw[4]; // [0..3] bfloat16 LLRs for 4 independent codewords
+
+    inline void set_all(uint16_t val) {
+        cw[0] = val; cw[1] = val; cw[2] = val; cw[3] = val;
+    }
+
+    inline void apply_freeze_mask(const Packed4CW_BF16& updated, uint8_t active_mask) {
+        if (active_mask & 0x1) cw[0] = updated.cw[0];
+        if (active_mask & 0x2) cw[1] = updated.cw[1];
+        if (active_mask & 0x4) cw[2] = updated.cw[2];
+        if (active_mask & 0x8) cw[3] = updated.cw[3];
+    }
+};
+#pragma pack(pop)
+
+static_assert(sizeof(Packed4CW_BF16) == 8, "Packed4CW_BF16 must be exactly 8 bytes (64 bits)");
+
+// ------------------------------------------------------------------------------
+// TT-Metal Native 32x32 Tile Face Typed Struct Overlay
+// ------------------------------------------------------------------------------
+#pragma pack(push, 2)
+struct alignas(8) FaceRow16 {
+    // 16 bfloat16 elements = four 4-codeword groups = 32 bytes
+    Packed4CW_BF16 grp[4]; 
+};
+
+struct alignas(32) TileFace16x16 {
+    FaceRow16 row[16]; // 16 rows x 32 bytes = 512 bytes
+};
+
+struct alignas(2048) TensixTile32x32 {
+    TileFace16x16 face[4]; // 4 faces x 512 bytes = 2,048 bytes
+};
+#pragma pack(pop)
+
+#define TT_FACE_OFFSET(row, col) ( \
+    (((uint32_t)(row) & 16) << 6) | \
+    (((uint32_t)(col) & 16) << 5) | \
+    (((uint32_t)(row) & 15) << 5) | \
+    (((uint32_t)(col) & 15) << 1)   \
+)
+
+// ------------------------------------------------------------------------------
+// Compile-Time Edge-Per-Register Scratchpad LUT (Face-Aligned Architecture)
+// Maps (check block, edge index) directly to the 4 physical tile faces:
+//   Worker 0 -> Face 0 (0..23) and Face 2 (24..47)
+//   Worker 1 -> Face 1 (0..23) and Face 3 (24..47)
+// ------------------------------------------------------------------------------
+struct FaceScratchLUT {
+    uint16_t w0_even[48];
+    uint16_t w0_odd[48];
+    uint16_t w1_even[48];
+    uint16_t w1_odd[48];
+
+    constexpr FaceScratchLUT() : w0_even{}, w0_odd{}, w1_even{}, w1_odd{} {
+        for (uint32_t p = 0; p < 48; ++p) {
+            uint32_t face_w0 = (p < 24) ? 0 : 2;
+            uint32_t face_w1 = (p < 24) ? 1 : 3;
+            uint32_t p_in_half = (p < 24) ? p : (p - 24);
+            uint32_t d  = p_in_half / 4;
+            uint32_t kh = p_in_half % 4;
+
+            // Worker 0: strictly Faces 0 & 2
+            w0_even[p] = static_cast<uint16_t>(face_w0 * 512 + (2 * d) * 32 + kh * 8);
+            w0_odd[p]  = static_cast<uint16_t>(face_w0 * 512 + (2 * d + 1) * 32 + kh * 8);
+
+            // Worker 1: strictly Faces 1 & 3
+            w1_even[p] = static_cast<uint16_t>(face_w1 * 512 + (2 * d) * 32 + kh * 8);
+            w1_odd[p]  = static_cast<uint16_t>(face_w1 * 512 + (2 * d + 1) * 32 + kh * 8);
+        }
+    }
+};
+
+inline constexpr FaceScratchLUT SCRATCH_FACE_LUT;
+
+inline uint32_t get_tile_vnode_byte_offset(uint32_t v) {
+    uint32_t t = v / 256;
+    uint32_t v_loc = v % 256;
+    uint32_t row = v_loc / 8;
+    uint32_t k = v_loc % 8;
+    
+    uint32_t face = (row < 16) ? ((k < 4) ? 0 : 1) : ((k < 4) ? 2 : 3);
+    uint32_t col_grp = (k < 4) ? k : (k - 4);
+    
+    return t * 2048 + (face * 512) + ((row & 15) << 5) + (col_grp << 3);
+}
+
+inline uint32_t get_scratch_byte_offset(uint32_t reg_idx, uint32_t lane) {
+    uint32_t f = reg_idx / 8;
+    uint32_t b = (reg_idx % 8) / 2;
+    uint32_t is_odd = reg_idx % 2;
+    uint32_t row_in_block = lane / 8;
+    uint32_t col_in_row   = lane % 8;
+    uint32_t row_in_face  = b * 4 + row_in_block;
+    uint32_t col_in_face  = 2 * col_in_row + is_odd;
+    return (f * 256 + row_in_face * 16 + col_in_face) * 2;
+}
+
+struct TileIndexLUT {
+    uint16_t base_idx[32][8];
+    constexpr TileIndexLUT() : base_idx{} {
+        for (uint32_t r = 0; r < 32; ++r) {
+            uint32_t pair = r / 2;
+            uint32_t is_odd_reg = r % 2;
+            for (uint32_t c_loc = 0; c_loc < 8; ++c_loc) {
+                uint32_t lane = c_loc * 4;
+                uint32_t row = (lane < 16) ? (2 * pair) : (2 * pair + 1);
+                uint32_t col = (lane < 16) ? (2 * lane + is_odd_reg) : (2 * (lane - 16) + is_odd_reg);
+                base_idx[r][c_loc] = static_cast<uint16_t>(row * 32 + col);
+            }
+        }
+    }
+};
+
+inline constexpr TileIndexLUT TILE_BASE_LUT;
+
+// Flattened Linear Base Index LUT for 1-D Gather and Scatter Loops (Zero Div / Modulo Overhead)
+struct StaticTileBaseLUT {
+    uint16_t deg6[240];
+    uint16_t deg3[240];
+
+    constexpr StaticTileBaseLUT() : deg6{}, deg3{} {
+        // Degree-6: 40 checks * 6 edges
+        uint32_t e6 = 0;
+        for (uint32_t b = 0; b < 5; ++b) {
+            for (uint32_t c_loc = 0; c_loc < 8; ++c_loc) {
+                for (uint32_t d = 0; d < 6; ++d) {
+                    uint32_t r = b * 6 + d;
+                    uint32_t pair = r / 2;
+                    uint32_t is_odd_reg = r % 2;
+                    uint32_t lane = c_loc * 4;
+                    uint32_t row = (lane < 16) ? (2 * pair) : (2 * pair + 1);
+                    uint32_t col = (lane < 16) ? (2 * lane + is_odd_reg) : (2 * (lane - 16) + is_odd_reg);
+                    deg6[e6++] = static_cast<uint16_t>(row * 32 + col);
+                }
+            }
+        }
+
+        // Degree-3: 80 checks * 3 edges
+        uint32_t e3 = 0;
+        for (uint32_t b = 0; b < 10; ++b) {
+            for (uint32_t c_loc = 0; c_loc < 8; ++c_loc) {
+                for (uint32_t d = 0; d < 3; ++d) {
+                    uint32_t r = b * 3 + d;
+                    uint32_t pair = r / 2;
+                    uint32_t is_odd_reg = r % 2;
+                    uint32_t lane = c_loc * 4;
+                    uint32_t row = (lane < 16) ? (2 * pair) : (2 * pair + 1);
+                    uint32_t col = (lane < 16) ? (2 * lane + is_odd_reg) : (2 * (lane - 16) + is_odd_reg);
+                    deg3[e3++] = static_cast<uint16_t>(row * 32 + col);
+                }
+            }
+        }
+    }
+};
+
+inline constexpr StaticTileBaseLUT STATIC_TILE_LUT;
+
+// ------------------------------------------------------------------------------
+// Runtime Tile Schedule Representation (Generated parametric from .chinn.out)
+// ------------------------------------------------------------------------------
+struct TileScheduleDescriptor {
+    uint16_t check_start_idx;  // Starting check node index in matrix H
+    uint8_t  check_degree;      // 6 or 3
+    uint8_t  num_checks;        // 40 (full deg-6), 80 (full deg-3), or 32 (boundary)
+    uint16_t num_edges;         // num_checks * check_degree (240, 192, or 96)
+    uint16_t h_offset_start;    // Byte offset into CB_H_OFFSET
+    uint16_t r_msg_page_offset; // Page offset into CB_R_MSG
+};
+
+// ------------------------------------------------------------------------------
+// Batch Telemetry & Convergence Stats
+// ------------------------------------------------------------------------------
+struct alignas(16) TileMatrixBatchStats {
+    uint32_t total_blocks;      // Total codewords simulated (batches * 4)
+    uint32_t bit_errors[4];     // Bit error count per codeword
+    uint32_t frame_errors[4];   // Frame error flag per codeword (0 or 1)
+    uint32_t iterations_taken[4];// Iterations to convergence per codeword
+    uint32_t early_terminated;  // 4-bit bitmask of codewords that converged early
+    uint32_t cycles_elapsed;    // Total clock cycles taken by batch
+};
+
+// ------------------------------------------------------------------------------
+
+
+// ------------------------------------------------------------------------------
+// Approximate-Min* Formulation (Dr. Christopher R. Jones, MILCOM 2003)
+// 2-Region Piecewise Linear Correction:
+// g(Δ) = 0.69315 - 0.40 * Δ        if Δ < 0.5
+//        0.49315 - 0.328 * (Δ - 0.5) if 0.5 <= Δ < 2.0
+//        0.0                         if Δ >= 2.0
+// ------------------------------------------------------------------------------
+inline float approx_min_star_scalar(float a, float b) {
+    float min_val = (a < b) ? a : b;
+    float max_val = (a > b) ? a : b;
+    float diff = max_val - min_val;
+    float line1 = 0.69315f - 0.40f * diff;
+    float line2 = 0.65715f - 0.328f * diff;
+    float corr = (line1 > line2) ? line1 : line2;
+    if (corr < 0.0f) corr = 0.0f;
+    float res = min_val - corr;
+    return (res > 0.0f) ? res : 0.0f;
+}
