@@ -1,5 +1,7 @@
 # Uncoded BPSK AWGN Channel & Noise Source Benchmark
 
+**Author:** Dr. Christopher R. Jones  
+
 ## 1. Context & Motivation
 To confirm that the Monte Carlo error rates recorded down to the ultra-deep error floor ($10^{-8} - 10^{-9}$ FER) are physically and mathematically sound, the underlying Gaussian noise generator, transcendental arithmetic, and $E_b/N_0 \to \text{LLR}$ scaling formulas must be validated against the exact theoretical Bit Error Rate (BER) of an uncoded BPSK system ($R = 1.0$).
 

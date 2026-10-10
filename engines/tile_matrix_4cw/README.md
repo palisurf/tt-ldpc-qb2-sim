@@ -1,5 +1,7 @@
 # QuietBox 2 Tile Matrix 4-Codeword LDPC Decoder Engine (`tile_matrix_4cw`)
 
+**Author:** Dr. Christopher R. Jones  
+
 ## Architectural Summary
 The `tile_matrix_4cw` engine implements the **Decoupled Access-Execute (DAE)** paradigm on Tenstorrent QuietBox 2 (4 Blackhole ASICs, 440 Tensix cores, 2,200 RISC-V processors). 
 

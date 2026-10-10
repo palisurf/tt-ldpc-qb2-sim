@@ -3,6 +3,7 @@
 - **Component**: TT-Fabric Physical System Discovery
 - **File**: `tt_metal/fabric/physical_system_discovery.cpp`
 - **Target Hardware**: Tenstorrent QuietBox 2 (4x Blackhole PCIe processors)
+- **Author**: Dr. Christopher R. Jones
 - **Severity**: Low / Cosmetic (Fallback works correctly, but emits recurring LogAlways warnings)
 - **Reported Date**: 2026-09-28
 

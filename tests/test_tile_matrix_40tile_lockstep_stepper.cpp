@@ -435,7 +435,7 @@ inline BatchStats decode_tile_matrix_batch(
                         float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
                         float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
 
-                        q[r] = to_bf16(l_val - r_old);
+                        q[r] = l_val - r_old;
                         signs[r] = (q[r] < 0.0f) ? -1.0f : 1.0f;
                         mags[r]  = std::fabs(q[r]);
                         total_sign *= signs[r];
@@ -458,9 +458,8 @@ inline BatchStats decode_tile_matrix_batch(
                         uint32_t offset = get_scratch_byte_offset(base_r + r, col);
                         float edge_sign = total_sign * signs[r];
                         float edge_mag = (r == min_idx) ? m_others : m_all;
-                        float r_raw = edge_sign * edge_mag;
-                        float l_new = to_bf16(q[r] + r_raw);
-                        float r_new = to_bf16(r_raw);
+                        float r_new = edge_sign * edge_mag;
+                        float l_new = q[r] + r_new;
 
                         if (post_clip_max > 0.0f) {
                             if (l_new > post_clip_max) l_new = post_clip_max;
@@ -501,26 +500,24 @@ inline BatchStats decode_tile_matrix_batch(
             }
         }
 
-        // Parity Check Evaluation across all 4 codewords in a single pass over M checks
-        int syn[4] = {0, 0, 0, 0};
-        bool any_unsat[4] = {false, false, false, false};
-        for (uint32_t m = 0; m < pcm.M; ++m) {
-            syn[0] = syn[1] = syn[2] = syn[3] = 0;
-            for (uint32_t off : pcm.check_to_var_offsets[m]) {
-                const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1 + off);
-                syn[0] ^= (p[0] >> 15);
-                syn[1] ^= (p[1] >> 15);
-                syn[2] ^= (p[2] >> 15);
-                syn[3] ^= (p[3] >> 15);
-            }
-            if (syn[0]) any_unsat[0] = true;
-            if (syn[1]) any_unsat[1] = true;
-            if (syn[2]) any_unsat[2] = true;
-            if (syn[3]) any_unsat[3] = true;
-        }
-
+        // Parity Check Evaluation for Active Codewords (Early Check Exit)
         for (int c = 0; c < 4; ++c) {
-            if ((active_mask & (1 << c)) && !any_unsat[c]) {
+            if (!(active_mask & (1 << c))) continue;
+
+            bool satisfied = true;
+            for (uint32_t m = 0; m < pcm.M; ++m) {
+                int syn = 0;
+                for (uint32_t off : pcm.check_to_var_offsets[m]) {
+                    const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1 + off);
+                    if (bf16_to_fp32(p[c]) < 0.0f) syn ^= 1;
+                }
+                if (syn != 0) {
+                    satisfied = false;
+                    break;
+                }
+            }
+
+            if (satisfied) {
                 stats.converged[c] = true;
                 stats.iters_taken[c] = iter + 1;
                 active_mask &= ~(1 << c);
@@ -536,7 +533,7 @@ inline BatchStats decode_tile_matrix_batch(
             stats.iters_taken[c] = max_iter;
             for (uint32_t off : pcm.info_var_offsets) {
                 const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1 + off);
-                if ((p[c] >> 15) & 1) stats.bit_errors[c]++;
+                if (bf16_to_fp32(p[c]) < 0.0f) stats.bit_errors[c]++;
             }
         }
     }
@@ -916,7 +913,7 @@ int main(int argc, char** argv) {
                         float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
                         float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
 
-                        q[r] = to_bf16(l_val - r_old);
+                        q[r] = l_val - r_old;
                         signs[r] = (q[r] < 0.0f) ? -1.0f : 1.0f;
                         mags[r]  = std::fabs(q[r]);
                         total_sign *= signs[r];
@@ -939,9 +936,8 @@ int main(int argc, char** argv) {
                         uint32_t offset = get_scratch_byte_offset(base_r + r, col);
                         float edge_sign = total_sign * signs[r];
                         float edge_mag = (r == min_idx) ? m_others : m_all;
-                        float r_raw = edge_sign * edge_mag;
-                        float l_new = to_bf16(q[r] + r_raw);
-                        float r_new = to_bf16(r_raw);
+                        float r_new = edge_sign * edge_mag;
+                        float l_new = q[r] + r_new;
 
                         *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
                         *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);

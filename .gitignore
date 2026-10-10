@@ -48,10 +48,12 @@ Results/Scalar_5w/
 !Results/results_uncoded_bpsk_awgn.csv
 !Results/uncoded_bpsk_waterfall.png
 !Results/combined_ar4ja_r12_waterfall_iter200.png
-!docs/uncoded_bpsk_validation.md
-!docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.md
 !docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.html
 !docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.pdf
+!docs/MD_files/
+docs/MD_files/*
+!docs/MD_files/uncoded_bpsk_validation.md
+!docs/MD_files/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.md
 
 # Additional Test Binaries & Diagnostic Dumps
 test_40tile_stepper
