@@ -2,8 +2,7 @@
 
 ### Tenstorrent QuietBox 2 (QB2) Ultra-Deep Error Floor Engine (440 Tensix Cores / 2,200 RISC-V Workers)
 
-**Author:**  
-- **Christopher R. Jones, PhD** (Originator of Approximate-Min\*, in collaboration with UCLA and NASA JPL)  
+**Author:** Dr. Christopher R. Jones  
 
 ---
 

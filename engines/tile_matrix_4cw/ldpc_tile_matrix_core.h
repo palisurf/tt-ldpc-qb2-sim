@@ -222,7 +222,9 @@ inline float bf16_to_fp32(uint16_t bf) {
 inline uint16_t fp32_to_bf16(float f) {
     uint32_t u;
     std::memcpy(&u, &f, sizeof(u));
-    // Hardware PACK unit truncates FP32 DEST register mantissa to bfloat16
+    uint32_t lsb = (u >> 16) & 1;
+    uint32_t bias = 0x7FFF + lsb;
+    u += bias;
     return static_cast<uint16_t>(u >> 16);
 }
 
@@ -443,13 +445,10 @@ inline uint32_t get_tile_vnode_byte_offset(uint32_t v) {
 
 inline uint32_t get_scratch_byte_offset(uint32_t reg_idx, uint32_t lane) {
     uint32_t f = reg_idx / 8;
-    uint32_t b = (reg_idx % 8) / 2;
-    uint32_t is_odd = reg_idx % 2;
-    uint32_t row_in_block = lane / 8;
-    uint32_t col_in_row   = lane % 8;
-    uint32_t row_in_face  = b * 4 + row_in_block;
-    uint32_t col_in_face  = 2 * col_in_row + is_odd;
-    return (f * 256 + row_in_face * 16 + col_in_face) * 2;
+    uint32_t r_face = reg_idx % 8;
+    uint32_t row_in_face = (lane < 16) ? (2 * r_face) : (2 * r_face + 1);
+    uint32_t col_in_face = (lane < 16) ? lane : (lane - 16);
+    return f * 512 + row_in_face * 32 + col_in_face * 2;
 }
 
 struct TileIndexLUT {

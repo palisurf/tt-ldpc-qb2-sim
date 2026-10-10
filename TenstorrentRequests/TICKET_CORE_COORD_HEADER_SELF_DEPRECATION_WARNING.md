@@ -3,6 +3,7 @@
 - **Component**: TT-Metalium Core Coordinate & Topology Headers
 - **Header File**: `tt_metal/include/tt-metalium/core_coord.hpp` (also reflected in `build/include/tt-metalium/core_coord.hpp`)
 - **Target Hardware**: Tenstorrent QuietBox 2 / Blackhole / Wormhole
+- **Author**: Dr. Christopher R. Jones
 - **Severity**: Low / Build Cleanliness (Spurious compiler warning emitted during downstream C++ compilation)
 - **Reported Date**: 2026-09-28
 

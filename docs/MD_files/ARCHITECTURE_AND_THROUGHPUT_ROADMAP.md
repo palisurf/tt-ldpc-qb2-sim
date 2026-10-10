@@ -1,7 +1,7 @@
 # Tenstorrent QuietBox 2 AR4JA LDPC Monte Carlo Decoder Engine
 ## Comprehensive Architecture, Implementation & Throughput Scaling Roadmap
 
-**Project Lead / Algorithm Originator:** Dr. Christopher R. Jones (Approximate-Min* MILCOM 2003)  
+**Author:** Dr. Christopher R. Jones  
 **Target Hardware:** Tenstorrent QuietBox 2 (4 Blackhole ASICs, 2x2 Torus/Mesh, 440 Tensix Cores)  
 **Repository:** [`palisurf/tt-ldpc-qb2-sim`](https://github.com/palisurf/tt-ldpc-qb2-sim)  
 **Primary Benchmark Code:** CCSDS AR4JA Rate-1/2 ($N=2560, M=1536, K=1024, P=512$, $N_{\text{tx}}=2048$)  
