@@ -28,10 +28,63 @@
 namespace fs = std::filesystem;
 
 // ==============================================================================
+// Legacy Option A 33-Tile Architecture Definitions & 60-Entry Face Scratchpad LUT
+// Fully self-contained to preserve independent execution of 33-tile Option A:
+//   - 26 tiles of degree 6 (39-40 checks/tile)
+//   - 7 tiles of degree 3 (73-74 checks/tile)
+//   - 60 check-edge pairs per worker per tile (240 edges total)
+// ==============================================================================
+namespace legacy_33tile {
+    constexpr uint32_t TILES_PER_DEG6_BLOCK = 13; // 13 * 40 = 520 (covers 512 checks)
+    constexpr uint32_t CHECKS_PER_TILE_DEG6 = 40;
+    constexpr uint32_t TILES_PER_DEG3_BLOCK = 7;  // 7 * 74 = 518 (covers 512 checks)
+    constexpr uint32_t CHECKS_PER_TILE_DEG3 = 74;
+    constexpr uint32_t TOTAL_TILES_PER_ITER = 33; // 26 deg-6 + 7 deg-3
+
+    struct FaceScratchLUT60 {
+        uint16_t w0_even[60];
+        uint16_t w0_odd[60];
+        uint16_t w1_even[60];
+        uint16_t w1_odd[60];
+
+        constexpr FaceScratchLUT60() : w0_even{}, w0_odd{}, w1_even{}, w1_odd{} {
+            for (uint32_t p = 0; p < 60; ++p) {
+                uint32_t r_pair = p / 4;
+                uint32_t kh     = p % 4;
+                uint32_t r_even = 2 * r_pair;
+                uint32_t r_odd  = 2 * r_pair + 1;
+
+                uint32_t face_w0_even = (r_even < 16) ? 0 : 2;
+                uint32_t face_w0_odd  = (r_odd < 16)  ? 0 : 2;
+                uint32_t face_w1_even = (r_even < 16) ? 1 : 3;
+                uint32_t face_w1_odd  = (r_odd < 16)  ? 1 : 3;
+
+                uint32_t row_even_in_face = (r_even < 16) ? r_even : (r_even - 16);
+                uint32_t row_odd_in_face  = (r_odd < 16)  ? r_odd  : (r_odd - 16);
+
+                w0_even[p] = static_cast<uint16_t>(face_w0_even * 512 + row_even_in_face * 32 + kh * 8);
+                w0_odd[p]  = static_cast<uint16_t>(face_w0_odd  * 512 + row_odd_in_face  * 32 + kh * 8);
+                w1_even[p] = static_cast<uint16_t>(face_w1_even * 512 + row_even_in_face * 32 + kh * 8);
+                w1_odd[p]  = static_cast<uint16_t>(face_w1_odd  * 512 + row_odd_in_face  * 32 + kh * 8);
+            }
+        }
+    };
+
+    inline constexpr FaceScratchLUT60 SCRATCH_FACE_LUT_60;
+
+    inline uint32_t get_scratch_byte_offset(uint32_t r, uint32_t col) {
+        uint32_t face = (col < 16 ? 0 : 1) + (r < 16 ? 0 : 2);
+        uint32_t row_in_face = (r < 16) ? r : (r - 16);
+        uint32_t col_in_face = (col < 16) ? col : (col - 16);
+        return face * 512 + row_in_face * 32 + col_in_face * 2;
+    }
+}
+
+// ==============================================================================
 // Tenstorrent QuietBox 2: Hardware-Accurate Tile Matrix Lockstep Stepper
 // Simulates the exact physical execution of the Tensix Blackhole hardware:
 //   - 4-Face Tile Layout
-//   - Dual-Worker Gather / Scatter via SCRATCH_FACE_LUT
+//   - Dual-Worker Gather / Scatter via SCRATCH_FACE_LUT_60
 //   - 32-Lane Systolic Vector Approximate-Min*
 //   - 33-Page Circular FIFO for Check Messages (CB_R_MSG)
 // ==============================================================================
@@ -164,10 +217,10 @@ std::vector<DynamicTileDescriptor> build_circulant_aware_tile_schedule(ParityChe
     }
 
     std::vector<std::vector<uint32_t>> deg6_tiles;
-    partition_checks_balanced(deg6_checks, pcm, TILES_PER_DEG6_BLOCK * 2, CHECKS_PER_TILE_DEG6, deg6_tiles);
+    partition_checks_balanced(deg6_checks, pcm, legacy_33tile::TILES_PER_DEG6_BLOCK * 2, legacy_33tile::CHECKS_PER_TILE_DEG6, deg6_tiles);
 
     std::vector<std::vector<uint32_t>> deg3_tiles;
-    partition_checks_balanced(deg3_checks, pcm, TILES_PER_DEG3_BLOCK, CHECKS_PER_TILE_DEG3, deg3_tiles);
+    partition_checks_balanced(deg3_checks, pcm, legacy_33tile::TILES_PER_DEG3_BLOCK, legacy_33tile::CHECKS_PER_TILE_DEG3, deg3_tiles);
 
     std::vector<DynamicTileDescriptor> schedule;
     schedule.reserve(33);
@@ -331,8 +384,8 @@ inline BatchStats decode_tile_matrix_batch(
                 uint32_t off0 = tile_hoff_w0[p];
                 uint32_t off0_even = off0 & 0xFFFF;
                 uint32_t off0_odd  = off0 >> 16;
-                uint32_t s0_even = SCRATCH_FACE_LUT.w0_even[p];
-                uint32_t s0_odd  = SCRATCH_FACE_LUT.w0_odd[p];
+                uint32_t s0_even = legacy_33tile::SCRATCH_FACE_LUT_60.w0_even[p];
+                uint32_t s0_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w0_odd[p];
 
                 *reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + s0_even) =
                     *reinterpret_cast<const uint64_t*>(vnode_l1 + off0_even);
@@ -343,8 +396,8 @@ inline BatchStats decode_tile_matrix_batch(
                 uint32_t off1 = tile_hoff_w1[p];
                 uint32_t off1_even = off1 & 0xFFFF;
                 uint32_t off1_odd  = off1 >> 16;
-                uint32_t s1_even = SCRATCH_FACE_LUT.w1_even[p];
-                uint32_t s1_odd  = SCRATCH_FACE_LUT.w1_odd[p];
+                uint32_t s1_even = legacy_33tile::SCRATCH_FACE_LUT_60.w1_even[p];
+                uint32_t s1_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w1_odd[p];
 
                 *reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + s1_even) =
                     *reinterpret_cast<const uint64_t*>(vnode_l1 + off1_even);
@@ -354,8 +407,8 @@ inline BatchStats decode_tile_matrix_batch(
 
             // Zero padding rows 30, 31
             for (int col = 0; col < 32; ++col) {
-                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + get_scratch_byte_offset(30, col)) = 0;
-                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + get_scratch_byte_offset(31, col)) = 0;
+                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + legacy_33tile::get_scratch_byte_offset(30, col)) = 0;
+                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + legacy_33tile::get_scratch_byte_offset(31, col)) = 0;
             }
 
             // 2. Systolic TRISC Check Node Compute (32 Lanes in Parallel)
@@ -370,7 +423,7 @@ inline BatchStats decode_tile_matrix_batch(
                     float min_mag = 99999.0f;
 
                     for (uint32_t r = 0; r < deg; ++r) {
-                        uint32_t offset = get_scratch_byte_offset(base_r + r, col);
+                        uint32_t offset = legacy_33tile::get_scratch_byte_offset(base_r + r, col);
                         uint16_t l_bf16 = *reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset);
                         float l_val = bf16_to_fp32(l_bf16);
                         float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
@@ -394,7 +447,7 @@ inline BatchStats decode_tile_matrix_batch(
 
                     // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
                     for (uint32_t r = 0; r < deg; ++r) {
-                        uint32_t offset = get_scratch_byte_offset(base_r + r, col);
+                        uint32_t offset = legacy_33tile::get_scratch_byte_offset(base_r + r, col);
                         float edge_sign = total_sign * signs[r];
                         float edge_mag = (r == min_idx) ? m_others : m_all;
                         float r_new = edge_sign * edge_mag;
@@ -417,8 +470,8 @@ inline BatchStats decode_tile_matrix_batch(
                 uint32_t off0 = tile_hoff_w0[p];
                 uint32_t off0_even = off0 & 0xFFFF;
                 uint32_t off0_odd  = off0 >> 16;
-                uint32_t s0_even = SCRATCH_FACE_LUT.w0_even[p];
-                uint32_t s0_odd  = SCRATCH_FACE_LUT.w0_odd[p];
+                uint32_t s0_even = legacy_33tile::SCRATCH_FACE_LUT_60.w0_even[p];
+                uint32_t s0_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w0_odd[p];
 
                 *reinterpret_cast<uint64_t*>(vnode_l1 + off0_even) =
                     *reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(scratch_out.data()) + s0_even);
@@ -429,8 +482,8 @@ inline BatchStats decode_tile_matrix_batch(
                 uint32_t off1 = tile_hoff_w1[p];
                 uint32_t off1_even = off1 & 0xFFFF;
                 uint32_t off1_odd  = off1 >> 16;
-                uint32_t s1_even = SCRATCH_FACE_LUT.w1_even[p];
-                uint32_t s1_odd  = SCRATCH_FACE_LUT.w1_odd[p];
+                uint32_t s1_even = legacy_33tile::SCRATCH_FACE_LUT_60.w1_even[p];
+                uint32_t s1_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w1_odd[p];
 
                 *reinterpret_cast<uint64_t*>(vnode_l1 + off1_even) =
                     *reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(scratch_out.data()) + s1_even);
@@ -807,8 +860,8 @@ int main(int argc, char** argv) {
                 uint32_t off0 = tile_hoff_w0[p];
                 uint32_t off0_even = off0 & 0xFFFF;
                 uint32_t off0_odd  = off0 >> 16;
-                uint32_t s0_even = SCRATCH_FACE_LUT.w0_even[p];
-                uint32_t s0_odd  = SCRATCH_FACE_LUT.w0_odd[p];
+                uint32_t s0_even = legacy_33tile::SCRATCH_FACE_LUT_60.w0_even[p];
+                uint32_t s0_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w0_odd[p];
 
                 *reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + s0_even) =
                     *reinterpret_cast<const uint64_t*>(vnode_l1.data() + off0_even);
@@ -819,8 +872,8 @@ int main(int argc, char** argv) {
                 uint32_t off1 = tile_hoff_w1[p];
                 uint32_t off1_even = off1 & 0xFFFF;
                 uint32_t off1_odd  = off1 >> 16;
-                uint32_t s1_even = SCRATCH_FACE_LUT.w1_even[p];
-                uint32_t s1_odd  = SCRATCH_FACE_LUT.w1_odd[p];
+                uint32_t s1_even = legacy_33tile::SCRATCH_FACE_LUT_60.w1_even[p];
+                uint32_t s1_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w1_odd[p];
 
                 *reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + s1_even) =
                     *reinterpret_cast<const uint64_t*>(vnode_l1.data() + off1_even);
@@ -830,8 +883,8 @@ int main(int argc, char** argv) {
 
             // Zero padding rows 30, 31
             for (int col = 0; col < 32; ++col) {
-                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + get_scratch_byte_offset(30, col)) = 0;
-                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + get_scratch_byte_offset(31, col)) = 0;
+                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + legacy_33tile::get_scratch_byte_offset(30, col)) = 0;
+                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_in.data()) + legacy_33tile::get_scratch_byte_offset(31, col)) = 0;
             }
 
             // 2. Systolic TRISC Check Node Compute (32 Lanes in Parallel)
@@ -846,7 +899,7 @@ int main(int argc, char** argv) {
                     float min_mag = 99999.0f;
 
                     for (uint32_t r = 0; r < deg; ++r) {
-                        uint32_t offset = get_scratch_byte_offset(base_r + r, col);
+                        uint32_t offset = legacy_33tile::get_scratch_byte_offset(base_r + r, col);
                         uint16_t l_bf16 = *reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset);
                         float l_val = bf16_to_fp32(l_bf16);
                         float r_old = 0.0f;
@@ -874,7 +927,7 @@ int main(int argc, char** argv) {
 
                     // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
                     for (uint32_t r = 0; r < deg; ++r) {
-                        uint32_t offset = get_scratch_byte_offset(base_r + r, col);
+                        uint32_t offset = legacy_33tile::get_scratch_byte_offset(base_r + r, col);
                         float edge_sign = total_sign * signs[r];
                         float edge_mag = (r == min_idx) ? m_others : m_all;
                         float r_new = edge_sign * edge_mag;
@@ -892,8 +945,8 @@ int main(int argc, char** argv) {
                 uint32_t off0 = tile_hoff_w0[p];
                 uint32_t off0_even = off0 & 0xFFFF;
                 uint32_t off0_odd  = off0 >> 16;
-                uint32_t s0_even = SCRATCH_FACE_LUT.w0_even[p];
-                uint32_t s0_odd  = SCRATCH_FACE_LUT.w0_odd[p];
+                uint32_t s0_even = legacy_33tile::SCRATCH_FACE_LUT_60.w0_even[p];
+                uint32_t s0_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w0_odd[p];
 
                 *reinterpret_cast<uint64_t*>(vnode_l1.data() + off0_even) =
                     *reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(scratch_out.data()) + s0_even);
@@ -904,8 +957,8 @@ int main(int argc, char** argv) {
                 uint32_t off1 = tile_hoff_w1[p];
                 uint32_t off1_even = off1 & 0xFFFF;
                 uint32_t off1_odd  = off1 >> 16;
-                uint32_t s1_even = SCRATCH_FACE_LUT.w1_even[p];
-                uint32_t s1_odd  = SCRATCH_FACE_LUT.w1_odd[p];
+                uint32_t s1_even = legacy_33tile::SCRATCH_FACE_LUT_60.w1_even[p];
+                uint32_t s1_odd  = legacy_33tile::SCRATCH_FACE_LUT_60.w1_odd[p];
 
                 *reinterpret_cast<uint64_t*>(vnode_l1.data() + off1_even) =
                     *reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(scratch_out.data()) + s1_even);
