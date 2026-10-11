@@ -28,7 +28,7 @@ TEST_OBJS     := test_tensix_lockstep_debug.o
 
 .PHONY: all clean run test_lockstep
 
-all: $(TARGET) $(TEST_LOCKSTEP)
+all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	@echo "[LINK] $@"
