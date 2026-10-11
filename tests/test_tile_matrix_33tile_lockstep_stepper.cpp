@@ -1,3 +1,43 @@
+// ==============================================================================
+// Tenstorrent QuietBox 2: 33-Tile "Option A" Lockstep Stepper & Algorithmic Oracle
+// File: tests/test_tile_matrix_33tile_lockstep_stepper.cpp
+// Author: Dr. Christopher R. Jones
+//
+// ARCHITECTURAL SPECIFICATION: "Option A" (33-Tile Schedule)
+// ------------------------------------------------------------------------------
+// 1. Tile Partitioning:
+//    - Exactly 33 Tiles per Iteration:
+//      * 26 Degree-6 Tiles (39 to 40 check nodes per tile, 240 edges max)
+//      * 7 Degree-3 Tiles  (73 to 74 check nodes per tile, 240 edges max)
+//    - Total Checks: 1,024 deg-6 checks + 512 deg-3 checks = 1,536 check nodes.
+//
+// 2. Hardware Scratchpad Transfer (60 Pairs per Worker):
+//    - 60 check-edge pairs per worker per tile (2 workers x 60 pairs = 120 pairs = 240 edges).
+//    - Dual-Worker Gather / Scatter:
+//      * Worker 0 (BRISC): Gathers/scatters left-half checks (lanes 0..15 across Faces 0 & 2).
+//      * Worker 1 (NCRISC): Gathers/scatters right-half checks (lanes 16..31 across Faces 1 & 3).
+//    - 4-Codeword Vector Parallelism: 4 parallel codewords packed into 32 columns.
+//    - Self-contained compile-time LUT: legacy_33tile::SCRATCH_FACE_LUT_60 (60 entries).
+//
+// 3. Mathematical Check Node Updating:
+//    - True Recursive Approximate-Min* algorithm (Dr. Christopher R. Jones, MILCOM 2003).
+//    - 2-region piecewise linear correction spline g(Δ).
+//
+// 4. Historical Milestone & Benchmark Certification:
+//    - Verified down to the ultra-deep error floor:
+//      * Results/results_tile_matrix_lockstep_ebn0_2.00_10M.csv
+//      * 8,527,000 blocks at 2.00 dB Eb/N0: exactly 25 frame errors.
+//      * FER = 2.93e-6, BER = 3.68e-7, Mean Iterations = 7.491 iters.
+//      * Host OpenMP Multi-Threaded Throughput: >33.1 Msps (16 host threads).
+//
+// 5. Relationship to 40-Tile "Option B" Stepper:
+//    - Option A packs checks contiguously without constraining check nodes to 
+//      individual 16x16 quadrant face boundaries (checks can straddle face rows).
+//    - Option B (tests/test_tile_matrix_40tile_lockstep_stepper.cpp) pads each tile
+//      to 40 checks (10 per face) for 100% boundary safety on physical Tensix hardware.
+//    - This file is maintained as the frozen, gold-standard 33-tile algorithmic reference.
+// ==============================================================================
+
 #include <iostream>
 #include <vector>
 #include <cmath>
