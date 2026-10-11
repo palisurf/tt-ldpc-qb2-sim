@@ -340,19 +340,19 @@ inline float approx_min_star_fp32(float a, float b) {
 
 // Model B: Tensix Hardware Bit-Exact Precision (Native bfloat16 SFPU emulation)
 inline float approx_min_star_tensix(float a, float b) {
-    float min_v = (a < b) ? a : b;
-    float max_v = (a > b) ? a : b;
-    float diff  = to_bf16_trunc(max_v - min_v);
+    float min_v = std::min(a, b);
+    float max_v = std::max(a, b);
+    float diff  = max_v - min_v;
 
     static const float c_0_69315   = bf16_to_fp32(16177); // 0.69315 (sFloat16b)
     static const float c_neg_0_4   = bf16_to_fp32(48844); // -0.4000 (sFloat16b)
     static const float c_0_65715   = bf16_to_fp32(16168); // 0.65715 (sFloat16b)
     static const float c_neg_0_328 = bf16_to_fp32(48807); // -0.3280 (sFloat16b)
 
-    float line1 = to_bf16_trunc(c_0_69315 + to_bf16_trunc(c_neg_0_4 * diff));
-    float line2 = to_bf16_trunc(c_0_65715 + to_bf16_trunc(c_neg_0_328 * diff));
+    float line1 = c_0_69315 + c_neg_0_4 * diff;
+    float line2 = c_0_65715 + c_neg_0_328 * diff;
     float corr  = std::max(std::max(line1, line2), 0.0f);
-    return to_bf16_trunc(std::max(to_bf16_trunc(min_v - corr), 0.0f));
+    return std::max(min_v - corr, 0.0f);
 }
 
 inline void init_vnodes_host(
@@ -465,7 +465,7 @@ inline BatchStats decode_tile_matrix_batch(
                         float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
                         float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
 
-                        q[r] = tensix_precision ? to_bf16_trunc(l_val - r_old) : (l_val - r_old);
+                        q[r] = tensix_precision ? to_bf16(l_val - r_old) : (l_val - r_old);
                         signs[r] = (q[r] < 0.0f) ? -1.0f : 1.0f;
                         mags[r]  = std::fabs(q[r]);
                         total_sign *= signs[r];
@@ -480,25 +480,26 @@ inline BatchStats decode_tile_matrix_batch(
                     if (tensix_precision) {
                         for (uint32_t r = 1; r < deg; ++r) {
                             float m = (min_idx == r) ? 1000.0f : mags[r];
-                            m_others = to_bf16_trunc(approx_min_star_tensix(m_others, m));
+                            m_others = approx_min_star_tensix(m_others, m);
                         }
-                        float m_all = to_bf16_trunc(approx_min_star_tensix(m_others, min_mag));
+                        float m_all = approx_min_star_tensix(m_others, min_mag);
 
                         // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
                         for (uint32_t r = 0; r < deg; ++r) {
                             uint32_t offset = get_scratch_byte_offset(base_r + r, col);
                             float edge_sign = total_sign * signs[r];
                             float edge_mag = (r == min_idx) ? m_others : m_all;
-                            float r_new = to_bf16_trunc(edge_sign * edge_mag);
-                            float l_new = to_bf16_trunc(q[r] + r_new);
+                            float r_raw = edge_sign * edge_mag;
+                            float l_new = to_bf16(q[r] + r_raw);
+                            float r_new = to_bf16(r_raw);
 
                             if (post_clip_max > 0.0f) {
                                 if (l_new > post_clip_max) l_new = post_clip_max;
                                 if (l_new < -post_clip_max) l_new = -post_clip_max;
                             }
 
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16_trunc(r_new);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16_trunc(l_new);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
                         }
                     } else {
                         for (uint32_t r = 1; r < deg; ++r) {
@@ -988,7 +989,7 @@ int main(int argc, char** argv) {
                         float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
                         float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
 
-                        q[r] = tensix_precision ? to_bf16_trunc(l_val - r_old) : (l_val - r_old);
+                        q[r] = tensix_precision ? to_bf16(l_val - r_old) : (l_val - r_old);
                         signs[r] = (q[r] < 0.0f) ? -1.0f : 1.0f;
                         mags[r]  = std::fabs(q[r]);
                         total_sign *= signs[r];
@@ -1003,20 +1004,21 @@ int main(int argc, char** argv) {
                     if (tensix_precision) {
                         for (uint32_t r = 1; r < deg; ++r) {
                             float m = (min_idx == r) ? 1000.0f : mags[r];
-                            m_others = to_bf16_trunc(approx_min_star_tensix(m_others, m));
+                            m_others = approx_min_star_tensix(m_others, m);
                         }
-                        float m_all = to_bf16_trunc(approx_min_star_tensix(m_others, min_mag));
+                        float m_all = approx_min_star_tensix(m_others, min_mag);
 
                         // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
                         for (uint32_t r = 0; r < deg; ++r) {
                             uint32_t offset = get_scratch_byte_offset(base_r + r, col);
                             float edge_sign = total_sign * signs[r];
                             float edge_mag = (r == min_idx) ? m_others : m_all;
-                            float r_new = to_bf16_trunc(edge_sign * edge_mag);
-                            float l_new = to_bf16_trunc(q[r] + r_new);
+                            float r_raw = edge_sign * edge_mag;
+                            float l_new = to_bf16(q[r] + r_raw);
+                            float r_new = to_bf16(r_raw);
 
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16_trunc(r_new);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16_trunc(l_new);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
                         }
                     } else {
                         for (uint32_t r = 1; r < deg; ++r) {

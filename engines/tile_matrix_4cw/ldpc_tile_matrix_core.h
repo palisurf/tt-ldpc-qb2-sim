@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <cmath>
+#include <cstring>
 
 inline float uint_as_float(uint32_t u) {
     union { uint32_t u; float f; } converter;
