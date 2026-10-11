@@ -61,6 +61,7 @@ test_orig_stepper
 test_e2e
 test_probe_*
 test_sfpu_*
+!tests/unit_sfpu/*.cpp
 test_offsets
 test_tensix_lockstep_debug
 tests/test_40tile_stepper
