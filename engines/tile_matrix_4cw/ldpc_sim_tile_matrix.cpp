@@ -696,29 +696,23 @@ void run_tile_matrix_on_hardware(
                 scratch_out = scratch_in;
 #elif LDPC_TEST_R_DATAFLOW_MODE
                 const int face_bases[4] = {0, 8, 16, 24};
-                const float deg6_r0[3] = {1.0f, 3.0f, 5.0f};
-                const float deg6_r1[3] = {2.0f, 4.0f, 6.0f};
-                const float deg3_r0[3] = {1.0f, 3.0f, 2.0f};
-                const float deg3_r1[3] = {2.0f, 1.0f, 3.0f};
-                const float* k_r0 = (deg == 6) ? deg6_r0 : deg3_r0;
-                const float* k_r1 = (deg == 6) ? deg6_r1 : deg3_r1;
-
                 for (int f = 0; f < 4; ++f) {
                     int base = face_bases[f];
                     for (int k = 0; k < 3; ++k) {
-                        float r0 = k_r0[k];
-                        float r1 = k_r1[k];
                         for (int sub = 0; sub < 2; ++sub) {
                             uint32_t reg = base + 2 * k + sub;
+                            float q[32];
                             for (uint32_t lane = 0; lane < 32; ++lane) {
-                                float r_val = (lane < 16) ? r1 : r0;
                                 uint32_t offset = get_scratch_byte_offset(reg, lane);
                                 float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
                                 float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
-                                float q = to_bf16(l_val - r_old);
-                                float r_new = (iter == 0) ? to_bf16(r_val) : r_old;
-                                float l_new = to_bf16(q + r_new);
-
+                                q[lane] = to_bf16(l_val - r_old);
+                            }
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                uint32_t swap_lane = (lane < 16) ? (lane + 16) : (lane - 16);
+                                float r_new = to_bf16(q[swap_lane]);
+                                float l_new = to_bf16(q[lane] + r_new);
+                                uint32_t offset = get_scratch_byte_offset(reg, lane);
                                 *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
                                 *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
                             }
@@ -852,8 +846,9 @@ void run_tile_matrix_on_hardware(
                                 float s_out_e0_blk1 = s_tot_blk1 * s_e0_blk1;
 
                                 // Assemble p1
-                                float r_out_1 = (lane < 16) ? to_bf16(s_out_e2_blk0 * r_mag_e2_blk0)
-                                                            : to_bf16(s_out_e0_blk1 * r_mag_e0_blk1);
+                                float r_out_1_raw = (lane < 16) ? (s_out_e2_blk0 * r_mag_e2_blk0)
+                                                                : (s_out_e0_blk1 * r_mag_e0_blk1);
+                                float r_out_1 = to_bf16(r_out_1_raw);
 
                                 float l_new_0 = to_bf16(q0[lane] + r_out_0);
                                 float l_new_1 = to_bf16(q1[lane] + r_out_1);
@@ -873,15 +868,15 @@ void run_tile_matrix_on_hardware(
                                 *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off2)   = fp32_to_bf16(l_new_2);
                             }
                         }
-                    }
 
-                    // Zero out padding rows in scratch_out and r_msg_fifo for regs 6, 7 of this face
-                    for (int sub = 0; sub < 2; ++sub) {
-                        uint32_t reg = base_r + 6 + sub;
-                        for (uint32_t lane = 0; lane < 32; ++lane) {
-                            uint32_t offset = get_scratch_byte_offset(reg, lane);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = 0;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = 0;
+                        // Zero out padding rows in scratch_out and r_msg_fifo for regs 6, 7 of this face
+                        for (int sub2 = 0; sub2 < 2; ++sub2) {
+                            uint32_t reg = base_r + 6 + sub2;
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                uint32_t offset = get_scratch_byte_offset(reg, lane);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = 0;
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = 0;
+                            }
                         }
                     }
                 }

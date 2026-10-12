@@ -135,6 +135,7 @@ void kernel_main() {
             p[1] = val;
             p[2] = val;
             p[3] = val;
+        }
 #elif LDPC_TEST_R_DATAFLOW_MODE
         // Initialize all 2,560 Vnodes with exact bfloat16 numbers: (-1)^(v/2) * (2.0 + 0.25 * (v % 8))
         for (uint32_t v = 0; v < 2560; ++v) {
@@ -152,8 +153,21 @@ void kernel_main() {
         }
 #endif
 
-        // In differential co-verification mode, snapshot initial channel LLRs from CB_VNODE_A to DRAM
+        // In differential co-verification mode, populate with deterministic synthetic pattern and snapshot to DRAM
         if (diff_test_mode != 0 && batch == 0) {
+            for (uint32_t v = 0; v < 2560; ++v) {
+                uint32_t off = get_tile_vnode_byte_offset(v);
+                uint16_t* p = reinterpret_cast<uint16_t*>(vnode_l1 + off);
+                float sign = ((v / 2) % 2 == 1) ? -1.0f : 1.0f;
+                float mag  = 2.0f + 0.25f * static_cast<float>(v % 8);
+                float fval = sign * mag;
+                uint32_t u = float_as_uint(fval);
+                uint16_t val = static_cast<uint16_t>(u >> 16);
+                p[0] = val;
+                p[1] = val;
+                p[2] = val;
+                p[3] = val;
+            }
             for (uint32_t chk = 0; chk < 10; ++chk) {
                 uint64_t dst_noc_initial = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 4096 + chk * 2048);
                 noc_async_write(vnode_l1 + chk * 2048, dst_noc_initial, 2048);
