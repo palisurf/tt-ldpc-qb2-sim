@@ -22,6 +22,32 @@ inline uint32_t float_as_uint(float f) {
 // ==============================================================================
 
 // ------------------------------------------------------------------------------
+// Hardware Compile-Time Test Mode: Identity Pass-Through (R_out = R_in, L_out = L_in)
+// Set to 1 to compile kernels in pure memory organization verification mode:
+//   - Vnodes initialized to counting numbers (0..2559) matching variable indices.
+//   - Check edge messages R are zero.
+//   - Compute executes direct identity pass-through (L_out = L_in, R_out = R_in = 0).
+//   - Validates Gather -> Memory -> Compute -> Scatter data flow without algorithmic noise.
+// Set to 0 for normal production Approximate-Min* LDPC decoding.
+// ------------------------------------------------------------------------------
+#ifndef LDPC_TEST_PASSTHROUGH_MODE
+#define LDPC_TEST_PASSTHROUGH_MODE 0
+#endif
+
+// ------------------------------------------------------------------------------
+// Hardware Compile-Time Test Mode: R-Edge Dataflow Verification ((V - R_in) + R_out)
+// Set to 1 to compile kernels to verify R-message circular FIFO and SIMD ALU:
+//   - Vnodes initialized to exact floats 64.0 + (v % 32).
+//   - Check edge messages synthesized as R(r) = 1.0 + r.
+//   - Iter 0: outputs R(r) to CB_R_MSG, adds R(r) to L.
+//   - Iter > 0: unpacks R from CB_R_MSG, computes Q = L - R, L_new = Q + R = L.
+//   - Tests circular FIFO page offsets, TRISC destination register mapping, and ALU.
+// ------------------------------------------------------------------------------
+#ifndef LDPC_TEST_R_DATAFLOW_MODE
+#define LDPC_TEST_R_DATAFLOW_MODE 0
+#endif
+
+// ------------------------------------------------------------------------------
 // Circular Buffer (CB) Allocations in Tensix L1 SRAM (Total 1.5 MB Available)
 // ------------------------------------------------------------------------------
 namespace TileMatrixCB {
@@ -445,11 +471,17 @@ inline uint32_t get_tile_vnode_byte_offset(uint32_t v) {
 }
 
 inline uint32_t get_scratch_byte_offset(uint32_t reg_idx, uint32_t lane) {
-    uint32_t f = reg_idx / 8;
-    uint32_t r_face = reg_idx % 8;
-    uint32_t row_in_face = (lane < 16) ? (2 * r_face) : (2 * r_face + 1);
-    uint32_t col_in_face = (lane < 16) ? lane : (lane - 16);
-    return f * 512 + row_in_face * 32 + col_in_face * 2;
+    uint32_t face = reg_idx / 8;
+    uint32_t r_in_face = reg_idx % 8;
+    uint32_t k = r_in_face / 2;
+    uint32_t is_odd_reg = r_in_face % 2;
+    uint32_t row_in_quartet = lane / 8;
+    uint32_t c_pair = lane % 8;
+    
+    uint32_t row_in_face = 4 * k + row_in_quartet;
+    uint32_t col_in_face = 2 * c_pair + is_odd_reg;
+    
+    return face * 512 + row_in_face * 32 + col_in_face * 2;
 }
 
 struct TileIndexLUT {

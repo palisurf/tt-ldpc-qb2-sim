@@ -1,12 +1,14 @@
 import struct
+import numpy as np
 
-def bf_to_f(u):
-    return struct.unpack('>f', struct.pack('>HH', int(u), 0))[0]
+with open("dump/tensix_scratch_out.bin", "rb") as f:
+    data = f.read()
 
-tensix_final = open('dump/tensix_final_vnodes.bin', 'rb').read()
-golden_final = open('dump/golden_final_vnodes.bin', 'rb').read()
-tensix_init = open('dump/tensix_initial_vnodes.bin', 'rb').read()
+words = struct.unpack("<1024H", data[:2048])
+def bf(w):
+    return np.frombuffer(struct.pack("<HH", 0, w), dtype=np.float32)[0]
 
-print('Initial v0 cw0..3:', [hex(struct.unpack('<H', tensix_init[i*2:i*2+2])[0]) for i in range(4)])
-print('Tensix  v0 cw0..3:', [hex(struct.unpack('<H', tensix_final[i*2:i*2+2])[0]) for i in range(4)])
-print('Golden  v0 cw0..3:', [hex(struct.unpack('<H', golden_final[i*2:i*2+2])[0]) for i in range(4)])
+print("Tensix Scratch Out Face 0 rows 0..3 (16 elements each):")
+for r in range(4):
+    row_vals = [f"{bf(words[r*16 + c]):+.2f}" for c in range(16)]
+    print(f"Row {r:2d}: {' '.join(row_vals)}")

@@ -124,6 +124,34 @@ void kernel_main() {
         // All 5 workers have verified entry into the new batch; safe to reset early termination flag
         sync_flags[SyncSlot::EARLY_TERMINATION] = 0;
 
+#if LDPC_TEST_PASSTHROUGH_MODE
+        // Initialize all 2,560 Vnodes with counting numbers offset by 1024 (1024..3583)
+        // This ensures the bfloat16 exponent bits [14:7] are non-zero, preventing hardware FTZ!
+        for (uint32_t v = 0; v < 2560; ++v) {
+            uint32_t off = get_tile_vnode_byte_offset(v);
+            uint16_t* p = reinterpret_cast<uint16_t*>(vnode_l1 + off);
+            uint16_t val = static_cast<uint16_t>(1024 + v);
+            p[0] = val;
+            p[1] = val;
+            p[2] = val;
+            p[3] = val;
+#elif LDPC_TEST_R_DATAFLOW_MODE
+        // Initialize all 2,560 Vnodes with exact bfloat16 numbers: (-1)^(v/2) * (2.0 + 0.25 * (v % 8))
+        for (uint32_t v = 0; v < 2560; ++v) {
+            uint32_t off = get_tile_vnode_byte_offset(v);
+            uint16_t* p = reinterpret_cast<uint16_t*>(vnode_l1 + off);
+            float sign = ((v / 2) % 2 == 1) ? -1.0f : 1.0f;
+            float mag  = 2.0f + 0.25f * static_cast<float>(v % 8);
+            float fval = sign * mag;
+            uint32_t u = float_as_uint(fval);
+            uint16_t val = static_cast<uint16_t>(u >> 16);
+            p[0] = val;
+            p[1] = val;
+            p[2] = val;
+            p[3] = val;
+        }
+#endif
+
         // In differential co-verification mode, snapshot initial channel LLRs from CB_VNODE_A to DRAM
         if (diff_test_mode != 0 && batch == 0) {
             for (uint32_t chk = 0; chk < 10; ++chk) {
@@ -211,7 +239,7 @@ void kernel_main() {
                 sync_flags[SyncSlot::GATHER_BARRIER_W1] = step_barrier + 0x80000000;
                 while (sync_flags[SyncSlot::GATHER_BARRIER_W0] != (step_barrier + 0x80000000)) { }
                 cycles_gather += (get_wall_clock() - t_g0);
-                if (diff_test_mode != 0 && t == 0) {
+                if (diff_test_mode != 0 && iter == 0 && t == 0) {
                     uint64_t dst_noc_scat_in = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 47104);
                     noc_async_write(scratch_in_addr, dst_noc_scat_in, 2048);
                     noc_async_write_barrier();
@@ -226,7 +254,7 @@ void kernel_main() {
 
                 uint32_t t_s0 = get_wall_clock();
                 uint32_t scratch_out_addr = get_read_ptr(cb_scratch_out);
-                if (diff_test_mode != 0 && t == 0) {
+                if (diff_test_mode != 0 && iter == 0 && t == 0) {
                     uint64_t dst_noc_scat_out = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 45056);
                     noc_async_write(scratch_out_addr, dst_noc_scat_out, 2048);
                     noc_async_write_barrier();
@@ -363,6 +391,28 @@ void kernel_main() {
     stats[18] = cycles_scat_tile0;
     stats[19] = cycles_scat_other;
     stats[20] = stats_l1;
+
+#if LDPC_TEST_PASSTHROUGH_MODE
+    uint32_t mismatches = 0;
+    uint32_t first_bad_v = 0;
+    uint32_t first_bad_val = 0;
+    for (uint32_t v = 0; v < 2560; ++v) {
+        uint32_t off = get_tile_vnode_byte_offset(v);
+        const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1 + off);
+        for (int c = 0; c < 4; ++c) {
+            if (p[c] != static_cast<uint16_t>(1024 + v)) {
+                if (mismatches == 0) {
+                    first_bad_v = v;
+                    first_bad_val = p[c];
+                }
+                mismatches++;
+            }
+        }
+    }
+    stats[70] = mismatches;
+    stats[71] = first_bad_v;
+    stats[72] = first_bad_val;
+#endif
 
     uint64_t dst_noc_addr = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr);
     noc_async_write(stats_l1, dst_noc_addr, 4096);
