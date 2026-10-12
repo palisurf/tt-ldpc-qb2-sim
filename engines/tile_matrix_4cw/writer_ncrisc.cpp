@@ -102,12 +102,6 @@ void kernel_main() {
     // Main Simulation Loop (Batches x Iterations x Tiles)
     // --------------------------------------------------------------------------
     for (uint32_t batch = 0; batch < num_batches; ++batch) {
-        const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
-        char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
-
-        uint8_t active_mask = 0x0F;
-        uint32_t iter_converged[4] = {max_iter, max_iter, max_iter, max_iter};
-
         // Wait for TRISC SFPU to finish generating and packing all 10 channel tiles
         uint32_t t_ch0 = get_wall_clock();
         for (uint32_t t = 0; t < 10; ++t) {
@@ -123,6 +117,14 @@ void kernel_main() {
 
         // All 5 workers have verified entry into the new batch; safe to reset early termination flag
         sync_flags[SyncSlot::EARLY_TERMINATION] = 0;
+
+        uint32_t vnode_l1 = get_read_ptr(active_cb);
+        const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
+        char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
+
+        uint8_t active_mask = 0x0F;
+        sync_flags[SyncSlot::ACTIVE_MASK] = 0x0F;
+        uint32_t iter_converged[4] = {max_iter, max_iter, max_iter, max_iter};
 
 #if LDPC_TEST_PASSTHROUGH_MODE
         // Initialize all 2,560 Vnodes with counting numbers offset by 1024 (1024..3583)
@@ -153,21 +155,25 @@ void kernel_main() {
         }
 #endif
 
-        // In differential co-verification mode, populate with deterministic synthetic pattern and snapshot to DRAM
+        // In differential co-verification mode, snapshot channel LLRs to DRAM
         if (diff_test_mode != 0 && batch == 0) {
-            for (uint32_t v = 0; v < 2560; ++v) {
-                uint32_t off = get_tile_vnode_byte_offset(v);
-                uint16_t* p = reinterpret_cast<uint16_t*>(vnode_l1 + off);
-                float sign = ((v / 2) % 2 == 1) ? -1.0f : 1.0f;
-                float mag  = 2.0f + 0.25f * static_cast<float>(v % 8);
-                float fval = sign * mag;
-                uint32_t u = float_as_uint(fval);
-                uint16_t val = static_cast<uint16_t>(u >> 16);
-                p[0] = val;
-                p[1] = val;
-                p[2] = val;
-                p[3] = val;
+            if (diff_test_mode == 1) {
+                // Mode 1: Deterministic synthetic probing pattern
+                for (uint32_t v = 0; v < 2560; ++v) {
+                    uint32_t off = get_tile_vnode_byte_offset(v);
+                    uint16_t* p = reinterpret_cast<uint16_t*>(vnode_l1 + off);
+                    float sign = ((v / 2) % 2 == 1) ? -1.0f : 1.0f;
+                    float mag  = 2.0f + 0.25f * static_cast<float>(v % 8);
+                    float fval = sign * mag;
+                    uint32_t u = float_as_uint(fval);
+                    uint16_t val = static_cast<uint16_t>(u >> 16);
+                    p[0] = val;
+                    p[1] = val;
+                    p[2] = val;
+                    p[3] = val;
+                }
             }
+            // In both Mode 1 (synthetic) and Mode 2 (real AWGN noise), snapshot initial LLRs to DRAM
             for (uint32_t chk = 0; chk < 10; ++chk) {
                 uint64_t dst_noc_initial = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 4096 + chk * 2048);
                 noc_async_write(vnode_l1 + chk * 2048, dst_noc_initial, 2048);
@@ -189,24 +195,16 @@ void kernel_main() {
                 init_neg[2] += ((w2 >> 15) & 1) + (w2 >> 31);
                 init_neg[3] += ((w3 >> 15) & 1) + (w3 >> 31);
             }
-            stats[36] = init_neg[0];
-            stats[37] = init_neg[1];
-            stats[38] = init_neg[2];
-            stats[39] = init_neg[3];
-            stats[34] = (static_cast<uint32_t>(reinterpret_cast<const uint16_t*>(vnode_bytes_ptr + get_tile_vnode_byte_offset(0))[0]) << 16) |
+            stats[TelemSlot::INIT_NEG_CW0 + 0] = init_neg[0];
+            stats[TelemSlot::INIT_NEG_CW0 + 1] = init_neg[1];
+            stats[TelemSlot::INIT_NEG_CW0 + 2] = init_neg[2];
+            stats[TelemSlot::INIT_NEG_CW0 + 3] = init_neg[3];
+            stats[TelemSlot::INIT_BF16_W01] = (static_cast<uint32_t>(reinterpret_cast<const uint16_t*>(vnode_bytes_ptr + get_tile_vnode_byte_offset(0))[0]) << 16) |
                          reinterpret_cast<const uint16_t*>(vnode_bytes_ptr + get_tile_vnode_byte_offset(1))[0];
-            stats[35] = (static_cast<uint32_t>(reinterpret_cast<const uint16_t*>(vnode_bytes_ptr + get_tile_vnode_byte_offset(2))[0]) << 16) |
+            stats[TelemSlot::INIT_BF16_W23] = (static_cast<uint32_t>(reinterpret_cast<const uint16_t*>(vnode_bytes_ptr + get_tile_vnode_byte_offset(2))[0]) << 16) |
                          reinterpret_cast<const uint16_t*>(vnode_bytes_ptr + get_tile_vnode_byte_offset(3))[0];
-            stats[40] = init_neg[0];
-            stats[41] = init_neg[1];
-            stats[42] = init_neg[2];
-            stats[43] = init_neg[3];
-            stats[44] = stats[34];
-            stats[45] = stats[35];
-            stats[46] = mu_bits;
-            stats[47] = sigma_bits;
-            stats[60] = get_read_ptr(TileMatrixCB::CB_VNODE_A);
-            stats[61] = get_write_ptr(TileMatrixCB::CB_VNODE_A);
+            stats[TelemSlot::MU_BITS] = mu_bits;
+            stats[TelemSlot::SIGMA_BITS] = sigma_bits;
 
             // Initial vnodes already dumped above under diff_test_mode
         }
@@ -280,18 +278,44 @@ void kernel_main() {
                 cycles_scat_start_bar += (t_s1 - t_s0);
 
                 // Worker 1 scatters 48 pairs from Faces 1 & 3 back to variable nodes
-                #pragma GCC unroll 8
-                for (int p = 0; p < 48; ++p) {
-                    uint32_t off = tile_hoff_w1[p];
-                    uint32_t off_even = off & 0xFFFF;
-                    uint32_t off_odd  = off >> 16;
-                    uint32_t s_even = SCRATCH_FACE_LUT.w1_even[p];
-                    uint32_t s_odd  = SCRATCH_FACE_LUT.w1_odd[p];
+                if (active_mask == 0x0F) {
+                    #pragma GCC unroll 8
+                    for (int p = 0; p < 48; ++p) {
+                        uint32_t off = tile_hoff_w1[p];
+                        uint32_t off_even = off & 0xFFFF;
+                        uint32_t off_odd  = off >> 16;
+                        uint32_t s_even = SCRATCH_FACE_LUT.w1_even[p];
+                        uint32_t s_odd  = SCRATCH_FACE_LUT.w1_odd[p];
 
-                    *reinterpret_cast<uint64_t*>(vnode_out_ptr + off_even) =
-                        *reinterpret_cast<const uint64_t*>(scratch_out_addr + s_even);
-                    *reinterpret_cast<uint64_t*>(vnode_out_ptr + off_odd) =
-                        *reinterpret_cast<const uint64_t*>(scratch_out_addr + s_odd);
+                        *reinterpret_cast<uint64_t*>(vnode_out_ptr + off_even) =
+                            *reinterpret_cast<const uint64_t*>(scratch_out_addr + s_even);
+                        *reinterpret_cast<uint64_t*>(vnode_out_ptr + off_odd) =
+                            *reinterpret_cast<const uint64_t*>(scratch_out_addr + s_odd);
+                    }
+                } else {
+                    uint32_t mask_low  = ((active_mask & 1) ? 0x0000FFFF : 0) | ((active_mask & 2) ? 0xFFFF0000 : 0);
+                    uint32_t mask_high = ((active_mask & 4) ? 0x0000FFFF : 0) | ((active_mask & 8) ? 0xFFFF0000 : 0);
+                    uint32_t inv_low   = ~mask_low;
+                    uint32_t inv_high  = ~mask_high;
+
+                    #pragma GCC unroll 8
+                    for (int p = 0; p < 48; ++p) {
+                        uint32_t off = tile_hoff_w1[p];
+                        uint32_t off_even = off & 0xFFFF;
+                        uint32_t off_odd  = off >> 16;
+                        uint32_t s_even = SCRATCH_FACE_LUT.w1_even[p];
+                        uint32_t s_odd  = SCRATCH_FACE_LUT.w1_odd[p];
+
+                        auto* d_even = reinterpret_cast<uint32_t*>(vnode_out_ptr + off_even);
+                        const auto* s_ev = reinterpret_cast<const uint32_t*>(scratch_out_addr + s_even);
+                        d_even[0] = (s_ev[0] & mask_low)  | (d_even[0] & inv_low);
+                        d_even[1] = (s_ev[1] & mask_high) | (d_even[1] & inv_high);
+
+                        auto* d_odd = reinterpret_cast<uint32_t*>(vnode_out_ptr + off_odd);
+                        const auto* s_od = reinterpret_cast<const uint32_t*>(scratch_out_addr + s_odd);
+                        d_odd[0] = (s_od[0] & mask_low)  | (d_odd[0] & inv_low);
+                        d_odd[1] = (s_od[1] & mask_high) | (d_odd[1] & inv_high);
+                    }
                 }
                 uint32_t t_s2 = get_wall_clock();
                 uint32_t scat_loop_cur = (t_s2 - t_s1);
@@ -329,6 +353,8 @@ void kernel_main() {
             if (diff_test_mode == 0 && active_mask == 0) {
                 sync_flags[SyncSlot::EARLY_TERMINATION] = 1;
             }
+            // Publish active mask so Worker 0 (BRISC) can freeze updates on converged codewords
+            sync_flags[SyncSlot::ACTIVE_MASK] = active_mask;
             // Signal BRISC and TRISC that iteration check is complete
             sync_flags[SyncSlot::ITER_DONE] = epoch + global_iter;
 
@@ -356,8 +382,12 @@ void kernel_main() {
         }
         cycles_error_scan += (get_wall_clock() - t_es0);
         for (int cw = 0; cw < 4; ++cw) {
-            stats[48 + cw] = cw_errs[cw];
-            stats[52 + cw] = iter_converged[cw];
+            // Guard converged codewords: if a codeword converged, its bit error count is strictly 0
+            if (iter_converged[cw] <= max_iter && !(active_mask & (1 << cw))) {
+                cw_errs[cw] = 0;
+            }
+            stats[TelemSlot::LAST_BATCH_BE_CW0 + cw] = cw_errs[cw];
+            stats[TelemSlot::LAST_BATCH_ITER_CW0 + cw] = iter_converged[cw];
             total_be += cw_errs[cw];
             if (cw_errs[cw] > 0) total_fe++;
             total_iters += iter_converged[cw];
@@ -373,38 +403,45 @@ void kernel_main() {
     while (sync_flags[SyncSlot::BATCH_BARRIER_TRISC] < epoch + num_batches + 1) { }
 
     const char* vnode_bytes_ptr = reinterpret_cast<const char*>(get_read_ptr(TileMatrixCB::CB_VNODE_A));
-    uint32_t slot0 = 100, slot1 = 132;
+    uint32_t slot0 = TelemSlot::FAILING_CW0_BASE, slot1 = TelemSlot::FAILING_CW1_BASE;
     for (uint32_t v = 0; v < 1024; ++v) {
         uint32_t off = get_tile_vnode_byte_offset(v);
         const uint16_t* cw_ptrs = reinterpret_cast<const uint16_t*>(vnode_bytes_ptr + off);
-        if ((cw_ptrs[0] & 0x8000) && slot0 < 132) stats[slot0++] = v;
-        if ((cw_ptrs[1] & 0x8000) && slot1 < 164) stats[slot1++] = v;
+        if ((cw_ptrs[0] & 0x8000) && slot0 < (TelemSlot::FAILING_CW0_BASE + 32)) stats[slot0++] = v;
+        if ((cw_ptrs[1] & 0x8000) && slot1 < (TelemSlot::FAILING_CW1_BASE + 32)) stats[slot1++] = v;
     }
-    stats[98] = slot0 - 100;
-    stats[99] = slot1 - 132;
+    stats[TelemSlot::FAILING_CW0_COUNT] = slot0 - TelemSlot::FAILING_CW0_BASE;
+    stats[TelemSlot::FAILING_CW1_COUNT] = slot1 - TelemSlot::FAILING_CW1_BASE;
 
     // --------------------------------------------------------------------------
     // Step 3: Stream Final Telemetry to DRAM via NoC DMA
     // --------------------------------------------------------------------------
-    stats[0] = total_be;
-    stats[1] = total_fe;
-    stats[2] = total_iters;
-    stats[3] = num_batches * 4;
-    stats[4] = elapsed_cycles;
-    stats[5] = elapsed_cycles / (num_batches > 0 ? num_batches : 1);
-    stats[8] = cycles_channel;
-    stats[9] = cycles_error_scan;
-    stats[10] = cycles_gather;
-    stats[11] = cycles_wait;
-    stats[12] = cycles_scatter;
-    stats[13] = cycles_scat_start_bar;
-    stats[14] = cycles_scat_loop;
-    stats[15] = cycles_scat_rcopy;
-    stats[16] = cycles_scat_end_bar;
-    stats[17] = cycles_scat_pop;
-    stats[18] = cycles_scat_tile0;
-    stats[19] = cycles_scat_other;
-    stats[20] = stats_l1;
+    stats[TelemSlot::TOTAL_BE]          = total_be;
+    stats[TelemSlot::TOTAL_FE]          = total_fe;
+    stats[TelemSlot::TOTAL_ITERS]       = total_iters;
+    stats[TelemSlot::TOTAL_CWS]         = num_batches * 4;
+    stats[TelemSlot::ELAPSED_CYCLES]    = elapsed_cycles;
+    stats[TelemSlot::CYCLES_PER_BATCH]  = elapsed_cycles / (num_batches > 0 ? num_batches : 1);
+    stats[TelemSlot::TRISC_CYCLES]      = sync_flags[SyncSlot::TRISC_CYCLES];
+    stats[TelemSlot::BRISC_CYCLES]      = sync_flags[SyncSlot::BRISC_CYCLES];
+    stats[TelemSlot::CYCLES_CHANNEL]    = cycles_channel;
+    stats[TelemSlot::CYCLES_ERROR_SCAN] = cycles_error_scan;
+    stats[TelemSlot::TOTAL_TILES_SIM]   = global_iter * num_tiles;
+    stats[TelemSlot::TELEMETRY_L1_ADDR] = stats_l1;
+
+    // NCRISC (Worker 1) per-tile breakdown
+    stats[TelemSlot::NC_GATHER]         = cycles_gather;
+    stats[TelemSlot::NC_WAIT]           = cycles_wait;
+    stats[TelemSlot::NC_SCATTER]        = cycles_scatter;
+    stats[TelemSlot::NC_SCAT_START_BAR] = cycles_scat_start_bar;
+    stats[TelemSlot::NC_SCAT_LOOP]      = cycles_scat_loop;
+    stats[TelemSlot::NC_SCAT_RCOPY]     = cycles_scat_rcopy;
+    stats[TelemSlot::NC_SCAT_END_BAR]   = cycles_scat_end_bar;
+    stats[TelemSlot::NC_SCAT_POP]       = cycles_scat_pop;
+    stats[TelemSlot::NC_SCAT_TILE0]     = cycles_scat_tile0;
+    stats[TelemSlot::NC_SCAT_OTHER]     = cycles_scat_other;
+
+    // Note: BRISC (Worker 0) per-tile breakdown is already written into stats[TelemSlot::BR_*] (48..53) by BRISC!
 
 #if LDPC_TEST_PASSTHROUGH_MODE
     uint32_t mismatches = 0;
@@ -423,9 +460,9 @@ void kernel_main() {
             }
         }
     }
-    stats[70] = mismatches;
-    stats[71] = first_bad_v;
-    stats[72] = first_bad_val;
+    stats[200] = mismatches;
+    stats[201] = first_bad_v;
+    stats[202] = first_bad_val;
 #endif
 
     uint64_t dst_noc_addr = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr);
