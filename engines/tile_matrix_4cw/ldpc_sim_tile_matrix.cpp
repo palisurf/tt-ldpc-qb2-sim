@@ -524,18 +524,23 @@ void run_tile_matrix_on_hardware(
     std::string writer_path = resolve_filepath("writer_ncrisc.cpp");
     std::string compute_path = resolve_filepath("compute_trisc.cpp");
 
-    auto reader = CreateKernel(
-        program, reader_path, core_range,
-        DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default}
-    );
-    auto writer = CreateKernel(
-        program, writer_path, core_range,
-        DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default}
-    );
-    auto compute = CreateKernel(
-        program, compute_path, core_range,
-        ComputeConfig{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = false}
-    );
+    DataMovementConfig reader_config{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default};
+    DataMovementConfig writer_config{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default};
+    ComputeConfig compute_config{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = false};
+
+#if LDPC_TEST_PASSTHROUGH_MODE
+    reader_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+    writer_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+    compute_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+#elif LDPC_TEST_R_DATAFLOW_MODE
+    reader_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
+    writer_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
+    compute_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
+#endif
+
+    auto reader = CreateKernel(program, reader_path, core_range, reader_config);
+    auto writer = CreateKernel(program, writer_path, core_range, writer_config);
+    auto compute = CreateKernel(program, compute_path, core_range, compute_config);
 
     // Runtime Args:
     uint32_t num_tiles = (tile_limit > 0) ? tile_limit : schedule.size();
@@ -598,6 +603,20 @@ void run_tile_matrix_on_hardware(
     std::cout << "  Tile 0 all 32 checks: ";
     for (int i = 0; i < 32; ++i) std::cout << schedule[0].check_indices[i] << " ";
     std::cout << std::endl;
+
+#if LDPC_TEST_PASSTHROUGH_MODE
+    std::cout << "\n=======================================================" << std::endl;
+    std::cout << " [PASSTHROUGH ON-SILICON CHECK] LDPC_TEST_PASSTHROUGH_MODE = 1" << std::endl;
+    std::cout << " Total Mismatches: " << stats[70] << " / 10,240 elements" << std::endl;
+    if (stats[70] == 0) {
+        std::cout << " >>> SILICON PASSTHROUGH VERIFIED 100% BIT-EXACT! <<<" << std::endl;
+    } else {
+        std::cout << " >>> SILICON PASSTHROUGH MISMATCH DETECTED! <<<" << std::endl;
+        std::cout << "     First Failing Vnode: " << stats[71] 
+                  << " (Expected " << stats[71] << ", Silicon Got " << stats[72] << ")" << std::endl;
+    }
+    std::cout << "=======================================================\n" << std::endl;
+#endif
 
     if (diff_test) {
         fs::create_directories("dump");
@@ -665,57 +684,208 @@ void run_tile_matrix_on_hardware(
                         *reinterpret_cast<const uint64_t*>(vnode_l1 + off1_odd);
                 }
 
-                // 2. Compute Stage (Face-Aligned SFPU across all 32 lanes)
-                uint32_t num_passes = (deg == 6) ? 4 : 8;
-                const int deg6_face_bases[4] = {0, 8, 16, 24};
-                const int deg3_face_bases[8] = {0, 3, 8, 11, 16, 19, 24, 27};
+                // Zero out unused padding rows in scratch_in (rows 12..15 of all 4 faces)
+                std::memset(reinterpret_cast<uint8_t*>(scratch_in.data()) + 384, 0, 128);
+                std::memset(reinterpret_cast<uint8_t*>(scratch_in.data()) + 896, 0, 128);
+                std::memset(reinterpret_cast<uint8_t*>(scratch_in.data()) + 1408, 0, 128);
+                std::memset(reinterpret_cast<uint8_t*>(scratch_in.data()) + 1920, 0, 128);
 
-                for (uint32_t pass = 0; pass < num_passes; ++pass) {
-                    uint32_t base_r = (deg == 6) ? deg6_face_bases[pass] : deg3_face_bases[pass];
-                    for (uint32_t lane = 0; lane < 32; ++lane) {
-                        uint32_t col = lane;
-                        float q[8], signs[8], mags[8];
-                        float total_sign = 1.0f;
-                        uint32_t min_idx = 0;
-                        float min_mag = 99999.0f;
+                // 2. Compute Stage
+#if LDPC_TEST_PASSTHROUGH_MODE
+                // Identity pass-through: R_out = R_in, L_out = L_in
+                scratch_out = scratch_in;
+#elif LDPC_TEST_R_DATAFLOW_MODE
+                const int face_bases[4] = {0, 8, 16, 24};
+                const float deg6_r0[3] = {1.0f, 3.0f, 5.0f};
+                const float deg6_r1[3] = {2.0f, 4.0f, 6.0f};
+                const float deg3_r0[3] = {1.0f, 3.0f, 2.0f};
+                const float deg3_r1[3] = {2.0f, 1.0f, 3.0f};
+                const float* k_r0 = (deg == 6) ? deg6_r0 : deg3_r0;
+                const float* k_r1 = (deg == 6) ? deg6_r1 : deg3_r1;
 
-                        for (uint32_t r = 0; r < deg; ++r) {
-                            uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                            float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
-                            float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
+                for (int f = 0; f < 4; ++f) {
+                    int base = face_bases[f];
+                    for (int k = 0; k < 3; ++k) {
+                        float r0 = k_r0[k];
+                        float r1 = k_r1[k];
+                        for (int sub = 0; sub < 2; ++sub) {
+                            uint32_t reg = base + 2 * k + sub;
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                float r_val = (lane < 16) ? r1 : r0;
+                                uint32_t offset = get_scratch_byte_offset(reg, lane);
+                                float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
+                                float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
+                                float q = to_bf16(l_val - r_old);
+                                float r_new = (iter == 0) ? to_bf16(r_val) : r_old;
+                                float l_new = to_bf16(q + r_new);
 
-                            q[r] = to_bf16(l_val - r_old);
-                            signs[r] = (q[r] < 0.0f) ? -1.0f : 1.0f;
-                            mags[r]  = std::fabs(q[r]);
-                            total_sign *= signs[r];
-                            if (mags[r] < min_mag) {
-                                min_mag = mags[r];
-                                min_idx = r;
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
                             }
                         }
-
-                        // Branchless Approximate-Min* Check Update
-                        float m_others = (min_idx == 0) ? 1000.0f : mags[0];
-                        for (uint32_t r = 1; r < deg; ++r) {
-                            float m = (min_idx == r) ? 1000.0f : mags[r];
-                            m_others = approx_min_star(m_others, m);
-                        }
-                        float m_all = approx_min_star(m_others, min_mag);
-
-                        // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
-                        for (uint32_t r = 0; r < deg; ++r) {
-                            uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                            float edge_sign = total_sign * signs[r];
-                            float edge_mag = (r == min_idx) ? m_others : m_all;
-                            float r_raw = edge_sign * edge_mag;
-                            float l_new = to_bf16(q[r] + r_raw);
-                            float r_new = to_bf16(r_raw);
-
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
+                    }
+                    // Zero out padding rows in scratch_out and r_msg_fifo for regs 6, 7 of this face
+                    for (int sub = 0; sub < 2; ++sub) {
+                        uint32_t reg = base + 6 + sub;
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t offset = get_scratch_byte_offset(reg, lane);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = 0;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = 0;
                         }
                     }
                 }
+#else
+                const int face_bases[4] = {0, 8, 16, 24};
+
+                for (int f = 0; f < 4; ++f) {
+                    int base_r = face_bases[f];
+
+                    for (int sub = 0; sub < 2; ++sub) {
+                        int p0 = base_r + 0 + sub;
+                        int p1 = base_r + 2 + sub;
+                        int p2 = base_r + 4 + sub;
+
+                        float q0[32], q1[32], q2[32];
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                            uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                            uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                            float l0 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off0));
+                            float l1 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off1));
+                            float l2 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off2));
+
+                            float r_old0 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off0));
+                            float r_old1 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off1));
+                            float r_old2 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off2));
+
+                            q0[lane] = to_bf16(l0 - r_old0);
+                            q1[lane] = to_bf16(l1 - r_old1);
+                            q2[lane] = to_bf16(l2 - r_old2);
+                        }
+
+                        if (deg == 6) {
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                uint32_t s_i = (lane < 16) ? (lane + 16) : (lane - 16);
+
+                                float m0 = std::fabs(q0[lane]), m0_swap = std::fabs(q0[s_i]);
+                                float m1 = std::fabs(q1[lane]), m1_swap = std::fabs(q1[s_i]);
+                                float m2 = std::fabs(q2[lane]), m2_swap = std::fabs(q2[s_i]);
+
+                                float s0 = (q0[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s1 = (q1[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s2 = (q2[lane] < 0.0f) ? -1.0f : 1.0f;
+
+                                float s0_swap = (q0[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s1_swap = (q1[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s2_swap = (q2[s_i] < 0.0f) ? -1.0f : 1.0f;
+
+                                float s_tot = (s0 * s0_swap) * (s1 * s1_swap) * (s2 * s2_swap);
+
+                                float m01 = approx_min_star(m0, m0_swap);
+                                float m23 = approx_min_star(m1, m1_swap);
+                                float m45 = approx_min_star(m2, m2_swap);
+
+                                float r_mag_0 = approx_min_star(approx_min_star(m23, m45), m0_swap);
+                                float r_mag_1 = approx_min_star(approx_min_star(m01, m45), m1_swap);
+                                float r_mag_2 = approx_min_star(approx_min_star(m01, m23), m2_swap);
+
+                                float r_out_0 = to_bf16((s_tot * s0) * r_mag_0);
+                                float r_out_1 = to_bf16((s_tot * s1) * r_mag_1);
+                                float r_out_2 = to_bf16((s_tot * s2) * r_mag_2);
+
+                                float l_new_0 = to_bf16(q0[lane] + r_out_0);
+                                float l_new_1 = to_bf16(q1[lane] + r_out_1);
+                                float l_new_2 = to_bf16(q2[lane] + r_out_2);
+
+                                uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                                uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                                uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off0) = fp32_to_bf16(r_out_0);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off0)   = fp32_to_bf16(l_new_0);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off1) = fp32_to_bf16(r_out_1);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off1)   = fp32_to_bf16(l_new_1);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off2) = fp32_to_bf16(r_out_2);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off2)   = fp32_to_bf16(l_new_2);
+                            }
+                        } else { // deg == 3
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                uint32_t s_i = (lane < 16) ? (lane + 16) : (lane - 16);
+
+                                float m0 = std::fabs(q0[lane]), m0_swap = std::fabs(q0[s_i]);
+                                float m1 = std::fabs(q1[lane]), m1_swap = std::fabs(q1[s_i]);
+                                float m2 = std::fabs(q2[lane]), m2_swap = std::fabs(q2[s_i]);
+
+                                float s0 = (q0[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s1 = (q1[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s2 = (q2[lane] < 0.0f) ? -1.0f : 1.0f;
+
+                                float s0_swap = (q0[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s1_swap = (q1[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s2_swap = (q2[s_i] < 0.0f) ? -1.0f : 1.0f;
+
+                                // Block 0: E2 broadcast to all 32 lanes
+                                float m_e2_blk0 = (lane < 16) ? m1 : m1_swap;
+                                float s_e2_blk0 = (lane < 16) ? s1 : s1_swap;
+
+                                // Block 1: E0 broadcast to all 32 lanes
+                                float m_e0_blk1 = (lane < 16) ? m1_swap : m1;
+                                float s_e0_blk1 = (lane < 16) ? s1_swap : s1;
+
+                                // Block 0
+                                float s_tot_blk0 = (s0 * s0_swap) * s_e2_blk0;
+                                float r_mag_0    = approx_min_star(m0_swap, m_e2_blk0);
+                                float r_out_0    = to_bf16((s_tot_blk0 * s0) * r_mag_0);
+
+                                float r_mag_e2_blk0 = approx_min_star(m0, m0_swap);
+                                float s_out_e2_blk0 = s_tot_blk0 * s_e2_blk0;
+
+                                // Block 1
+                                float s_tot_blk1 = (s2 * s2_swap) * s_e0_blk1;
+                                float r_mag_2    = approx_min_star(m2_swap, m_e0_blk1);
+                                float r_out_2    = to_bf16((s_tot_blk1 * s2) * r_mag_2);
+
+                                float r_mag_e0_blk1 = approx_min_star(m2, m2_swap);
+                                float s_out_e0_blk1 = s_tot_blk1 * s_e0_blk1;
+
+                                // Assemble p1
+                                float r_out_1 = (lane < 16) ? to_bf16(s_out_e2_blk0 * r_mag_e2_blk0)
+                                                            : to_bf16(s_out_e0_blk1 * r_mag_e0_blk1);
+
+                                float l_new_0 = to_bf16(q0[lane] + r_out_0);
+                                float l_new_1 = to_bf16(q1[lane] + r_out_1);
+                                float l_new_2 = to_bf16(q2[lane] + r_out_2);
+
+                                uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                                uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                                uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off0) = fp32_to_bf16(r_out_0);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off0)   = fp32_to_bf16(l_new_0);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off1) = fp32_to_bf16(r_out_1);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off1)   = fp32_to_bf16(l_new_1);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off2) = fp32_to_bf16(r_out_2);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off2)   = fp32_to_bf16(l_new_2);
+                            }
+                        }
+                    }
+
+                    // Zero out padding rows in scratch_out and r_msg_fifo for regs 6, 7 of this face
+                    for (int sub = 0; sub < 2; ++sub) {
+                        uint32_t reg = base_r + 6 + sub;
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t offset = get_scratch_byte_offset(reg, lane);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = 0;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = 0;
+                        }
+                    }
+                }
+#endif
 
                 if (iter == 0 && t == 0) {
                     std::ofstream f_gold_scat_in("dump/golden_scratch_in.bin", std::ios::binary);
@@ -979,18 +1149,19 @@ void run_waterfall_sweep(
             CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
             CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
 
-            auto reader = CreateKernel(
-                program, reader_path, core_range,
-                DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default}
-            );
-            auto writer = CreateKernel(
-                program, writer_path, core_range,
-                DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default}
-            );
-            auto compute = CreateKernel(
-                program, compute_path, core_range,
-                ComputeConfig{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = false}
-            );
+            DataMovementConfig reader_config{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default};
+            DataMovementConfig writer_config{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default};
+            ComputeConfig compute_config{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = false};
+
+#if LDPC_TEST_PASSTHROUGH_MODE
+            reader_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+            writer_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+            compute_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+#endif
+
+            auto reader = CreateKernel(program, reader_path, core_range, reader_config);
+            auto writer = CreateKernel(program, writer_path, core_range, writer_config);
+            auto compute = CreateKernel(program, compute_path, core_range, compute_config);
 
             std::vector<uint32_t> r_args = { chunk_batches, max_iterations, num_tiles, static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, invocation_id, mu_u32, sigma_bits, global_seed };
             SetRuntimeArgs(program, reader, core, r_args);
@@ -1165,6 +1336,17 @@ int main(int argc, char** argv) {
     std::cout << "-------------------------------------------------------" << std::endl;
     std::cout << " Tenstorrent QuietBox 2: Tile Matrix 4-Codeword Harness" << std::endl;
     std::cout << " Architecture: Decoupled Access-Execute (DAE)" << std::endl;
+#if LDPC_TEST_PASSTHROUGH_MODE
+    std::cout << " [COMPILE MODE] LDPC_TEST_PASSTHROUGH_MODE = 1 (Identity Pass-Through)" << std::endl;
+    std::cout << "                Vnodes: Offset Counting Numbers (1024..3583)" << std::endl;
+    std::cout << "                R Edges: Zero (Unmodified)" << std::endl;
+    std::cout << "                Compute: Direct Pass-Through (R_out=R_in, L_out=L_in)" << std::endl;
+#elif LDPC_TEST_R_DATAFLOW_MODE
+    std::cout << " [COMPILE MODE] LDPC_TEST_R_DATAFLOW_MODE = 1 (R-Dataflow Verification)" << std::endl;
+    std::cout << "                Vnodes: Probing Pattern (-1)^(v/2) * (2.0 + 0.25*(v%8))" << std::endl;
+    std::cout << "                R Edges: 1.0 + r (Edge index r in [0..deg-1])" << std::endl;
+    std::cout << "                Compute: Extrinsic Sub/Add ((V - R_in) + R_out)" << std::endl;
+#endif
     std::cout << "-------------------------------------------------------" << std::endl;
 
     ParityCheckMatrix pcm;

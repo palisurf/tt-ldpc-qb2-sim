@@ -66,6 +66,19 @@ sfpi_inline sfpi::vFloat sfpi_amin_star_branchless(sfpi::vFloat a, sfpi::vFloat 
 }
 
 // ------------------------------------------------------------------------------
+// SFPU Subvector Swap: Swaps lanes 0..15 with lanes 16..31 across 32 lanes
+// Uses integer transposition to preserve 100% bit-exact precision (no float rounding)
+// ------------------------------------------------------------------------------
+sfpi_inline sfpi::vFloat swap_subvec16(sfpi::vFloat v) {
+    sfpi::vInt vi = sfpi::as<sfpi::vInt>(v);
+    sfpi::vInt a = vi, b = vi, c = vi, d = vi;
+    sfpi::subvec_transp(a, b, c, d);
+    sfpi::vInt r0 = c, r1 = d, r2 = a, r3 = b;
+    sfpi::subvec_transp(r0, r1, r2, r3);
+    return sfpi::as<sfpi::vFloat>(r0);
+}
+
+// ------------------------------------------------------------------------------
 // Isolated Scope: 32-Lane Vector Approximate-Min* for Degree-6 Tile (5 Blocks)
 // Directly outputs r_out to eliminate subtraction cancellation!
 // ------------------------------------------------------------------------------
@@ -88,72 +101,121 @@ void __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in, uint32_t cb_out
 #ifdef TRISC_MATH
     _llk_math_eltwise_sfpu_start_(0);
 
+#if LDPC_TEST_PASSTHROUGH_MODE
+    // In pass-through mode, Tile 0 is already in dst_reg[0..31] from copy_tile(cb_in, 0, 0).
+    // Leave it untouched in Tile 0!
+#elif LDPC_TEST_R_DATAFLOW_MODE
+    sfpi::vInt lane_id = sfpi::as<sfpi::vInt>(sfpi::vConstTileId);
+    const int face_bases[4] = {0, 8, 16, 24};
+    #pragma GCC unroll 4
+    for (int f = 0; f < 4; ++f) {
+        int base = face_bases[f];
+        #pragma GCC unroll 3
+        for (int k = 0; k < 3; ++k) {
+    sfpi::vFloat v_id = sfpi::as<sfpi::vFloat>(sfpi::vConstTileId);
+    sfpi::vFloat v_r = v_id;
+
+            #pragma GCC unroll 2
+            for (int sub = 0; sub < 2; ++sub) {
+                int reg = base + 2 * k + sub;
+                if (iter == 0) {
+                    sfpi::vFloat l_val = sfpi::dst_reg[reg];
+                    sfpi::dst_reg[32 + reg] = l_val + v_r; // L_new in Tile 1
+                    sfpi::dst_reg[reg]      = v_r;         // R_new in Tile 0
+                } else {
+                    sfpi::vFloat l_val = sfpi::dst_reg[reg];
+                    sfpi::vFloat r_old = sfpi::dst_reg[32 + reg];
+                    sfpi::vFloat q     = l_val - r_old;
+                    sfpi::dst_reg[32 + reg] = q + r_old;  // L_new in Tile 1 = Q + R_new
+                    sfpi::dst_reg[reg]      = r_old;      // R_new in Tile 0 = R_old
+                }
+            }
+        }
+        // Zero out padding registers: regs 6, 7 of this face
+        sfpi::dst_reg[base + 6] = 0.0f;
+        sfpi::dst_reg[base + 7] = 0.0f;
+        sfpi::dst_reg[32 + base + 6] = 0.0f;
+        sfpi::dst_reg[32 + base + 7] = 0.0f;
+    }
+#else
+    sfpi::vInt lane_id = sfpi::as<sfpi::vInt>(sfpi::vConstTileId) & 31;
     const int face_bases[4] = {0, 8, 16, 24};
 
     #pragma GCC unroll 4
     for (int f = 0; f < 4; ++f) {
         int base_r = face_bases[f];
 
-        // If iter > 0: compute Q = L - R_old on SFPU; if iter == 0: Q = L
-        if (iter > 0) {
-            #pragma GCC unroll 6
-            for (int r = 0; r < 6; ++r) {
-                sfpi::vFloat l_val = sfpi::dst_reg[base_r + r];
-                sfpi::vFloat r_old = sfpi::dst_reg[32 + base_r + r];
-                sfpi::dst_reg[base_r + r] = l_val - r_old;
+        #pragma GCC unroll 2
+        for (int sub = 0; sub < 2; ++sub) {
+            int p0 = base_r + 0 + sub;
+            int p1 = base_r + 2 + sub;
+            int p2 = base_r + 4 + sub;
+
+            // Load Q = L or compute Q = L - R_old
+            sfpi::vFloat q0, q1, q2;
+            if (iter == 0) {
+                q0 = sfpi::dst_reg[p0];
+                q1 = sfpi::dst_reg[p1];
+                q2 = sfpi::dst_reg[p2];
+            } else {
+                sfpi::vFloat l0 = sfpi::dst_reg[p0], r0 = sfpi::dst_reg[32 + p0];
+                sfpi::vFloat l1 = sfpi::dst_reg[p1], r1 = sfpi::dst_reg[32 + p1];
+                sfpi::vFloat l2 = sfpi::dst_reg[p2], r2 = sfpi::dst_reg[32 + p2];
+                q0 = l0 - r0;
+                q1 = l1 - r1;
+                q2 = l2 - r2;
             }
-        }
 
-        // 1. Total Sign (via native XOR), Min Mag, Min Idx
-        sfpi::vFloat q0 = sfpi::dst_reg[base_r + 0];
-        sfpi::vInt total_sign_bits = sfpi::as<sfpi::vInt>(q0);
-        sfpi::vFloat min_mag = sfpi::abs(q0);
-        sfpi::vInt min_idx = 0;
+            // Extract signs and magnitudes
+            sfpi::vInt s0 = sfpi::as<sfpi::vInt>(q0);
+            sfpi::vInt s1 = sfpi::as<sfpi::vInt>(q1);
+            sfpi::vInt s2 = sfpi::as<sfpi::vInt>(q2);
 
-        #pragma GCC unroll 5
-        for (int r = 1; r < 6; ++r) {
-            sfpi::vFloat q = sfpi::dst_reg[base_r + r];
-            total_sign_bits ^= sfpi::as<sfpi::vInt>(q);
-            sfpi::vFloat m = sfpi::abs(q);
-            v_if (m < min_mag) {
-                min_mag = m;
-                min_idx = r;
-            } v_endif;
-        }
+            sfpi::vFloat m0 = sfpi::abs(q0);
+            sfpi::vFloat m1 = sfpi::abs(q1);
+            sfpi::vFloat m2 = sfpi::abs(q2);
 
-        // 2. M_others accumulation (Neutral-Element Substitution)
-        sfpi::vFloat q0_s2 = sfpi::dst_reg[base_r + 0];
-        sfpi::vFloat m_others = sfpi::abs(q0_s2);
-        v_if (min_idx == 0) {
-            m_others = 1000.0f;
-        } v_endif;
+            // Swap lanes 0..15 with 16..31 within each register
+            sfpi::vInt s0_swap = sfpi::as<sfpi::vInt>(swap_subvec16(sfpi::as<sfpi::vFloat>(s0)));
+            sfpi::vInt s1_swap = sfpi::as<sfpi::vInt>(swap_subvec16(sfpi::as<sfpi::vFloat>(s1)));
+            sfpi::vInt s2_swap = sfpi::as<sfpi::vInt>(swap_subvec16(sfpi::as<sfpi::vFloat>(s2)));
 
-        #pragma GCC unroll 5
-        for (int r = 1; r < 6; ++r) {
-            sfpi::vFloat q = sfpi::dst_reg[base_r + r];
-            sfpi::vFloat m = sfpi::abs(q);
-            v_if (min_idx == r) {
-                m = 1000.0f;
-            } v_endif;
-            m_others = sfpi_amin_star_branchless(m_others, m);
-        }
+            sfpi::vFloat m0_swap = swap_subvec16(m0);
+            sfpi::vFloat m1_swap = swap_subvec16(m1);
+            sfpi::vFloat m2_swap = swap_subvec16(m2);
 
-        // 3. M_all (Final branchless AMin* with min_mag)
-        sfpi::vFloat m_all = sfpi_amin_star_branchless(m_others, min_mag);
+            // Total check parity sign XOR across all 6 edges
+            sfpi::vInt s_tot = (s0 ^ s0_swap) ^ (s1 ^ s1_swap) ^ (s2 ^ s2_swap);
 
-        // 4. Check Message Update and Posterior LLR Update (Fused Step 2B)
-        // Store R_new in Tile 0 (dst_reg) and L_new = Q + R_new in Tile 1 (dst_reg 32..)
-        #pragma GCC unroll 6
-        for (int r = 0; r < 6; ++r) {
-            sfpi::vFloat q = sfpi::dst_reg[base_r + r];
-            sfpi::vFloat m_d = m_all;
-            v_if (min_idx == r) {
-                m_d = m_others;
-            } v_endif;
-            sfpi::vInt edge_sign_bits = total_sign_bits ^ sfpi::as<sfpi::vInt>(q);
-            sfpi::vFloat r_out = sfpi::copysgn(m_d, edge_sign_bits);
-            sfpi::dst_reg[32 + base_r + r] = q + r_out; // Tile 1: L_new
-            sfpi::dst_reg[base_r + r]      = r_out;     // Tile 0: R_new
+            // Pairwise AMin* within each edge pair
+            sfpi::vFloat m01 = sfpi_amin_star_branchless(m0, m0_swap);
+            sfpi::vFloat m23 = sfpi_amin_star_branchless(m1, m1_swap);
+            sfpi::vFloat m45 = sfpi_amin_star_branchless(m2, m2_swap);
+
+            // Outgoing magnitudes
+            sfpi::vFloat m_other_0 = sfpi_amin_star_branchless(m23, m45);
+            sfpi::vFloat r_mag_0   = sfpi_amin_star_branchless(m_other_0, m0_swap);
+
+            sfpi::vFloat m_other_1 = sfpi_amin_star_branchless(m01, m45);
+            sfpi::vFloat r_mag_1   = sfpi_amin_star_branchless(m_other_1, m1_swap);
+
+            sfpi::vFloat m_other_2 = sfpi_amin_star_branchless(m01, m23);
+            sfpi::vFloat r_mag_2   = sfpi_amin_star_branchless(m_other_2, m2_swap);
+
+            // Outgoing check messages with signs restored
+            sfpi::vFloat r_out_0 = sfpi::copysgn(r_mag_0, s_tot ^ s0);
+            sfpi::vFloat r_out_1 = sfpi::copysgn(r_mag_1, s_tot ^ s1);
+            sfpi::vFloat r_out_2 = sfpi::copysgn(r_mag_2, s_tot ^ s2);
+
+            // Evolve posterior LLRs: L_new = Q + R_new in Tile 1, R_new in Tile 0
+            sfpi::dst_reg[32 + p0] = q0 + r_out_0;
+            sfpi::dst_reg[p0]      = r_out_0;
+
+            sfpi::dst_reg[32 + p1] = q1 + r_out_1;
+            sfpi::dst_reg[p1]      = r_out_1;
+
+            sfpi::dst_reg[32 + p2] = q2 + r_out_2;
+            sfpi::dst_reg[p2]      = r_out_2;
         }
 
         // Zero out unused padding registers (regs 6, 7 of this face)
@@ -162,6 +224,7 @@ void __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in, uint32_t cb_out
         sfpi::dst_reg[32 + base_r + 6] = 0.0f;
         sfpi::dst_reg[32 + base_r + 7] = 0.0f;
     }
+#endif
 
     _llk_math_eltwise_sfpu_done_();
 #endif
@@ -175,10 +238,14 @@ void __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in, uint32_t cb_out
     pack_tile(0, cb_r_msg, 0);
     cb_push_back(cb_r_msg, 1);
 
-    // Pack L_new (Dst reg 1) to cb_out
+    // Pack L_new to cb_out
     cb_reserve_back(cb_out, 1);
     pack_init(cb_out);
+#if LDPC_TEST_PASSTHROUGH_MODE
+    pack_tile(0, cb_out, 0);
+#else
     pack_tile(1, cb_out, 0);
+#endif
     cb_push_back(cb_out, 1);
 
     tile_regs_release();
@@ -207,72 +274,146 @@ void __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in, uint32_t cb_out
 #ifdef TRISC_MATH
     _llk_math_eltwise_sfpu_start_(0);
 
-    const int deg3_bases[8] = {0, 3, 8, 11, 16, 19, 24, 27};
+#if LDPC_TEST_PASSTHROUGH_MODE
+    // In pass-through mode, Tile 0 is already in dst_reg[0..31] from copy_tile(cb_in, 0, 0).
+    // Leave it untouched in Tile 0!
+#elif LDPC_TEST_R_DATAFLOW_MODE
+    sfpi::vInt lane_id = sfpi::as<sfpi::vInt>(sfpi::vConstTileId);
+    const int face_bases[4] = {0, 8, 16, 24};
+    const float k_r0[3] = {1.0f, 3.0f, 2.0f};
+    const float k_r1[3] = {2.0f, 1.0f, 3.0f};
+    #pragma GCC unroll 4
+    for (int f = 0; f < 4; ++f) {
+        int base = face_bases[f];
+        #pragma GCC unroll 3
+        for (int k = 0; k < 3; ++k) {
+            float r0 = k_r0[k];
+            float r1 = k_r1[k];
+            sfpi::vFloat v_r = sfpi::vFloat(sfpi::sFloat16b(r1));
+            v_if (lane_id < 32) {
+                v_r = sfpi::vFloat(sfpi::sFloat16b(r0));
+            } v_endif;
+            v_r = swap_subvec16(v_r);
 
-    #pragma GCC unroll 8
-    for (int b = 0; b < 8; ++b) {
-        int base_r = deg3_bases[b];
-
-        // If iter > 0: compute Q = L - R_old on SFPU; if iter == 0: Q = L
-        if (iter > 0) {
-            #pragma GCC unroll 3
-            for (int r = 0; r < 3; ++r) {
-                sfpi::vFloat l_val = sfpi::dst_reg[base_r + r];
-                sfpi::vFloat r_old = sfpi::dst_reg[32 + base_r + r];
-                sfpi::dst_reg[base_r + r] = l_val - r_old;
+            #pragma GCC unroll 2
+            for (int sub = 0; sub < 2; ++sub) {
+                int reg = base + 2 * k + sub;
+                if (iter == 0) {
+                    sfpi::vFloat l_val = sfpi::dst_reg[reg];
+                    sfpi::dst_reg[32 + reg] = l_val + v_r; // L_new in Tile 1
+                    sfpi::dst_reg[reg]      = v_r;         // R_new in Tile 0
+                } else {
+                    sfpi::vFloat l_val = sfpi::dst_reg[reg];
+                    sfpi::vFloat r_old = sfpi::dst_reg[32 + reg];
+                    sfpi::vFloat q     = l_val - r_old;
+                    sfpi::dst_reg[32 + reg] = q + r_old;  // L_new in Tile 1 = Q + R_new
+                    sfpi::dst_reg[reg]      = r_old;      // R_new in Tile 0 = R_old
+                }
             }
         }
+        // Zero out padding registers: regs 6, 7 of this face
+        sfpi::dst_reg[base + 6] = 0.0f;
+        sfpi::dst_reg[base + 7] = 0.0f;
+        sfpi::dst_reg[32 + base + 6] = 0.0f;
+        sfpi::dst_reg[32 + base + 7] = 0.0f;
+    }
+#else
+    sfpi::vInt lane_id = sfpi::as<sfpi::vInt>(sfpi::vConstTileId) & 31;
+    const int face_bases[4] = {0, 8, 16, 24};
 
-        // 1. Total Sign, Min Mag, Min Idx
-        sfpi::vFloat q0 = sfpi::dst_reg[base_r + 0];
-        sfpi::vInt total_sign_bits = sfpi::as<sfpi::vInt>(q0);
-        sfpi::vFloat min_mag = sfpi::abs(q0);
-        sfpi::vInt min_idx = 0;
-
-        #pragma GCC unroll 2
-        for (int r = 1; r < 3; ++r) {
-            sfpi::vFloat q = sfpi::dst_reg[base_r + r];
-            total_sign_bits ^= sfpi::as<sfpi::vInt>(q);
-            sfpi::vFloat m = sfpi::abs(q);
-            v_if (m < min_mag) {
-                min_mag = m;
-                min_idx = r;
-            } v_endif;
-        }
-
-        // 2. M_others accumulation
-        sfpi::vFloat q0_s2 = sfpi::dst_reg[base_r + 0];
-        sfpi::vFloat m_others = sfpi::abs(q0_s2);
-        v_if (min_idx == 0) {
-            m_others = 1000.0f;
-        } v_endif;
+    #pragma GCC unroll 4
+    for (int f = 0; f < 4; ++f) {
+        int base_r = face_bases[f];
 
         #pragma GCC unroll 2
-        for (int r = 1; r < 3; ++r) {
-            sfpi::vFloat q = sfpi::dst_reg[base_r + r];
-            sfpi::vFloat m = sfpi::abs(q);
-            v_if (min_idx == r) {
-                m = 1000.0f;
-            } v_endif;
-            m_others = sfpi_amin_star_branchless(m_others, m);
-        }
+        for (int sub = 0; sub < 2; ++sub) {
+            int p0 = base_r + 0 + sub;
+            int p1 = base_r + 2 + sub;
+            int p2 = base_r + 4 + sub;
 
-        // 3. M_all
-        sfpi::vFloat m_all = sfpi_amin_star_branchless(m_others, min_mag);
+            // Load Q = L or compute Q = L - R_old
+            sfpi::vFloat q0, q1, q2;
+            if (iter == 0) {
+                q0 = sfpi::dst_reg[p0];
+                q1 = sfpi::dst_reg[p1];
+                q2 = sfpi::dst_reg[p2];
+            } else {
+                sfpi::vFloat l0 = sfpi::dst_reg[p0], r0 = sfpi::dst_reg[32 + p0];
+                sfpi::vFloat l1 = sfpi::dst_reg[p1], r1 = sfpi::dst_reg[32 + p1];
+                sfpi::vFloat l2 = sfpi::dst_reg[p2], r2 = sfpi::dst_reg[32 + p2];
+                q0 = l0 - r0;
+                q1 = l1 - r1;
+                q2 = l2 - r2;
+            }
 
-        // 4. Check Message Update and Posterior LLR Update (Fused Step 2B)
-        // Store R_new in Tile 0 (dst_reg) and L_new = Q + R_new in Tile 1 (dst_reg 32..)
-        #pragma GCC unroll 3
-        for (int r = 0; r < 3; ++r) {
-            sfpi::vFloat q = sfpi::dst_reg[base_r + r];
-            sfpi::vFloat m_d = m_all;
-            v_if (min_idx == r) {
-                m_d = m_others;
+            sfpi::vInt s0 = sfpi::as<sfpi::vInt>(q0);
+            sfpi::vInt s1 = sfpi::as<sfpi::vInt>(q1);
+            sfpi::vInt s2 = sfpi::as<sfpi::vInt>(q2);
+
+            sfpi::vFloat m0 = sfpi::abs(q0);
+            sfpi::vFloat m1 = sfpi::abs(q1);
+            sfpi::vFloat m2 = sfpi::abs(q2);
+
+            sfpi::vFloat q0_swap = swap_subvec16(q0);
+            sfpi::vFloat q1_swap = swap_subvec16(q1);
+            sfpi::vFloat q2_swap = swap_subvec16(q2);
+
+            sfpi::vInt s0_swap = sfpi::as<sfpi::vInt>(q0_swap);
+            sfpi::vInt s1_swap = sfpi::as<sfpi::vInt>(q1_swap);
+            sfpi::vInt s2_swap = sfpi::as<sfpi::vInt>(q2_swap);
+
+            sfpi::vFloat m0_swap = sfpi::abs(q0_swap);
+            sfpi::vFloat m1_swap = sfpi::abs(q1_swap);
+            sfpi::vFloat m2_swap = sfpi::abs(q2_swap);
+
+            // In p1: lower 16 is E2 of Block 0, upper 16 is E0 of Block 1.
+            // Broadcast E2 of Block 0 to all 32 lanes:
+            sfpi::vFloat m_e2_blk0 = m1;
+            sfpi::vInt s_e2_blk0 = s1;
+            v_if (lane_id >= 16) {
+                m_e2_blk0 = m1_swap;
+                s_e2_blk0 = s1_swap;
             } v_endif;
-            sfpi::vInt edge_sign_bits = total_sign_bits ^ sfpi::as<sfpi::vInt>(q);
-            sfpi::vFloat r_out = sfpi::copysgn(m_d, edge_sign_bits);
-            sfpi::dst_reg[32 + base_r + r] = q + r_out; // Tile 1: L_new
-            sfpi::dst_reg[base_r + r]      = r_out;     // Tile 0: R_new
+
+            // Broadcast E0 of Block 1 to all 32 lanes:
+            sfpi::vFloat m_e0_blk1 = m1;
+            sfpi::vInt s_e0_blk1 = s1;
+            v_if (lane_id < 16) {
+                m_e0_blk1 = m1_swap;
+                s_e0_blk1 = s1_swap;
+            } v_endif;
+
+            // Block 0: edges E0 (q0 lo), E1 (q0 hi), E2 (p1 lo)
+            sfpi::vInt s_tot_blk0 = (s0 ^ s0_swap) ^ s_e2_blk0;
+            sfpi::vFloat r_mag_0  = sfpi_amin_star_branchless(m0_swap, m_e2_blk0);
+            sfpi::vFloat r_out_0  = sfpi::copysgn(r_mag_0, s_tot_blk0 ^ s0);
+
+            sfpi::vFloat r_mag_e2_blk0 = sfpi_amin_star_branchless(m0, m0_swap);
+            sfpi::vInt s_out_e2_blk0   = s_tot_blk0 ^ s_e2_blk0;
+
+            // Block 1: edges E0 (p1 hi), E1 (q2 lo), E2 (q2 hi)
+            sfpi::vInt s_tot_blk1 = (s2 ^ s2_swap) ^ s_e0_blk1;
+            sfpi::vFloat r_mag_2  = sfpi_amin_star_branchless(m2_swap, m_e0_blk1);
+            sfpi::vFloat r_out_2  = sfpi::copysgn(r_mag_2, s_tot_blk1 ^ s2);
+
+            sfpi::vFloat r_mag_e0_blk1 = sfpi_amin_star_branchless(m2, m2_swap);
+            sfpi::vInt s_out_e0_blk1   = s_tot_blk1 ^ s_e0_blk1;
+
+            // Assemble p1: lower 16 lanes is E2 of Block 0, upper 16 lanes is E0 of Block 1
+            sfpi::vFloat r_out_1 = sfpi::copysgn(r_mag_e2_blk0, s_out_e2_blk0);
+            v_if (lane_id >= 16) {
+                r_out_1 = sfpi::copysgn(r_mag_e0_blk1, s_out_e0_blk1);
+            } v_endif;
+
+            // Store L_new in Tile 1, R_new in Tile 0
+            sfpi::dst_reg[32 + p0] = q0 + r_out_0;
+            sfpi::dst_reg[p0]      = r_out_0;
+
+            sfpi::dst_reg[32 + p1] = q1 + r_out_1;
+            sfpi::dst_reg[p1]      = r_out_1;
+
+            sfpi::dst_reg[32 + p2] = q2 + r_out_2;
+            sfpi::dst_reg[p2]      = r_out_2;
         }
     }
 
@@ -286,6 +427,7 @@ void __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in, uint32_t cb_out
         sfpi::dst_reg[32 + pr + 6] = 0.0f;
         sfpi::dst_reg[32 + pr + 7] = 0.0f;
     }
+#endif
 
     _llk_math_eltwise_sfpu_done_();
 #endif
@@ -299,10 +441,14 @@ void __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in, uint32_t cb_out
     pack_tile(0, cb_r_msg, 0);
     cb_push_back(cb_r_msg, 1);
 
-    // Pack L_new (Dst reg 1) to cb_out
+    // Pack L_new to cb_out
     cb_reserve_back(cb_out, 1);
     pack_init(cb_out);
+#if LDPC_TEST_PASSTHROUGH_MODE
+    pack_tile(0, cb_out, 0);
+#else
     pack_tile(1, cb_out, 0);
+#endif
     cb_push_back(cb_out, 1);
 
     tile_regs_release();
@@ -324,6 +470,11 @@ void __attribute__((noinline)) generate_channel_tiles(
 #ifdef TRISC_MATH
         _llk_math_eltwise_sfpu_start_(0);
 
+#if LDPC_TEST_PASSTHROUGH_MODE
+        for (int r = 0; r < 32; ++r) {
+            sfpi::dst_reg[r] = 0.0f;
+        }
+#else
         if (t < 8) {
             if (benchmark_mode) {
                 sfpi::vFloat v_mu = mu_val;
@@ -387,6 +538,7 @@ void __attribute__((noinline)) generate_channel_tiles(
                 sfpi::dst_reg[r] = 0.0f;
             }
         }
+#endif
 
         _llk_math_eltwise_sfpu_done_();
 #endif

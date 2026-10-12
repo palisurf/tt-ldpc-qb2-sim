@@ -445,85 +445,181 @@ inline BatchStats decode_tile_matrix_batch(
                     *reinterpret_cast<const uint64_t*>(vnode_l1 + off1_odd);
             }
 
-            // 2. Systolic TRISC Check Node Compute (32 Lanes in Parallel across 4 Faces)
-            uint32_t num_passes = (deg == 6) ? 4 : 8;
-            const int deg6_face_bases[4] = {0, 8, 16, 24};
-            const int deg3_face_bases[8] = {0, 3, 8, 11, 16, 19, 24, 27};
+            // 2. Systolic TRISC Check Node Compute (32 Lanes across 4 Faces)
+            const int face_bases[4] = {0, 8, 16, 24};
 
-            for (uint32_t pass = 0; pass < num_passes; ++pass) {
-                uint32_t base_r = (deg == 6) ? deg6_face_bases[pass] : deg3_face_bases[pass];
+            for (int f = 0; f < 4; ++f) {
+                int base_r = face_bases[f];
 
-                for (uint32_t lane = 0; lane < 32; ++lane) {
-                    uint32_t col = lane;
-                    float q[8], signs[8], mags[8];
-                    float total_sign = 1.0f;
-                    uint32_t min_idx = 0;
-                    float min_mag = 99999.0f;
+                for (int sub = 0; sub < 2; ++sub) {
+                    int p0 = base_r + 0 + sub;
+                    int p1 = base_r + 2 + sub;
+                    int p2 = base_r + 4 + sub;
 
-                    for (uint32_t r = 0; r < deg; ++r) {
-                        uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                        float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
-                        float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
+                    float q0[32], q1[32], q2[32];
+                    for (uint32_t lane = 0; lane < 32; ++lane) {
+                        uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                        uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                        uint32_t off2 = get_scratch_byte_offset(p2, lane);
 
-                        q[r] = tensix_precision ? to_bf16(l_val - r_old) : (l_val - r_old);
-                        signs[r] = (q[r] < 0.0f) ? -1.0f : 1.0f;
-                        mags[r]  = std::fabs(q[r]);
-                        total_sign *= signs[r];
-                        if (mags[r] < min_mag) {
-                            min_mag = mags[r];
-                            min_idx = r;
-                        }
+                        float l0 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off0));
+                        float l1 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off1));
+                        float l2 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off2));
+
+                        float r_old0 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off0));
+                        float r_old1 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off1));
+                        float r_old2 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off2));
+
+                        q0[lane] = tensix_precision ? to_bf16(l0 - r_old0) : (l0 - r_old0);
+                        q1[lane] = tensix_precision ? to_bf16(l1 - r_old1) : (l1 - r_old1);
+                        q2[lane] = tensix_precision ? to_bf16(l2 - r_old2) : (l2 - r_old2);
                     }
 
-                    // True Recursive Approximate-Min* Check Update
-                    float m_others = (min_idx == 0) ? 1000.0f : mags[0];
-                    if (tensix_precision) {
-                        for (uint32_t r = 1; r < deg; ++r) {
-                            float m = (min_idx == r) ? 1000.0f : mags[r];
-                            m_others = approx_min_star_tensix(m_others, m);
-                        }
-                        float m_all = approx_min_star_tensix(m_others, min_mag);
+                    if (deg == 6) {
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t s_i = (lane < 16) ? (lane + 16) : (lane - 16);
 
-                        // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
-                        for (uint32_t r = 0; r < deg; ++r) {
-                            uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                            float edge_sign = total_sign * signs[r];
-                            float edge_mag = (r == min_idx) ? m_others : m_all;
-                            float r_raw = edge_sign * edge_mag;
-                            float l_new = to_bf16(q[r] + r_raw);
-                            float r_new = to_bf16(r_raw);
+                            float m0 = std::fabs(q0[lane]), m0_swap = std::fabs(q0[s_i]);
+                            float m1 = std::fabs(q1[lane]), m1_swap = std::fabs(q1[s_i]);
+                            float m2 = std::fabs(q2[lane]), m2_swap = std::fabs(q2[s_i]);
 
-                            if (post_clip_max > 0.0f) {
-                                if (l_new > post_clip_max) l_new = post_clip_max;
-                                if (l_new < -post_clip_max) l_new = -post_clip_max;
-                            }
+                            float s0 = (q0[lane] < 0.0f) ? -1.0f : 1.0f;
+                            float s1 = (q1[lane] < 0.0f) ? -1.0f : 1.0f;
+                            float s2 = (q2[lane] < 0.0f) ? -1.0f : 1.0f;
 
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
-                        }
-                    } else {
-                        for (uint32_t r = 1; r < deg; ++r) {
-                            float m = (min_idx == r) ? 1000.0f : mags[r];
-                            m_others = approx_min_star_fp32(m_others, m);
-                        }
-                        float m_all = approx_min_star_fp32(m_others, min_mag);
+                            float s0_swap = (q0[s_i] < 0.0f) ? -1.0f : 1.0f;
+                            float s1_swap = (q1[s_i] < 0.0f) ? -1.0f : 1.0f;
+                            float s2_swap = (q2[s_i] < 0.0f) ? -1.0f : 1.0f;
 
-                        // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
-                        for (uint32_t r = 0; r < deg; ++r) {
-                            uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                            float edge_sign = total_sign * signs[r];
-                            float edge_mag = (r == min_idx) ? m_others : m_all;
-                            float r_new = edge_sign * edge_mag;
-                            float l_new = q[r] + r_new;
+                            float s_tot = (s0 * s0_swap) * (s1 * s1_swap) * (s2 * s2_swap);
+
+                            auto ams = [&](float a, float b) {
+                                return tensix_precision ? approx_min_star_tensix(a, b) : approx_min_star_fp32(a, b);
+                            };
+
+                            float m01 = ams(m0, m0_swap);
+                            float m23 = ams(m1, m1_swap);
+                            float m45 = ams(m2, m2_swap);
+
+                            float r_mag_0 = ams(ams(m23, m45), m0_swap);
+                            float r_mag_1 = ams(ams(m01, m45), m1_swap);
+                            float r_mag_2 = ams(ams(m01, m23), m2_swap);
+
+                            float r_out_0 = tensix_precision ? to_bf16((s_tot * s0) * r_mag_0) : ((s_tot * s0) * r_mag_0);
+                            float r_out_1 = tensix_precision ? to_bf16((s_tot * s1) * r_mag_1) : ((s_tot * s1) * r_mag_1);
+                            float r_out_2 = tensix_precision ? to_bf16((s_tot * s2) * r_mag_2) : ((s_tot * s2) * r_mag_2);
+
+                            float l_new_0 = tensix_precision ? to_bf16(q0[lane] + r_out_0) : (q0[lane] + r_out_0);
+                            float l_new_1 = tensix_precision ? to_bf16(q1[lane] + r_out_1) : (q1[lane] + r_out_1);
+                            float l_new_2 = tensix_precision ? to_bf16(q2[lane] + r_out_2) : (q2[lane] + r_out_2);
 
                             if (post_clip_max > 0.0f) {
-                                if (l_new > post_clip_max) l_new = post_clip_max;
-                                if (l_new < -post_clip_max) l_new = -post_clip_max;
+                                if (l_new_0 > post_clip_max) l_new_0 = post_clip_max;
+                                if (l_new_0 < -post_clip_max) l_new_0 = -post_clip_max;
+                                if (l_new_1 > post_clip_max) l_new_1 = post_clip_max;
+                                if (l_new_1 < -post_clip_max) l_new_1 = -post_clip_max;
+                                if (l_new_2 > post_clip_max) l_new_2 = post_clip_max;
+                                if (l_new_2 < -post_clip_max) l_new_2 = -post_clip_max;
                             }
 
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
+                            uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                            uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                            uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off0) = fp32_to_bf16(r_out_0);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off0)   = fp32_to_bf16(l_new_0);
+
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off1) = fp32_to_bf16(r_out_1);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off1)   = fp32_to_bf16(l_new_1);
+
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off2) = fp32_to_bf16(r_out_2);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off2)   = fp32_to_bf16(l_new_2);
                         }
+                    } else { // deg == 3
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t s_i = (lane < 16) ? (lane + 16) : (lane - 16);
+
+                            float m0 = std::fabs(q0[lane]), m0_swap = std::fabs(q0[s_i]);
+                            float m1 = std::fabs(q1[lane]), m1_swap = std::fabs(q1[s_i]);
+                            float m2 = std::fabs(q2[lane]), m2_swap = std::fabs(q2[s_i]);
+
+                            float s0 = (q0[lane] < 0.0f) ? -1.0f : 1.0f;
+                            float s1 = (q1[lane] < 0.0f) ? -1.0f : 1.0f;
+                            float s2 = (q2[lane] < 0.0f) ? -1.0f : 1.0f;
+
+                            float s0_swap = (q0[s_i] < 0.0f) ? -1.0f : 1.0f;
+                            float s1_swap = (q1[s_i] < 0.0f) ? -1.0f : 1.0f;
+                            float s2_swap = (q2[s_i] < 0.0f) ? -1.0f : 1.0f;
+
+                            // Block 0: E2 broadcast to all 32 lanes
+                            float m_e2_blk0 = (lane < 16) ? m1 : m1_swap;
+                            float s_e2_blk0 = (lane < 16) ? s1 : s1_swap;
+
+                            // Block 1: E0 broadcast to all 32 lanes
+                            float m_e0_blk1 = (lane < 16) ? m1_swap : m1;
+                            float s_e0_blk1 = (lane < 16) ? s1_swap : s1;
+
+                            auto ams = [&](float a, float b) {
+                                return tensix_precision ? approx_min_star_tensix(a, b) : approx_min_star_fp32(a, b);
+                            };
+
+                            // Block 0
+                            float s_tot_blk0 = (s0 * s0_swap) * s_e2_blk0;
+                            float r_mag_0    = ams(m0_swap, m_e2_blk0);
+                            float r_out_0    = tensix_precision ? to_bf16((s_tot_blk0 * s0) * r_mag_0) : ((s_tot_blk0 * s0) * r_mag_0);
+
+                            float r_mag_e2_blk0 = ams(m0, m0_swap);
+                            float s_out_e2_blk0 = s_tot_blk0 * s_e2_blk0;
+
+                            // Block 1
+                            float s_tot_blk1 = (s2 * s2_swap) * s_e0_blk1;
+                            float r_mag_2    = ams(m2_swap, m_e0_blk1);
+                            float r_out_2    = tensix_precision ? to_bf16((s_tot_blk1 * s2) * r_mag_2) : ((s_tot_blk1 * s2) * r_mag_2);
+
+                            float r_mag_e0_blk1 = ams(m2, m2_swap);
+                            float s_out_e0_blk1 = s_tot_blk1 * s_e0_blk1;
+
+                            // Assemble p1
+                            float r_out_1_raw = (lane < 16) ? (s_out_e2_blk0 * r_mag_e2_blk0)
+                                                            : (s_out_e0_blk1 * r_mag_e0_blk1);
+                            float r_out_1 = tensix_precision ? to_bf16(r_out_1_raw) : r_out_1_raw;
+
+                            float l_new_0 = tensix_precision ? to_bf16(q0[lane] + r_out_0) : (q0[lane] + r_out_0);
+                            float l_new_1 = tensix_precision ? to_bf16(q1[lane] + r_out_1) : (q1[lane] + r_out_1);
+                            float l_new_2 = tensix_precision ? to_bf16(q2[lane] + r_out_2) : (q2[lane] + r_out_2);
+
+                            if (post_clip_max > 0.0f) {
+                                if (l_new_0 > post_clip_max) l_new_0 = post_clip_max;
+                                if (l_new_0 < -post_clip_max) l_new_0 = -post_clip_max;
+                                if (l_new_1 > post_clip_max) l_new_1 = post_clip_max;
+                                if (l_new_1 < -post_clip_max) l_new_1 = -post_clip_max;
+                                if (l_new_2 > post_clip_max) l_new_2 = post_clip_max;
+                                if (l_new_2 < -post_clip_max) l_new_2 = -post_clip_max;
+                            }
+
+                            uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                            uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                            uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off0) = fp32_to_bf16(r_out_0);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off0)   = fp32_to_bf16(l_new_0);
+
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off1) = fp32_to_bf16(r_out_1);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off1)   = fp32_to_bf16(l_new_1);
+
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off2) = fp32_to_bf16(r_out_2);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off2)   = fp32_to_bf16(l_new_2);
+                        }
+                    }
+                }
+
+                // Zero out unused padding registers (regs 6, 7 of this face)
+                for (int sub = 0; sub < 2; ++sub) {
+                    uint32_t reg = base_r + 6 + sub;
+                    for (uint32_t lane = 0; lane < 32; ++lane) {
+                        uint32_t offset = get_scratch_byte_offset(reg, lane);
+                        *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = 0;
+                        *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = 0;
                     }
                 }
             }
@@ -839,16 +935,33 @@ int main(int argc, char** argv) {
     }
 
     bool standalone_mode = false;
+    bool passthrough_mode = false;
+    bool r_dataflow_mode = false;
     double eb_n0_db = 2.5;
     uint32_t num_iterations = 16;
     uint32_t seed = 12345;
+    uint32_t num_tiles_to_run = schedule.size();
+    float post_clip_max = 0.0f;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--passthrough") {
+            passthrough_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') num_iterations = std::stoul(argv[++i]);
+        } else if (arg == "--test-r-dataflow") {
+            r_dataflow_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') num_iterations = std::stoul(argv[++i]);
+        } else if (arg == "--tiles" && i + 1 < argc) {
+            num_tiles_to_run = std::stoul(argv[++i]);
+        }
+    }
 
     if (argc > 1 && std::string(argv[1]) == "--standalone") {
         standalone_mode = true;
         if (argc > 2) eb_n0_db = std::stod(argv[2]);
         if (argc > 3) num_iterations = std::stoul(argv[3]);
         if (argc > 4) seed = std::stoul(argv[4]);
-    } else {
+    } else if (!passthrough_mode && !r_dataflow_mode) {
         if (argc > 1) num_iterations = std::stoul(argv[1]);
         if (argc > 2) tensix_init_path = argv[2];
         if (argc > 3) tensix_final_path = argv[3];
@@ -866,7 +979,19 @@ int main(int argc, char** argv) {
     std::cout << "=================================================================" << std::endl;
     std::cout << " TENSIX 40-TILE FACE-ALIGNED LOCKSTEP STEPPER" << std::endl;
     std::cout << " Precision Mode:    " << (tensix_precision ? "Tensix Hardware Bit-Exact (bfloat16 mantissa truncation)" : "Full FP32 Precision") << std::endl;
-    if (standalone_mode) {
+    if (passthrough_mode) {
+        std::cout << " Mode:              IDENTITY PASS-THROUGH (R_out=R_in, L_out=L_in)" << std::endl;
+        std::cout << " Vnode Pattern:     OFFSET COUNTING NUMBERS (1024..3583)" << std::endl;
+        std::cout << " R Edge Values:     ZERO (Unmodified)" << std::endl;
+        std::cout << " Target Iterations: " << num_iterations << std::endl;
+        std::cout << " Tiles to Run:      " << num_tiles_to_run << " / " << schedule.size() << std::endl;
+    } else if (r_dataflow_mode) {
+        std::cout << " Mode:              R-DATAFLOW VERIFICATION ((V - R_in) + R_out)" << std::endl;
+        std::cout << " Vnode Pattern:     64.0 + (v % 32) (100% exact in bfloat16)" << std::endl;
+        std::cout << " R Edge Values:     1.0 + r (Edge index r in [0..deg-1])" << std::endl;
+        std::cout << " Target Iterations: " << num_iterations << std::endl;
+        std::cout << " Tiles to Run:      " << num_tiles_to_run << " / " << schedule.size() << std::endl;
+    } else if (standalone_mode) {
         std::cout << " Mode:              STANDALONE CONVERGENCE VERIFICATION" << std::endl;
         std::cout << " Eb/N0:             " << eb_n0_db << " dB" << std::endl;
         std::cout << " Max Iterations:    " << num_iterations << std::endl;
@@ -880,8 +1005,44 @@ int main(int argc, char** argv) {
     std::cout << "=================================================================" << std::endl;
 
     std::vector<uint8_t> vnode_l1(20480, 0);
+    std::vector<uint8_t> iter1_vnodes(20480, 0);
 
-    if (standalone_mode) {
+    if (passthrough_mode) {
+        for (uint32_t v = 0; v < 2560; ++v) {
+            uint32_t off = get_tile_vnode_byte_offset(v);
+            uint16_t* p = reinterpret_cast<uint16_t*>(vnode_l1.data() + off);
+            uint16_t val = static_cast<uint16_t>(1024 + v);
+            p[0] = val;
+            p[1] = val;
+            p[2] = val;
+            p[3] = val;
+        }
+        fs::create_directories("dump");
+        std::ofstream f_init("dump/golden_initial_vnodes.bin", std::ios::binary);
+        f_init.write(reinterpret_cast<const char*>(vnode_l1.data()), 20480);
+        f_init.close();
+        std::cout << "[INFO] Initialized 2,560 Vnodes with offset counting numbers (1024..3583) across all 4 codewords." << std::endl;
+        std::cout << "[INFO] Dumped initial golden Vnodes to dump/golden_initial_vnodes.bin" << std::endl;
+    } else if (r_dataflow_mode) {
+        for (uint32_t v = 0; v < 2560; ++v) {
+            uint32_t off = get_tile_vnode_byte_offset(v);
+            uint16_t* p = reinterpret_cast<uint16_t*>(vnode_l1.data() + off);
+            float sign = ((v / 2) % 2 == 1) ? -1.0f : 1.0f;
+            float mag  = 2.0f + 0.25f * static_cast<float>(v % 8);
+            float fval = sign * mag;
+            uint16_t val = fp32_to_bf16(fval);
+            p[0] = val;
+            p[1] = val;
+            p[2] = val;
+            p[3] = val;
+        }
+        fs::create_directories("dump");
+        std::ofstream f_init("dump/golden_initial_vnodes.bin", std::ios::binary);
+        f_init.write(reinterpret_cast<const char*>(vnode_l1.data()), 20480);
+        f_init.close();
+        std::cout << "[INFO] Initialized 2,560 Vnodes with probing pattern (-1)^(v/2) * (2.0 + 0.25*(v%8)) across all 4 codewords." << std::endl;
+        std::cout << "[INFO] Dumped initial golden Vnodes to dump/golden_initial_vnodes.bin" << std::endl;
+    } else if (standalone_mode) {
         float code_rate = static_cast<float>(pcm.K) / (pcm.N - pcm.P); // 1024 / 2048 = 0.5
         float eb_n0_lin = std::pow(10.0f, static_cast<float>(eb_n0_db) / 10.0f);
         float es_n0 = code_rate * eb_n0_lin;
@@ -914,8 +1075,8 @@ int main(int argc, char** argv) {
 
     const uint32_t* p_hoff_base = pcm.h_offsets_pairs.data();
 
-    // Print Initial Error State before decoding
-    {
+    // Print Initial Error State before decoding (only for AWGN / BPSK modes)
+    if (!passthrough_mode) {
         uint32_t init_info_errs[4] = {0, 0, 0, 0};
         uint32_t init_total_neg[4] = {0, 0, 0, 0};
         for (uint32_t v = 0; v < 2048; ++v) {
@@ -937,7 +1098,7 @@ int main(int argc, char** argv) {
     // Iteration Loop: Executes the exact 40-tile face-aligned hardware pipeline
     // --------------------------------------------------------------------------
     for (uint32_t iter = 0; iter < num_iterations; ++iter) {
-        for (size_t t = 0; t < schedule.size(); ++t) {
+        for (size_t t = 0; t < num_tiles_to_run; ++t) {
             uint32_t deg = schedule[t].check_degree;
             const uint32_t* tile_hoff_w0 = p_hoff_base + t * 96;
             const uint32_t* tile_hoff_w1 = tile_hoff_w0 + 48;
@@ -969,77 +1130,251 @@ int main(int argc, char** argv) {
                     *reinterpret_cast<const uint64_t*>(vnode_l1.data() + off1_odd);
             }
 
-            // 2. Systolic TRISC Check Node Compute (32 Lanes across 4 Faces)
-            uint32_t num_passes = (deg == 6) ? 4 : 8;
-            const int deg6_face_bases[4] = {0, 8, 16, 24};
-            const int deg3_face_bases[8] = {0, 3, 8, 11, 16, 19, 24, 27};
+            if (iter == 0 && t == 0) {
+                fs::create_directories("dump");
+                std::ofstream f_gold_scat_in("dump/golden_scratch_in.bin", std::ios::binary);
+                f_gold_scat_in.write(reinterpret_cast<const char*>(scratch_in.data()), 2048);
+                f_gold_scat_in.close();
+            }
 
-            for (uint32_t pass = 0; pass < num_passes; ++pass) {
-                uint32_t base_r = (deg == 6) ? deg6_face_bases[pass] : deg3_face_bases[pass];
+            // 2. Compute Stage
+            if (passthrough_mode) {
+                // Identity pass-through: R_out = R_in, L_out = L_in
+                scratch_out = scratch_in;
+                // r_msg_fifo[t] stays unchanged (0)
+            } else if (r_dataflow_mode) {
+                // R-Dataflow Test Mode:
+                // Iteration 0: R_in = 0. Synthesize R_out(t, r) = 1.0f + float(r) (exact in bfloat16).
+                //              Q = L - 0 = L.
+                //              L_new = Q + R_out.
+                // Iteration > 0: R_in = load from r_msg_fifo[t].
+                //                Q = L - R_in.
+                //                R_out = R_in.
+                //                L_new = Q + R_out = (L - R_in) + R_in = L.
+                const int face_bases[4] = {0, 8, 16, 24};
+                const float deg6_r0[3] = {1.0f, 3.0f, 5.0f};
+                const float deg6_r1[3] = {2.0f, 4.0f, 6.0f};
+                const float deg3_r0[3] = {1.0f, 3.0f, 2.0f};
+                const float deg3_r1[3] = {2.0f, 1.0f, 3.0f};
+                const float* k_r0 = (deg == 6) ? deg6_r0 : deg3_r0;
+                const float* k_r1 = (deg == 6) ? deg6_r1 : deg3_r1;
 
-                for (uint32_t lane = 0; lane < 32; ++lane) {
-                    uint32_t col = lane;
-                    float q[8], signs[8], mags[8];
-                    float total_sign = 1.0f;
-                    uint32_t min_idx = 0;
-                    float min_mag = 99999.0f;
+                for (int f = 0; f < 4; ++f) {
+                    int base = face_bases[f];
+                    for (int k = 0; k < 3; ++k) {
+                        float r0 = k_r0[k];
+                        float r1 = k_r1[k];
+                        for (int sub = 0; sub < 2; ++sub) {
+                            uint32_t reg = base + 2 * k + sub;
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                float r_val = (lane < 16) ? r0 : r1;
+                                uint32_t offset = get_scratch_byte_offset(reg, lane);
+                                float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
+                                float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
+                                float q = to_bf16(l_val - r_old);
+                                float r_new = (iter == 0) ? to_bf16(r_val) : r_old;
+                                float l_new = to_bf16(q + r_new);
 
-                    for (uint32_t r = 0; r < deg; ++r) {
-                        uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                        float l_val = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + offset));
-                        float r_old = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + offset));
-
-                        q[r] = tensix_precision ? to_bf16(l_val - r_old) : (l_val - r_old);
-                        signs[r] = (q[r] < 0.0f) ? -1.0f : 1.0f;
-                        mags[r]  = std::fabs(q[r]);
-                        total_sign *= signs[r];
-                        if (mags[r] < min_mag) {
-                            min_mag = mags[r];
-                            min_idx = r;
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
+                            }
                         }
                     }
-
-                    // True Recursive Approximate-Min* Check Update
-                    float m_others = (min_idx == 0) ? 1000.0f : mags[0];
-                    if (tensix_precision) {
-                        for (uint32_t r = 1; r < deg; ++r) {
-                            float m = (min_idx == r) ? 1000.0f : mags[r];
-                            m_others = approx_min_star_tensix(m_others, m);
-                        }
-                        float m_all = approx_min_star_tensix(m_others, min_mag);
-
-                        // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
-                        for (uint32_t r = 0; r < deg; ++r) {
-                            uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                            float edge_sign = total_sign * signs[r];
-                            float edge_mag = (r == min_idx) ? m_others : m_all;
-                            float r_raw = edge_sign * edge_mag;
-                            float l_new = to_bf16(q[r] + r_raw);
-                            float r_new = to_bf16(r_raw);
-
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
-                        }
-                    } else {
-                        for (uint32_t r = 1; r < deg; ++r) {
-                            float m = (min_idx == r) ? 1000.0f : mags[r];
-                            m_others = approx_min_star_fp32(m_others, m);
-                        }
-                        float m_all = approx_min_star_fp32(m_others, min_mag);
-
-                        // Scatter out to Tile 0 (R_new) and Tile 1 (L_new)
-                        for (uint32_t r = 0; r < deg; ++r) {
-                            uint32_t offset = get_scratch_byte_offset(base_r + r, col);
-                            float edge_sign = total_sign * signs[r];
-                            float edge_mag = (r == min_idx) ? m_others : m_all;
-                            float r_new = edge_sign * edge_mag;
-                            float l_new = q[r] + r_new;
-
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = fp32_to_bf16(r_new);
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = fp32_to_bf16(l_new);
+                    // Zero out padding rows in scratch_out and r_msg_fifo for regs 6, 7 of this face
+                    for (int sub = 0; sub < 2; ++sub) {
+                        uint32_t reg = base + 6 + sub;
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t offset = get_scratch_byte_offset(reg, lane);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = 0;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = 0;
                         }
                     }
                 }
+            } else {
+                // Systolic TRISC Check Node Compute (32 Lanes across 4 Faces)
+                const int face_bases[4] = {0, 8, 16, 24};
+
+                for (int f = 0; f < 4; ++f) {
+                    int base_r = face_bases[f];
+
+                    for (int sub = 0; sub < 2; ++sub) {
+                        int p0 = base_r + 0 + sub;
+                        int p1 = base_r + 2 + sub;
+                        int p2 = base_r + 4 + sub;
+
+                        float q0[32], q1[32], q2[32];
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                            uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                            uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                            float l0 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off0));
+                            float l1 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off1));
+                            float l2 = bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(scratch_in.data()) + off2));
+
+                            float r_old0 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off0));
+                            float r_old1 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off1));
+                            float r_old2 = (iter == 0) ? 0.0f : bf16_to_fp32(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(r_msg_fifo[t].data()) + off2));
+
+                            q0[lane] = tensix_precision ? to_bf16(l0 - r_old0) : (l0 - r_old0);
+                            q1[lane] = tensix_precision ? to_bf16(l1 - r_old1) : (l1 - r_old1);
+                            q2[lane] = tensix_precision ? to_bf16(l2 - r_old2) : (l2 - r_old2);
+                        }
+
+                        if (deg == 6) {
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                uint32_t s_i = (lane < 16) ? (lane + 16) : (lane - 16);
+
+                                float m0 = std::fabs(q0[lane]), m0_swap = std::fabs(q0[s_i]);
+                                float m1 = std::fabs(q1[lane]), m1_swap = std::fabs(q1[s_i]);
+                                float m2 = std::fabs(q2[lane]), m2_swap = std::fabs(q2[s_i]);
+
+                                float s0 = (q0[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s1 = (q1[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s2 = (q2[lane] < 0.0f) ? -1.0f : 1.0f;
+
+                                float s0_swap = (q0[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s1_swap = (q1[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s2_swap = (q2[s_i] < 0.0f) ? -1.0f : 1.0f;
+
+                                float s_tot = (s0 * s0_swap) * (s1 * s1_swap) * (s2 * s2_swap);
+
+                                auto ams = [&](float a, float b) {
+                                    return tensix_precision ? approx_min_star_tensix(a, b) : approx_min_star_fp32(a, b);
+                                };
+
+                                float m01 = ams(m0, m0_swap);
+                                float m23 = ams(m1, m1_swap);
+                                float m45 = ams(m2, m2_swap);
+
+                                float r_mag_0 = ams(ams(m23, m45), m0_swap);
+                                float r_mag_1 = ams(ams(m01, m45), m1_swap);
+                                float r_mag_2 = ams(ams(m01, m23), m2_swap);
+
+                                float r_out_0 = tensix_precision ? to_bf16((s_tot * s0) * r_mag_0) : ((s_tot * s0) * r_mag_0);
+                                float r_out_1 = tensix_precision ? to_bf16((s_tot * s1) * r_mag_1) : ((s_tot * s1) * r_mag_1);
+                                float r_out_2 = tensix_precision ? to_bf16((s_tot * s2) * r_mag_2) : ((s_tot * s2) * r_mag_2);
+
+                                float l_new_0 = tensix_precision ? to_bf16(q0[lane] + r_out_0) : (q0[lane] + r_out_0);
+                                float l_new_1 = tensix_precision ? to_bf16(q1[lane] + r_out_1) : (q1[lane] + r_out_1);
+                                float l_new_2 = tensix_precision ? to_bf16(q2[lane] + r_out_2) : (q2[lane] + r_out_2);
+
+                                if (post_clip_max > 0.0f) {
+                                    if (l_new_0 > post_clip_max) l_new_0 = post_clip_max;
+                                    if (l_new_0 < -post_clip_max) l_new_0 = -post_clip_max;
+                                    if (l_new_1 > post_clip_max) l_new_1 = post_clip_max;
+                                    if (l_new_1 < -post_clip_max) l_new_1 = -post_clip_max;
+                                    if (l_new_2 > post_clip_max) l_new_2 = post_clip_max;
+                                    if (l_new_2 < -post_clip_max) l_new_2 = -post_clip_max;
+                                }
+
+                                uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                                uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                                uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off0) = fp32_to_bf16(r_out_0);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off0)   = fp32_to_bf16(l_new_0);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off1) = fp32_to_bf16(r_out_1);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off1)   = fp32_to_bf16(l_new_1);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off2) = fp32_to_bf16(r_out_2);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off2)   = fp32_to_bf16(l_new_2);
+                            }
+                        } else { // deg == 3
+                            for (uint32_t lane = 0; lane < 32; ++lane) {
+                                uint32_t s_i = (lane < 16) ? (lane + 16) : (lane - 16);
+
+                                float m0 = std::fabs(q0[lane]), m0_swap = std::fabs(q0[s_i]);
+                                float m1 = std::fabs(q1[lane]), m1_swap = std::fabs(q1[s_i]);
+                                float m2 = std::fabs(q2[lane]), m2_swap = std::fabs(q2[s_i]);
+
+                                float s0 = (q0[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s1 = (q1[lane] < 0.0f) ? -1.0f : 1.0f;
+                                float s2 = (q2[lane] < 0.0f) ? -1.0f : 1.0f;
+
+                                float s0_swap = (q0[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s1_swap = (q1[s_i] < 0.0f) ? -1.0f : 1.0f;
+                                float s2_swap = (q2[s_i] < 0.0f) ? -1.0f : 1.0f;
+
+                                // Block 0: E2 broadcast to all 32 lanes
+                                float m_e2_blk0 = (lane < 16) ? m1 : m1_swap;
+                                float s_e2_blk0 = (lane < 16) ? s1 : s1_swap;
+
+                                // Block 1: E0 broadcast to all 32 lanes
+                                float m_e0_blk1 = (lane < 16) ? m1_swap : m1;
+                                float s_e0_blk1 = (lane < 16) ? s1_swap : s1;
+
+                                auto ams = [&](float a, float b) {
+                                    return tensix_precision ? approx_min_star_tensix(a, b) : approx_min_star_fp32(a, b);
+                                };
+
+                                // Block 0
+                                float s_tot_blk0 = (s0 * s0_swap) * s_e2_blk0;
+                                float r_mag_0    = ams(m0_swap, m_e2_blk0);
+                                float r_out_0    = tensix_precision ? to_bf16((s_tot_blk0 * s0) * r_mag_0) : ((s_tot_blk0 * s0) * r_mag_0);
+
+                                float r_mag_e2_blk0 = ams(m0, m0_swap);
+                                float s_out_e2_blk0 = s_tot_blk0 * s_e2_blk0;
+
+                                // Block 1
+                                float s_tot_blk1 = (s2 * s2_swap) * s_e0_blk1;
+                                float r_mag_2    = ams(m2_swap, m_e0_blk1);
+                                float r_out_2    = tensix_precision ? to_bf16((s_tot_blk1 * s2) * r_mag_2) : ((s_tot_blk1 * s2) * r_mag_2);
+
+                                float r_mag_e0_blk1 = ams(m2, m2_swap);
+                                float s_out_e0_blk1 = s_tot_blk1 * s_e0_blk1;
+
+                                // Assemble p1
+                                float r_out_1_raw = (lane < 16) ? (s_out_e2_blk0 * r_mag_e2_blk0)
+                                                                : (s_out_e0_blk1 * r_mag_e0_blk1);
+                                float r_out_1 = tensix_precision ? to_bf16(r_out_1_raw) : r_out_1_raw;
+
+                                float l_new_0 = tensix_precision ? to_bf16(q0[lane] + r_out_0) : (q0[lane] + r_out_0);
+                                float l_new_1 = tensix_precision ? to_bf16(q1[lane] + r_out_1) : (q1[lane] + r_out_1);
+                                float l_new_2 = tensix_precision ? to_bf16(q2[lane] + r_out_2) : (q2[lane] + r_out_2);
+
+                                if (post_clip_max > 0.0f) {
+                                    if (l_new_0 > post_clip_max) l_new_0 = post_clip_max;
+                                    if (l_new_0 < -post_clip_max) l_new_0 = -post_clip_max;
+                                    if (l_new_1 > post_clip_max) l_new_1 = post_clip_max;
+                                    if (l_new_1 < -post_clip_max) l_new_1 = -post_clip_max;
+                                    if (l_new_2 > post_clip_max) l_new_2 = post_clip_max;
+                                    if (l_new_2 < -post_clip_max) l_new_2 = -post_clip_max;
+                                }
+
+                                uint32_t off0 = get_scratch_byte_offset(p0, lane);
+                                uint32_t off1 = get_scratch_byte_offset(p1, lane);
+                                uint32_t off2 = get_scratch_byte_offset(p2, lane);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off0) = fp32_to_bf16(r_out_0);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off0)   = fp32_to_bf16(l_new_0);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off1) = fp32_to_bf16(r_out_1);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off1)   = fp32_to_bf16(l_new_1);
+
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + off2) = fp32_to_bf16(r_out_2);
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + off2)   = fp32_to_bf16(l_new_2);
+                            }
+                        }
+                    }
+
+                    // Zero out unused padding registers (regs 6, 7 of this face)
+                    for (int sub = 0; sub < 2; ++sub) {
+                        uint32_t reg = base_r + 6 + sub;
+                        for (uint32_t lane = 0; lane < 32; ++lane) {
+                            uint32_t offset = get_scratch_byte_offset(reg, lane);
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(r_msg_fifo[t].data()) + offset) = 0;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(scratch_out.data()) + offset)   = 0;
+                        }
+                    }
+                }
+            }
+
+            if (iter == 0 && t == 0) {
+                std::ofstream f_gold_scat_out("dump/golden_scratch_out.bin", std::ios::binary);
+                f_gold_scat_out.write(reinterpret_cast<const char*>(scratch_out.data()), 2048);
+                f_gold_scat_out.close();
             }
 
             // 3. Dual Scatter Stage (Worker 0 & Worker 1 in parallel)
@@ -1070,45 +1405,113 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Iteration Statistics
-        uint32_t info_errs[4] = {0, 0, 0, 0};
-        uint32_t total_neg[4] = {0, 0, 0, 0};
-        for (uint32_t v = 0; v < 2048; ++v) {
-            uint32_t off = get_tile_vnode_byte_offset(v);
-            const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1.data() + off);
-            for (int c = 0; c < 4; ++c) {
-                if (bf16_to_fp32(p[c]) < 0.0f) {
-                    total_neg[c]++;
-                    if (v < 1024) info_errs[c]++;
-                }
-            }
-        }
-
-        uint32_t unsat_checks[4] = {0, 0, 0, 0};
-        for (uint32_t m = 0; m < pcm.M; ++m) {
-            int syn[4] = {0, 0, 0, 0};
-            for (uint32_t v : pcm.check_to_var[m]) {
+        if (passthrough_mode) {
+            uint32_t mismatches = 0;
+            for (uint32_t v = 0; v < 2560; ++v) {
                 uint32_t off = get_tile_vnode_byte_offset(v);
                 const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1.data() + off);
                 for (int c = 0; c < 4; ++c) {
-                    if (bf16_to_fp32(p[c]) < 0.0f) syn[c] ^= 1;
+                    if (p[c] != static_cast<uint16_t>(1024 + v)) {
+                        if (mismatches < 25) {
+                            std::cout << "  [PASSTHROUGH MISMATCH] Iter " << (iter + 1)
+                                      << " | Vnode " << std::setw(4) << v << " CW" << c
+                                      << " (byte offset 0x" << std::hex << off << std::dec << "): "
+                                      << "Expected " << (1024 + v) << ", got " << p[c] << std::endl;
+                        }
+                        mismatches++;
+                    }
                 }
             }
-            for (int c = 0; c < 4; ++c) {
-                if (syn[c] != 0) unsat_checks[c]++;
+            if (mismatches == 0) {
+                std::cout << "[Iter " << std::setw(2) << (iter + 1) << "] "
+                          << "PASSTHROUGH CHECK: 100% BIT-EXACT MATCH! (0 / 10,240 errors across all 2,560 Vnodes)"
+                          << std::endl;
+            } else {
+                std::cout << "[Iter " << std::setw(2) << (iter + 1) << "] "
+                          << "PASSTHROUGH CHECK: FAILED with " << mismatches << " / 10,240 corrupted elements!"
+                          << std::endl;
             }
-        }
+        } else if (r_dataflow_mode) {
+            if (iter == 0) {
+                // Snapshot iteration 1 state as baseline
+                iter1_vnodes = vnode_l1;
+                fs::create_directories("dump");
+                std::ofstream f_base("dump/golden_r_dataflow_iter1_vnodes.bin", std::ios::binary);
+                f_base.write(reinterpret_cast<const char*>(iter1_vnodes.data()), 20480);
+                f_base.close();
+                std::cout << "[Iter " << std::setw(2) << (iter + 1) << "] "
+                          << "R-DATAFLOW SNAPSHOT: Post-iteration 1 state stored as baseline (dump/golden_r_dataflow_iter1_vnodes.bin)."
+                          << std::endl;
+            } else {
+                uint32_t mismatches = 0;
+                for (uint32_t v = 0; v < 2560; ++v) {
+                    uint32_t off = get_tile_vnode_byte_offset(v);
+                    const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1.data() + off);
+                    const uint16_t* p1 = reinterpret_cast<const uint16_t*>(iter1_vnodes.data() + off);
+                    for (int c = 0; c < 4; ++c) {
+                        if (p[c] != p1[c]) {
+                            if (mismatches < 25) {
+                                std::cout << "  [R-DATAFLOW MISMATCH] Iter " << (iter + 1)
+                                          << " | Vnode " << std::setw(4) << v << " CW" << c
+                                          << " (byte offset 0x" << std::hex << off << std::dec << "): "
+                                          << "Expected 0x" << std::hex << p1[c] << " (" << bf16_to_fp32(p1[c]) << "), "
+                                          << "got 0x" << p[c] << " (" << bf16_to_fp32(p[c]) << ")" << std::dec << std::endl;
+                            }
+                            mismatches++;
+                        }
+                    }
+                }
+                if (mismatches == 0) {
+                    std::cout << "[Iter " << std::setw(2) << (iter + 1) << "] "
+                              << "R-DATAFLOW CHECK: 100% BIT-EXACT MATCH! (0 / 10,240 errors vs Iteration 1)"
+                              << std::endl;
+                } else {
+                    std::cout << "[Iter " << std::setw(2) << (iter + 1) << "] "
+                              << "R-DATAFLOW CHECK: FAILED with " << mismatches << " / 10,240 corrupted elements vs Iteration 1!"
+                              << std::endl;
+                }
+            }
+        } else {
+            // Iteration Statistics
+            uint32_t info_errs[4] = {0, 0, 0, 0};
+            uint32_t total_neg[4] = {0, 0, 0, 0};
+            for (uint32_t v = 0; v < 2048; ++v) {
+                uint32_t off = get_tile_vnode_byte_offset(v);
+                const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1.data() + off);
+                for (int c = 0; c < 4; ++c) {
+                    if (bf16_to_fp32(p[c]) < 0.0f) {
+                        total_neg[c]++;
+                        if (v < 1024) info_errs[c]++;
+                    }
+                }
+            }
 
-        std::cout << "[Iter " << std::setw(2) << (iter + 1) << "] "
-                  << "Info BE: [" << info_errs[0] << ", " << info_errs[1] << ", " << info_errs[2] << ", " << info_errs[3] << "] | "
-                  << "Tx Neg: [" << total_neg[0] << ", " << total_neg[1] << ", " << total_neg[2] << ", " << total_neg[3] << "] | "
-                  << "Unsat Checks: [" << unsat_checks[0] << ", " << unsat_checks[1] << ", " << unsat_checks[2] << ", " << unsat_checks[3] << "]"
-                  << std::endl;
+            uint32_t unsat_checks[4] = {0, 0, 0, 0};
+            for (uint32_t m = 0; m < pcm.M; ++m) {
+                int syn[4] = {0, 0, 0, 0};
+                for (uint32_t v : pcm.check_to_var[m]) {
+                    uint32_t off = get_tile_vnode_byte_offset(v);
+                    const uint16_t* p = reinterpret_cast<const uint16_t*>(vnode_l1.data() + off);
+                    for (int c = 0; c < 4; ++c) {
+                        if (bf16_to_fp32(p[c]) < 0.0f) syn[c] ^= 1;
+                    }
+                }
+                for (int c = 0; c < 4; ++c) {
+                    if (syn[c] != 0) unsat_checks[c]++;
+                }
+            }
 
-        if (info_errs[0] == 0 && info_errs[1] == 0 && info_errs[2] == 0 && info_errs[3] == 0 &&
-            unsat_checks[0] == 0 && unsat_checks[1] == 0 && unsat_checks[2] == 0 && unsat_checks[3] == 0) {
-            std::cout << ">>> [CONVERGENCE] All 4 codewords reached 0 bit errors and 0 syndrome failures at iteration " << (iter + 1) << "!" << std::endl;
-            if (standalone_mode) break;
+            std::cout << "[Iter " << std::setw(2) << (iter + 1) << "] "
+                      << "Info BE: [" << info_errs[0] << ", " << info_errs[1] << ", " << info_errs[2] << ", " << info_errs[3] << "] | "
+                      << "Tx Neg: [" << total_neg[0] << ", " << total_neg[1] << ", " << total_neg[2] << ", " << total_neg[3] << "] | "
+                      << "Unsat Checks: [" << unsat_checks[0] << ", " << unsat_checks[1] << ", " << unsat_checks[2] << ", " << unsat_checks[3] << "]"
+                      << std::endl;
+
+            if (info_errs[0] == 0 && info_errs[1] == 0 && info_errs[2] == 0 && info_errs[3] == 0 &&
+                unsat_checks[0] == 0 && unsat_checks[1] == 0 && unsat_checks[2] == 0 && unsat_checks[3] == 0) {
+                std::cout << ">>> [CONVERGENCE] All 4 codewords reached 0 bit errors and 0 syndrome failures at iteration " << (iter + 1) << "!" << std::endl;
+                if (standalone_mode) break;
+            }
         }
     }
 
@@ -1117,9 +1520,12 @@ int main(int argc, char** argv) {
     std::ofstream f_out(golden_out_path, std::ios::binary);
     f_out.write(reinterpret_cast<const char*>(vnode_l1.data()), 20480);
     f_out.close();
+    std::ofstream f_out_short("dump/golden_final_vnodes.bin", std::ios::binary);
+    f_out_short.write(reinterpret_cast<const char*>(vnode_l1.data()), 20480);
+    f_out_short.close();
     std::cout << "\n[SUCCESS] Wrote 40-Tile Face-Aligned Lockstep Golden Reference: " << golden_out_path << std::endl;
 
-    if (!standalone_mode) {
+    if (!standalone_mode && !passthrough_mode) {
         std::cout << "\n=================================================================" << std::endl;
         std::cout << " RUNNING LOCKSTEP DIFFERENTIAL COMPARISON: CPU vs TENSIX SILICON" << std::endl;
         std::cout << "=================================================================" << std::endl;

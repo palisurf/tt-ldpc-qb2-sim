@@ -26,9 +26,17 @@ OBJS         := $(SRCS:.cpp=.o)
 TEST_LOCKSTEP := test_tensix_lockstep_debug
 TEST_OBJS     := test_tensix_lockstep_debug.o
 
-.PHONY: all clean run test_lockstep
+.PHONY: all clean run test_lockstep passthrough r_dataflow
 
 all: $(TARGET)
+
+passthrough: DEFINES += -DLDPC_TEST_PASSTHROUGH_MODE=1
+passthrough: clean $(TARGET)
+	@echo "[PASSTHROUGH BUILD] Compiled $(TARGET) with LDPC_TEST_PASSTHROUGH_MODE=1"
+
+r_dataflow: DEFINES += -DLDPC_TEST_R_DATAFLOW_MODE=1
+r_dataflow: clean $(TARGET)
+	@echo "[R_DATAFLOW BUILD] Compiled $(TARGET) with LDPC_TEST_R_DATAFLOW_MODE=1"
 
 $(TARGET): $(OBJS)
 	@echo "[LINK] $@"
