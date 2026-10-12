@@ -569,6 +569,7 @@ void kernel_main() {
     uint32_t mu_bits       = get_arg_val<uint32_t>(3);
     uint32_t sigma_bits    = get_arg_val<uint32_t>(4);
     uint32_t invocation_id = get_arg_val<uint32_t>(5);
+    uint32_t start_batch   = get_arg_val<uint32_t>(6);
     if (invocation_id == 0) invocation_id = 1;
     uint32_t epoch = invocation_id << 16;
 
@@ -602,7 +603,7 @@ void kernel_main() {
     // --------------------------------------------------------------------------
     for (uint32_t batch = 0; batch < num_batches; ++batch) {
         // Step 1: Generate Channel Observations for CB_VNODE_A on 32-Lane SFPU
-        generate_channel_tiles(cb_vnode, mu_val, sigma_val, benchmark_mode, invocation_id, batch);
+        generate_channel_tiles(cb_vnode, mu_val, sigma_val, benchmark_mode, invocation_id, start_batch + batch);
 
         // Step 2: Tri-core batch rendezvous barrier
 #ifdef TRISC_PACK
@@ -641,8 +642,8 @@ void kernel_main() {
     }
 
     uint32_t t_end = *wall_clock_reg;
-    sync_flags[SyncSlot::TRISC_CYCLES] = t_end - t_start;
 #ifdef TRISC_PACK
+    sync_flags[SyncSlot::TRISC_CYCLES] = t_end - t_start;
     sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + num_batches + 1;
 #endif
 }

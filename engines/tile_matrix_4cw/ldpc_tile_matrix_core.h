@@ -63,12 +63,13 @@ namespace TileMatrixCB {
     constexpr uint32_t TELEMETRY_L1_BASE   = 0x3DC00;
 }
 
-// Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY
+// Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY (Slots 14..31)
 namespace SyncSlot {
-    constexpr uint32_t BATCH_NOISE_READY   = 4;  // Incremented when AWGN noise is ready for batch
-    constexpr uint32_t GLOBAL_TILE_DONE    = 5;  // Incremented when a tile scatter finishes
-    constexpr uint32_t TRISC_CYCLES        = 6;  // TRISC elapsed cycles
-    constexpr uint32_t BRISC_CYCLES        = 7;  // BRISC elapsed cycles
+    constexpr uint32_t TRISC_CYCLES        = 14; // TRISC elapsed cycles mailbox
+    constexpr uint32_t BRISC_CYCLES        = 15; // BRISC elapsed cycles mailbox
+    constexpr uint32_t BATCH_NOISE_READY   = 16; // Incremented when AWGN noise is ready for batch
+    constexpr uint32_t GLOBAL_TILE_DONE    = 17; // Incremented when a tile scatter finishes
+    constexpr uint32_t ACTIVE_MASK         = 18; // Active codeword mask [3:0] (frozen codewords masked out)
     constexpr uint32_t UNPACK_DRAIN_DONE   = 19; // TRISC0 UNPACK batch cleanup barrier
     constexpr uint32_t EARLY_TERMINATION   = 20; // 1 if all 4 codewords converged early, 0 otherwise
     constexpr uint32_t GATHER_BARRIER_W0   = 21; // Worker 0 gather sync
@@ -82,6 +83,59 @@ namespace SyncSlot {
     constexpr uint32_t BATCH_BARRIER_NCRISC = 29; // NCRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_TRISC  = 30; // TRISC batch rendezvous
     constexpr uint32_t ITER_DONE            = 31; // Iteration completion synchronization
+}
+
+// Telemetry Buffer Layout in CB_TELEMETRY (1024 uint32 words)
+namespace TelemSlot {
+    // Primary Simulation Totals (written by NCRISC at exit)
+    constexpr uint32_t TOTAL_BE            = 0;
+    constexpr uint32_t TOTAL_FE            = 1;
+    constexpr uint32_t TOTAL_ITERS         = 2;
+    constexpr uint32_t TOTAL_CWS           = 3;
+    constexpr uint32_t ELAPSED_CYCLES      = 4;
+    constexpr uint32_t CYCLES_PER_BATCH    = 5;
+    constexpr uint32_t TRISC_CYCLES        = 6;
+    constexpr uint32_t BRISC_CYCLES        = 7;
+    constexpr uint32_t CYCLES_CHANNEL      = 8;
+    constexpr uint32_t CYCLES_ERROR_SCAN   = 9;
+    constexpr uint32_t TOTAL_TILES_SIM     = 10;
+    constexpr uint32_t TELEMETRY_L1_ADDR   = 11;
+
+    // NCRISC (Worker 1) Tile Breakdown (written by NCRISC at exit)
+    constexpr uint32_t NC_GATHER           = 32;
+    constexpr uint32_t NC_WAIT             = 33;
+    constexpr uint32_t NC_SCATTER          = 34;
+    constexpr uint32_t NC_SCAT_START_BAR   = 35;
+    constexpr uint32_t NC_SCAT_LOOP        = 36;
+    constexpr uint32_t NC_SCAT_RCOPY       = 37;
+    constexpr uint32_t NC_SCAT_END_BAR     = 38;
+    constexpr uint32_t NC_SCAT_POP         = 39;
+    constexpr uint32_t NC_SCAT_TILE0       = 40;
+    constexpr uint32_t NC_SCAT_OTHER       = 41;
+
+    // BRISC (Worker 0) Tile Breakdown (written by BRISC at exit)
+    constexpr uint32_t BR_GATHER           = 48;
+    constexpr uint32_t BR_WAIT             = 49;
+    constexpr uint32_t BR_SCATTER          = 50;
+    constexpr uint32_t BR_SCAT_LOOP        = 51;
+    constexpr uint32_t BR_SCAT_RCOPY       = 52;
+    constexpr uint32_t BR_SCAT_END_BAR     = 53;
+
+    // Check Node Degrees (pre-loaded / verified)
+    constexpr uint32_t DEG_BASE            = 64;  // 64..103
+
+    // Diagnostics (written by NCRISC on Batch 0 and exit)
+    constexpr uint32_t INIT_NEG_CW0        = 104; // 104..107
+    constexpr uint32_t INIT_BF16_W01       = 108;
+    constexpr uint32_t INIT_BF16_W23       = 109;
+    constexpr uint32_t MU_BITS             = 110;
+    constexpr uint32_t SIGMA_BITS          = 111;
+    constexpr uint32_t LAST_BATCH_BE_CW0   = 112; // 112..115
+    constexpr uint32_t LAST_BATCH_ITER_CW0 = 116; // 116..119
+    constexpr uint32_t FAILING_CW0_COUNT   = 120;
+    constexpr uint32_t FAILING_CW1_COUNT   = 121;
+    constexpr uint32_t FAILING_CW0_BASE    = 122; // 122..153 (32 max)
+    constexpr uint32_t FAILING_CW1_BASE    = 154; // 154..185 (32 max)
 }
 
 // ------------------------------------------------------------------------------
