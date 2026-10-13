@@ -355,6 +355,165 @@ inline float approx_min_star_tensix(float a, float b) {
     return std::max(min_v - corr, 0.0f);
 }
 
+// ------------------------------------------------------------------------------
+// Bit-Exact Tensix Vector Box-Muller AWGN Generator
+// Replicates the 32-lane vector SFPU xoshiro128+ and Cartesian Box-Muller
+// transformations from engines/tile_matrix_4cw/compute_trisc.cpp with 100% bit-accuracy.
+// ------------------------------------------------------------------------------
+namespace TensixBM {
+
+inline uint32_t arx_hash(uint32_t x, uint32_t c) {
+    x += c;
+    x ^= (x >> 16);
+    x += (x << 11);
+    x ^= (x >> 7);
+    x += (x << 5);
+    x ^= (x >> 13);
+    x += (x << 17);
+    x ^= (x >> 11);
+    return x;
+}
+
+struct VectorXoshiro128Plus {
+    uint32_t s0, s1, s2, s3;
+    inline void init(uint32_t seed_val) {
+        s0 = arx_hash(seed_val, 0x9E3779B9U);
+        s1 = arx_hash(seed_val, 0x85EBCA6BU);
+        s2 = arx_hash(seed_val, 0xC2B2AE35U);
+        s3 = arx_hash(seed_val, 0x27D4EB2FU);
+        if ((s0 | s1 | s2 | s3) == 0) {
+            s0 = 0x13579BDFU;
+        }
+    }
+    inline uint32_t next() {
+        uint32_t res = s0 + s3;
+        uint32_t t = s1 << 9;
+        s2 ^= s0;
+        s3 ^= s1;
+        s1 ^= s2;
+        s0 ^= s3;
+        s2 ^= t;
+        s3 = (s3 << 11) | (s3 >> 21);
+        return res;
+    }
+};
+
+inline float sfpu_fast_ln(float a) {
+    if (a < 1e-7f) a = 1e-7f;
+    uint32_t u;
+    std::memcpy(&u, &a, sizeof(u));
+    int32_t exp_val = static_cast<int32_t>((u >> 23) & 0xFF) - 127;
+    uint32_t m_bits = (u & 0x007FFFFF) | 0x3F800000;
+    float m;
+    std::memcpy(&m, &m_bits, sizeof(m));
+    float z = m - 1.0f;
+
+    // In TT-Metal SFPI, sFloat16b(v) truncates float directly to 16 bits (float_as_uint >> 16)
+    float p = to_bf16_trunc(-0.0528f);
+    p = p * z + to_bf16_trunc(0.1264f);
+    p = p * z - to_bf16_trunc(0.1678f);
+    p = p * z + to_bf16_trunc(0.2057f);
+    p = p * z - to_bf16_trunc(0.2490f);
+    p = p * z + to_bf16_trunc(0.3328f);
+    p = p * z - 0.5f;
+    p = p * z + 1.0f;
+    float ln_m = p * z;
+
+    float e_flt = static_cast<float>(exp_val);
+    return ln_m + e_flt * 0.69314718f;
+}
+
+inline float sfpu_fast_sqrt(float val) {
+    if (val < 1e-7f) val = 1e-7f;
+    uint32_t u;
+    std::memcpy(&u, &val, sizeof(u));
+    uint32_t magic = 0x5F375A86U;
+    uint32_t approx_u = magic - (u >> 1);
+    float approx;
+    std::memcpy(&approx, &approx_u, sizeof(approx));
+    float neg_half_val = val * -0.5f;
+    approx = ((approx * approx) * neg_half_val + 1.5f) * approx;
+    approx = ((approx * approx) * neg_half_val + 1.5f) * approx;
+    return approx * val;
+}
+
+inline void generate_channel_vnodes(
+    uint8_t* vnode_l1,
+    float mu_llr,
+    float sigma_llr,
+    uint32_t invocation_id,
+    uint32_t batch,
+    float l_ch_max = 7.0f
+) {
+    for (uint32_t t = 0; t < 8; ++t) {
+        VectorXoshiro128Plus rngs[32];
+        uint32_t seed_base = 0x12345678U + (invocation_id * 1013904223U) + batch * 31337U + t * 7919U;
+        for (uint32_t lane = 0; lane < 32; ++lane) {
+            uint32_t lane_seed = seed_base + (2 * lane);
+            rngs[lane].init(lane_seed);
+        }
+
+        float dst_reg[32][32];
+        for (int r = 0; r < 32; ++r) {
+            for (int lane = 0; lane < 32; ++lane) {
+                uint32_t raw = rngs[lane].next();
+                uint32_t u_bits = ((raw >> 9) & 0x007FFFFF) | 0x3F800000;
+                float u;
+                std::memcpy(&u, &u_bits, sizeof(u));
+                u -= 1.0f;
+                dst_reg[r][lane] = to_bf16_trunc(std::max(u, 1e-7f));
+            }
+        }
+
+        for (int p = 0; p < 16; ++p) {
+            for (int lane = 0; lane < 32; ++lane) {
+                float u1 = dst_reg[2 * p + 0][lane];
+                float ln_u1 = sfpu_fast_ln(u1);
+                float r = sfpu_fast_sqrt(ln_u1 * -2.0f);
+
+                float u2 = dst_reg[2 * p + 1][lane];
+                float theta = u2 * 6.2831853f - 3.14159265f;
+                float s_th = theta * theta;
+
+                float cos_val = to_bf16_trunc(0.0000248f);
+                cos_val = cos_val * s_th - to_bf16_trunc(0.0013889f);
+                cos_val = cos_val * s_th + to_bf16_trunc(0.0416667f);
+                cos_val = cos_val * s_th - 0.5f;
+                cos_val = cos_val * s_th + 1.0f;
+                float llr0 = mu_llr + sigma_llr * (r * cos_val);
+                if (l_ch_max > 0.0f) {
+                    llr0 = std::min(std::max(llr0, -l_ch_max), l_ch_max);
+                }
+                dst_reg[2 * p + 0][lane] = to_bf16_trunc(llr0);
+
+                float sin_val = to_bf16_trunc(0.00000276f);
+                sin_val = sin_val * s_th - to_bf16_trunc(0.0001984f);
+                sin_val = sin_val * s_th + to_bf16_trunc(0.0083333f);
+                sin_val = sin_val * s_th - to_bf16_trunc(0.1666667f);
+                sin_val = sin_val * s_th + 1.0f;
+                float llr1 = mu_llr + sigma_llr * (r * (sin_val * theta));
+                if (l_ch_max > 0.0f) {
+                    llr1 = std::min(std::max(llr1, -l_ch_max), l_ch_max);
+                }
+                dst_reg[2 * p + 1][lane] = to_bf16_trunc(llr1);
+            }
+        }
+
+        uint32_t tile_offset = t * 2048;
+        for (int r = 0; r < 32; ++r) {
+            for (int lane = 0; lane < 32; ++lane) {
+                uint16_t bf = fp32_to_bf16_trunc(dst_reg[r][lane]);
+                uint32_t byte_off = tile_offset + get_scratch_byte_offset(r, lane);
+                *reinterpret_cast<uint16_t*>(vnode_l1 + byte_off) = bf;
+            }
+        }
+    }
+
+    std::memset(vnode_l1 + 8 * 2048, 0, 4096);
+}
+
+} // namespace TensixBM
+
 inline void init_vnodes_host(
     uint8_t* vnode_l1_ptr,
     float mu_llr,
@@ -714,17 +873,35 @@ int run_monte_carlo_simulation(
     omp_set_num_threads(num_threads);
 
     bool tensix_precision = true;
+    bool use_tensix_noise = false;
+    uint32_t tensix_inv = 1;
+    uint32_t tensix_start_batch = 0;
+    float l_ch_max = 7.0f;
+
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--fp32" || std::string(argv[i]) == "--full-precision") {
+        std::string arg = argv[i];
+        if (arg == "--fp32" || arg == "--full-precision") {
             tensix_precision = false;
-        } else if (std::string(argv[i]) == "--tensix-precision") {
+        } else if (arg == "--tensix-precision") {
             tensix_precision = true;
+        } else if (arg == "--tensix-noise") {
+            use_tensix_noise = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') tensix_inv = std::stoul(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') tensix_start_batch = std::stoul(argv[++i]);
+        } else if (arg == "--no-ch-clip" || arg == "--unclipped") {
+            l_ch_max = 0.0f;
+        } else if (arg == "--ch-clip" || arg == "--l-ch-max") {
+            if (i + 1 < argc) l_ch_max = std::stof(argv[++i]);
         }
     }
 
     std::cout << "\n=================================================================" << std::endl;
     std::cout << " TENSIX 40-TILE FACE-ALIGNED LOCKSTEP STEPPER: MONTE CARLO" << std::endl;
     std::cout << " Precision Mode:    " << (tensix_precision ? "Tensix Hardware Bit-Exact (bfloat16 mantissa truncation)" : "Full FP32 Precision") << std::endl;
+    std::cout << " Noise Generator:   " << (use_tensix_noise ? ("Tensix Vector Box-Muller (Invocation: " + std::to_string(tensix_inv) + ", Start Batch: " + std::to_string(tensix_start_batch) + ")") : "Host Scalar Xoshiro128+") << std::endl;
+    if (use_tensix_noise) {
+        std::cout << " Channel Clamping:  " << (l_ch_max > 0.0f ? ("|L_ch| <= " + std::to_string(l_ch_max)) : "None (Unclipped)") << std::endl;
+    }
     std::cout << " Eb/N0:             " << std::fixed << std::setprecision(2) << eb_n0_db << " dB" << std::endl;
     std::cout << " Max Blocks:        " << max_blocks << std::endl;
     std::cout << " Min Frame Errors:  " << min_frame_errors << std::endl;
@@ -803,6 +980,8 @@ int run_monte_carlo_simulation(
         }
     });
 
+    std::atomic<uint32_t> global_batch_counter{0};
+
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
@@ -827,7 +1006,12 @@ int run_monte_carlo_simulation(
                 for (auto& fifo : r_msg_fifo) {
                     std::fill(fifo.begin(), fifo.end(), 0);
                 }
-                init_vnodes_host(vnode_l1.data(), mu_llr, sigma_llr, rng);
+                if (use_tensix_noise) {
+                    uint32_t b_idx = tensix_start_batch + global_batch_counter.fetch_add(1, std::memory_order_relaxed);
+                    TensixBM::generate_channel_vnodes(vnode_l1.data(), mu_llr, sigma_llr, tensix_inv, b_idx, l_ch_max);
+                } else {
+                    init_vnodes_host(vnode_l1.data(), mu_llr, sigma_llr, rng);
+                }
                 BatchStats stats = decode_tile_matrix_batch(
                     pcm, schedule, vnode_l1.data(), r_msg_fifo, scratch_in, scratch_out, max_iter, post_clip, tensix_precision
                 );
@@ -882,7 +1066,9 @@ int run_monte_carlo_simulation(
     std::cout << " Wall-Clock Time:   " << std::fixed << std::setprecision(2) << total_sec << " s" << std::endl;
     std::cout << "=================================================================" << std::endl;
 
-    fs::create_directories(fs::path(csv_path).parent_path());
+    if (fs::path(csv_path).has_parent_path()) {
+        fs::create_directories(fs::path(csv_path).parent_path());
+    }
     bool file_exists = fs::exists(csv_path);
     std::ofstream csv(csv_path, std::ios::app);
     if (csv.is_open()) {
@@ -943,6 +1129,11 @@ int main(int argc, char** argv) {
     uint32_t num_tiles_to_run = schedule.size();
     float post_clip_max = 0.0f;
 
+    bool tensix_noise_mode = false;
+    uint32_t tensix_noise_inv = 1;
+    uint32_t tensix_noise_batch = 0;
+    float l_ch_max = 7.0f;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--passthrough") {
@@ -953,6 +1144,22 @@ int main(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') num_iterations = std::stoul(argv[++i]);
         } else if (arg == "--tiles" && i + 1 < argc) {
             num_tiles_to_run = std::stoul(argv[++i]);
+        } else if (arg == "--tensix-noise") {
+            tensix_noise_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') tensix_noise_inv = std::stoul(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') tensix_noise_batch = std::stoul(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') eb_n0_db = std::stod(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') num_iterations = std::stoul(argv[++i]);
+        } else if (arg == "--no-ch-clip" || arg == "--unclipped") {
+            l_ch_max = 0.0f;
+        } else if (arg == "--ch-clip" || arg == "--l-ch-max") {
+            if (i + 1 < argc) l_ch_max = std::stof(argv[++i]);
+        } else if (arg == "--ebn0" && i + 1 < argc) {
+            eb_n0_db = std::stod(argv[++i]);
+        } else if (arg == "--max-iter" && i + 1 < argc) {
+            num_iterations = std::stoul(argv[++i]);
+        } else if (arg == "--post-clip" && i + 1 < argc) {
+            post_clip_max = std::stof(argv[++i]);
         }
     }
 
@@ -961,10 +1168,10 @@ int main(int argc, char** argv) {
         if (argc > 2) eb_n0_db = std::stod(argv[2]);
         if (argc > 3) num_iterations = std::stoul(argv[3]);
         if (argc > 4) seed = std::stoul(argv[4]);
-    } else if (!passthrough_mode && !r_dataflow_mode) {
-        if (argc > 1) num_iterations = std::stoul(argv[1]);
-        if (argc > 2) tensix_init_path = argv[2];
-        if (argc > 3) tensix_final_path = argv[3];
+    } else if (!passthrough_mode && !r_dataflow_mode && !tensix_noise_mode) {
+        if (argc > 1 && argv[1][0] != '-') num_iterations = std::stoul(argv[1]);
+        if (argc > 2 && argv[2][0] != '-') tensix_init_path = argv[2];
+        if (argc > 3 && argv[3][0] != '-') tensix_final_path = argv[3];
     }
 
     bool tensix_precision = true;
@@ -991,6 +1198,14 @@ int main(int argc, char** argv) {
         std::cout << " R Edge Values:     1.0 + r (Edge index r in [0..deg-1])" << std::endl;
         std::cout << " Target Iterations: " << num_iterations << std::endl;
         std::cout << " Tiles to Run:      " << num_tiles_to_run << " / " << schedule.size() << std::endl;
+    } else if (tensix_noise_mode) {
+        std::cout << " Mode:              TENSIX BIT-EXACT NOISE REPLAY" << std::endl;
+        std::cout << " Invocation ID:     " << tensix_noise_inv << std::endl;
+        std::cout << " Batch Index:       " << tensix_noise_batch << std::endl;
+        std::cout << " Eb/N0:             " << eb_n0_db << " dB" << std::endl;
+        std::cout << " Channel Clamping:  " << (l_ch_max > 0.0f ? ("|L_ch| <= " + std::to_string(l_ch_max)) : "None (Unclipped)") << std::endl;
+        std::cout << " Target Iterations: " << num_iterations << std::endl;
+        std::cout << " Post-Clipping:     " << (post_clip_max > 0.0f ? std::to_string(post_clip_max) : "None (Unclipped)") << std::endl;
     } else if (standalone_mode) {
         std::cout << " Mode:              STANDALONE CONVERGENCE VERIFICATION" << std::endl;
         std::cout << " Eb/N0:             " << eb_n0_db << " dB" << std::endl;
@@ -1042,6 +1257,17 @@ int main(int argc, char** argv) {
         f_init.close();
         std::cout << "[INFO] Initialized 2,560 Vnodes with probing pattern (-1)^(v/2) * (2.0 + 0.25*(v%8)) across all 4 codewords." << std::endl;
         std::cout << "[INFO] Dumped initial golden Vnodes to dump/golden_initial_vnodes.bin" << std::endl;
+    } else if (tensix_noise_mode) {
+        float code_rate = static_cast<float>(pcm.K) / (pcm.N - pcm.P); // 1024 / 2048 = 0.5
+        float eb_n0_lin = std::pow(10.0f, static_cast<float>(eb_n0_db) / 10.0f);
+        float es_n0 = code_rate * eb_n0_lin;
+        float noise_var = 1.0f / (2.0f * es_n0);
+        float noise_std = std::sqrt(noise_var);
+        float mu_llr = 2.0f / noise_var;
+        float sigma_llr = 2.0f / noise_std;
+
+        TensixBM::generate_channel_vnodes(vnode_l1.data(), mu_llr, sigma_llr, tensix_noise_inv, tensix_noise_batch, l_ch_max);
+        std::cout << "[INFO] Synthesized Bit-Exact Tensix Vector Box-Muller Channel LLRs (mu=" << mu_llr << ", sigma=" << sigma_llr << ")" << std::endl;
     } else if (standalone_mode) {
         float code_rate = static_cast<float>(pcm.K) / (pcm.N - pcm.P); // 1024 / 2048 = 0.5
         float eb_n0_lin = std::pow(10.0f, static_cast<float>(eb_n0_db) / 10.0f);
@@ -1525,7 +1751,7 @@ int main(int argc, char** argv) {
     f_out_short.close();
     std::cout << "\n[SUCCESS] Wrote 40-Tile Face-Aligned Lockstep Golden Reference: " << golden_out_path << std::endl;
 
-    if (!standalone_mode && !passthrough_mode) {
+    if (!standalone_mode && !passthrough_mode && !tensix_noise_mode && fs::exists(tensix_final_path) && fs::exists("tools/diff_tensix_vs_emulator.py")) {
         std::cout << "\n=================================================================" << std::endl;
         std::cout << " RUNNING LOCKSTEP DIFFERENTIAL COMPARISON: CPU vs TENSIX SILICON" << std::endl;
         std::cout << "=================================================================" << std::endl;

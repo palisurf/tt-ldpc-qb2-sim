@@ -15,6 +15,14 @@
 // Target: Tenstorrent Blackhole (440 Tensix Cores, 2,200 RISC-V Processors)
 // ==============================================================================
 
+#ifndef LDPC_ENABLE_CH_CLAMP
+#define LDPC_ENABLE_CH_CLAMP 1
+#endif
+
+#ifndef LDPC_L_CH_MAX
+#define LDPC_L_CH_MAX 7.0f
+#endif
+
 // ------------------------------------------------------------------------------
 // SFPU Vector Fast Natural Logarithm
 // ------------------------------------------------------------------------------
@@ -580,7 +588,11 @@ void __attribute__((noinline)) generate_channel_tiles(
                     cos_val = cos_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0416667f));
                     cos_val = cos_val * s_th - 0.5f;
                     cos_val = cos_val * s_th + 1.0f;
-                    sfpi::dst_reg[2 * p + 0] = v_mu + v_sigma * (r * cos_val);
+                    sfpi::vFloat llr0 = v_mu + v_sigma * (r * cos_val);
+#if LDPC_ENABLE_CH_CLAMP
+                    llr0 = sfpi::min(sfpi::max(llr0, -LDPC_L_CH_MAX), LDPC_L_CH_MAX);
+#endif
+                    sfpi::dst_reg[2 * p + 0] = llr0;
 
                     // Sine series & write Row 2*p + 1
                     sfpi::vFloat sin_val = sfpi::vFloat(sfpi::sFloat16b(0.00000276f));
@@ -588,7 +600,11 @@ void __attribute__((noinline)) generate_channel_tiles(
                     sin_val = sin_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0083333f));
                     sin_val = sin_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.1666667f));
                     sin_val = sin_val * s_th + 1.0f;
-                    sfpi::dst_reg[2 * p + 1] = v_mu + v_sigma * (r * (sin_val * theta));
+                    sfpi::vFloat llr1 = v_mu + v_sigma * (r * (sin_val * theta));
+#if LDPC_ENABLE_CH_CLAMP
+                    llr1 = sfpi::min(sfpi::max(llr1, -LDPC_L_CH_MAX), LDPC_L_CH_MAX);
+#endif
+                    sfpi::dst_reg[2 * p + 1] = llr1;
                 }
             }
         } else {
