@@ -13,6 +13,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <mutex>
 #include <omp.h>
 
 #ifdef _WIN32
@@ -1043,6 +1044,17 @@ int run_monte_carlo_simulation(
     std::atomic<uint64_t> cw_bit_errors[4]{{0}, {0}, {0}, {0}};
     std::atomic<bool> stop_flag{false};
 
+    struct FailedFrame {
+        uint64_t global_block;
+        uint32_t batch_idx;
+        uint32_t cw;
+        uint32_t seed;
+        uint32_t bit_errors;
+        uint32_t iters;
+    };
+    std::mutex failed_frames_mutex;
+    std::vector<FailedFrame> failed_frames;
+
     auto t_start = std::chrono::high_resolution_clock::now();
 
     // Background Monitor Thread
@@ -1125,14 +1137,16 @@ int run_monte_carlo_simulation(
                 for (auto& fifo : r_msg_fifo) {
                     std::fill(fifo.begin(), fifo.end(), 0);
                 }
+                uint32_t b_idx = 0;
                 if (use_tensix_noise) {
-                    uint32_t b_idx = tensix_start_batch + global_batch_counter.fetch_add(1, std::memory_order_relaxed);
+                    b_idx = tensix_start_batch + global_batch_counter.fetch_add(1, std::memory_order_relaxed);
                     if (b_idx >= tensix_start_batch + (max_blocks + 3) / 4) {
                         stop_flag.store(true, std::memory_order_relaxed);
                         break;
                     }
                     TensixBM::generate_channel_vnodes(vnode_l1.data(), mu_llr, sigma_llr, tensix_inv, b_idx, l_ch_max, equalize_noise, use_minimax_trig);
                 } else {
+                    b_idx = global_batch_counter.fetch_add(1, std::memory_order_relaxed);
                     init_vnodes_host(vnode_l1.data(), mu_llr, sigma_llr, rng);
                 }
                 actual_batches++;
@@ -1147,6 +1161,13 @@ int run_monte_carlo_simulation(
                         local_be += stats.bit_errors[c];
                         cw_frame_errors[c].fetch_add(1, std::memory_order_relaxed);
                         cw_bit_errors[c].fetch_add(stats.bit_errors[c], std::memory_order_relaxed);
+
+                        uint32_t seed = tensix_inv * 1013904223U + b_idx * 31337U;
+                        uint64_t g_block = static_cast<uint64_t>(b_idx) * 4 + c;
+                        {
+                            std::lock_guard<std::mutex> lock(failed_frames_mutex);
+                            failed_frames.push_back({g_block, b_idx, static_cast<uint32_t>(c), seed, stats.bit_errors[c], stats.iters_taken[c]});
+                        }
                     }
                 }
             }
@@ -1219,6 +1240,46 @@ int run_monte_carlo_simulation(
         std::cout << "[INFO] Results saved to: " << csv_path << std::endl;
     } else {
         std::cerr << "[ERROR] Could not open CSV path: " << csv_path << std::endl;
+    }
+
+    // Print Detailed Report of All Failed Frames (Sorted by Global Block Index)
+    std::sort(failed_frames.begin(), failed_frames.end(), [](const FailedFrame& a, const FailedFrame& b) {
+        return a.global_block < b.global_block;
+    });
+
+    std::cout << "\n==================================================================================" << std::endl;
+    std::cout << " DETAILED FAILED FRAMES REPORT (" << failed_frames.size() << " Frame Errors)" << std::endl;
+    std::cout << "==================================================================================" << std::endl;
+    std::cout << " FE # | Global Block | Batch Idx | CW  | PRNG Seed (T0) | Bit Errors | Iterations" << std::endl;
+    std::cout << "------+--------------+-----------+-----+----------------+------------+-----------" << std::endl;
+    for (size_t i = 0; i < failed_frames.size(); ++i) {
+        const auto& ff = failed_frames[i];
+        std::cout << std::setw(5) << (i + 1) << " | "
+                  << std::setw(12) << ff.global_block << " | "
+                  << std::setw(9) << ff.batch_idx << " | "
+                  << "CW" << ff.cw << " | "
+                  << "0x" << std::hex << std::setw(8) << std::setfill('0') << ff.seed << std::dec << std::setfill(' ') << " | "
+                  << std::setw(10) << ff.bit_errors << " | "
+                  << std::setw(10) << ff.iters << std::endl;
+    }
+    std::cout << "==================================================================================" << std::endl;
+
+    std::string failed_csv = "Results/results_stepper_10M_2.0db_failed_blocks.csv";
+    std::ofstream ff_file(failed_csv);
+    if (ff_file.is_open()) {
+        ff_file << "FE_Num,Global_Block,Batch_Idx,Codeword,Seed_Hex,Bit_Errors,Iterations\n";
+        for (size_t i = 0; i < failed_frames.size(); ++i) {
+            const auto& ff = failed_frames[i];
+            ff_file << (i + 1) << ","
+                    << ff.global_block << ","
+                    << ff.batch_idx << ",CW"
+                    << ff.cw << ",0x"
+                    << std::hex << ff.seed << std::dec << ","
+                    << ff.bit_errors << ","
+                    << ff.iters << "\n";
+        }
+        ff_file.close();
+        std::cout << "[INFO] Detailed failed frames saved to: " << failed_csv << std::endl;
     }
 
     return 0;
