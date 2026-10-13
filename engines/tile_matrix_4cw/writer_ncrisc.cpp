@@ -217,6 +217,8 @@ void kernel_main() {
 
         for (uint32_t iter = 0; iter < max_iter; ++iter) {
             global_iter++;
+            uint32_t ncrisc_gather_err_cw01 = 0;
+            uint32_t ncrisc_gather_err_cw23 = 0;
             for (uint32_t t = 0; t < num_tiles; ++t) {
                 step_barrier++;
                 const uint32_t* tile_hoff_w1 = p_hoff_base + t * 96 + 48;
@@ -238,10 +240,21 @@ void kernel_main() {
                     uint32_t s_even = SCRATCH_FACE_LUT.w1_even[p];
                     uint32_t s_odd  = SCRATCH_FACE_LUT.w1_odd[p];
 
-                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_even) =
-                        *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_even);
-                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_odd) =
-                        *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_odd);
+                    uint64_t val_even = *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_even);
+                    uint64_t val_odd  = *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_odd);
+
+                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_even) = val_even;
+                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_odd)  = val_odd;
+
+                    // In-flight gather OR accumulation on transmitted symbols (v < 2048)
+                    if (off_even < 16384) {
+                        ncrisc_gather_err_cw01 |= (static_cast<uint32_t>(val_even) & 0x80008000);
+                        ncrisc_gather_err_cw23 |= (static_cast<uint32_t>(val_even >> 32) & 0x80008000);
+                    }
+                    if (off_odd < 16384) {
+                        ncrisc_gather_err_cw01 |= (static_cast<uint32_t>(val_odd) & 0x80008000);
+                        ncrisc_gather_err_cw23 |= (static_cast<uint32_t>(val_odd >> 32) & 0x80008000);
+                    }
                 }
 
                 // Zero out unused padding rows (rows 12..15 of Face 1 & Face 3)
@@ -342,33 +355,30 @@ void kernel_main() {
                 cycles_scatter += (t_s5 - t_s0);
             }
 
-            // Check hard-decision bit errors across all 1024 information variables
-            uint32_t iter_errs[4] = {0, 0, 0, 0};
-            #pragma GCC unroll 8
-            for (uint32_t v = 0; v < 1024; ++v) {
-                uint32_t off = get_tile_vnode_byte_offset(v);
-                const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off);
-                uint32_t w0 = p32[0];
-                uint32_t w1 = p32[1];
-                iter_errs[0] += ((w0 >> 15) & 1);
-                iter_errs[1] += (w0 >> 31);
-                iter_errs[2] += ((w1 >> 15) & 1);
-                iter_errs[3] += (w1 >> 31);
-            }
+            // Combine in-flight gather error flags from BRISC and NCRISC
+            uint32_t total_err_cw01 = ncrisc_gather_err_cw01 | sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01];
+            uint32_t total_err_cw23 = ncrisc_gather_err_cw23 | sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23];
+
             // Independent Codeword Convergence & Active-Mask Freezing
-            for (int cw = 0; cw < 4; ++cw) {
-                if (iter_converged[cw] != max_iter) {
-                    // Codeword already converged in an earlier iteration: freeze with 0 errors
-                    cw_errs[cw] = 0;
-                    active_mask &= ~(1 << cw);
-                } else if (iter_errs[cw] == 0) {
-                    // Newly converged in this iteration
-                    iter_converged[cw] = iter + 1;
-                    active_mask &= ~(1 << cw);
-                    cw_errs[cw] = 0;
-                } else {
-                    cw_errs[cw] = iter_errs[cw];
-                }
+            // CW0: bit 15 of word 0
+            if (iter_converged[0] == max_iter && (total_err_cw01 & 0x00008000) == 0) {
+                iter_converged[0] = iter + 1;
+                active_mask &= ~(1 << 0);
+            }
+            // CW1: bit 31 of word 0
+            if (iter_converged[1] == max_iter && (total_err_cw01 & 0x80000000) == 0) {
+                iter_converged[1] = iter + 1;
+                active_mask &= ~(1 << 1);
+            }
+            // CW2: bit 15 of word 1
+            if (iter_converged[2] == max_iter && (total_err_cw23 & 0x00008000) == 0) {
+                iter_converged[2] = iter + 1;
+                active_mask &= ~(1 << 2);
+            }
+            // CW3: bit 31 of word 1
+            if (iter_converged[3] == max_iter && (total_err_cw23 & 0x80000000) == 0) {
+                iter_converged[3] = iter + 1;
+                active_mask &= ~(1 << 3);
             }
 
             // Broadcast active_mask to Worker 0 (BRISC) for next iteration's scatter
@@ -378,11 +388,25 @@ void kernel_main() {
             if (diff_test_mode == 0 && active_mask == 0) {
                 sync_flags[SyncSlot::EARLY_TERMINATION] = 1;
                 sync_flags[SyncSlot::ITER_DONE] = epoch + global_iter;
-                for (int cw = 0; cw < 4; ++cw) cw_errs[cw] = 0;
                 break;
             }
             // Signal BRISC and TRISC that iteration check is complete
             sync_flags[SyncSlot::ITER_DONE] = epoch + global_iter;
+        }
+
+        // Residual Bit Error Check on Information Bits ONLY for unconverged codewords
+        cw_errs[0] = 0; cw_errs[1] = 0; cw_errs[2] = 0; cw_errs[3] = 0;
+        if (active_mask != 0) {
+            for (uint32_t v = 0; v < 1024; ++v) {
+                uint32_t off = get_tile_vnode_byte_offset(v);
+                const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off);
+                uint32_t w0 = p32[0];
+                uint32_t w1 = p32[1];
+                if (active_mask & 1) cw_errs[0] += ((w0 >> 15) & 1);
+                if (active_mask & 2) cw_errs[1] += (w0 >> 31);
+                if (active_mask & 4) cw_errs[2] += ((w1 >> 15) & 1);
+                if (active_mask & 8) cw_errs[3] += (w1 >> 31);
+            }
         }
 
         for (int cw = 0; cw < 4; ++cw) {

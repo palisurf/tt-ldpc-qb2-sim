@@ -100,6 +100,8 @@ void kernel_main() {
         for (uint32_t iter = 0; iter < max_iter; ++iter) {
             global_iter++;
             active_mask = (iter == 0) ? 0x0F : static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
+            uint32_t brisc_gather_err_cw01 = 0;
+            uint32_t brisc_gather_err_cw23 = 0;
             for (uint32_t t = 0; t < num_tiles; ++t) {
                 step_barrier++;
                 const uint32_t* tile_hoff_w0 = p_hoff_base + t * 96;
@@ -125,10 +127,21 @@ void kernel_main() {
                     uint32_t s_even = SCRATCH_FACE_LUT.w0_even[p];
                     uint32_t s_odd  = SCRATCH_FACE_LUT.w0_odd[p];
 
-                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_even) =
-                        *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_even);
-                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_odd) =
-                        *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_odd);
+                    uint64_t val_even = *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_even);
+                    uint64_t val_odd  = *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_odd);
+
+                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_even) = val_even;
+                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_odd)  = val_odd;
+
+                    // In-flight gather OR accumulation on transmitted symbols (v < 2048)
+                    if (off_even < 16384) {
+                        brisc_gather_err_cw01 |= (static_cast<uint32_t>(val_even) & 0x80008000);
+                        brisc_gather_err_cw23 |= (static_cast<uint32_t>(val_even >> 32) & 0x80008000);
+                    }
+                    if (off_odd < 16384) {
+                        brisc_gather_err_cw01 |= (static_cast<uint32_t>(val_odd) & 0x80008000);
+                        brisc_gather_err_cw23 |= (static_cast<uint32_t>(val_odd >> 32) & 0x80008000);
+                    }
                 }
 
                 // Zero out unused padding rows (rows 12..15 of Face 0 & Face 2)
@@ -210,6 +223,10 @@ void kernel_main() {
 
                 cycles_scatter += (t_s4 - t_s0);
             }
+
+            // Post in-flight gather error flags to Worker 1
+            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01] = brisc_gather_err_cw01;
+            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23] = brisc_gather_err_cw23;
 
             // Wait for Worker 1 (NCRISC) to complete the iteration convergence check
             while (sync_flags[SyncSlot::ITER_DONE] < epoch + global_iter) { }
