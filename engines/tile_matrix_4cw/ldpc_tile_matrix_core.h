@@ -100,6 +100,10 @@ namespace TelemSlot {
     constexpr uint32_t CYCLES_ERROR_SCAN   = 9;
     constexpr uint32_t TOTAL_TILES_SIM     = 10;
     constexpr uint32_t TELEMETRY_L1_ADDR   = 11;
+    constexpr uint32_t FIRST_FAILING_BATCH = 12;
+    constexpr uint32_t FIRST_FAILING_CW    = 13;
+    constexpr uint32_t FIRST_FAILING_BE    = 14;
+    constexpr uint32_t FIRST_FAILING_MASK  = 15;
 
     // NCRISC (Worker 1) Tile Breakdown (written by NCRISC at exit)
     constexpr uint32_t NC_GATHER           = 32;

@@ -449,7 +449,8 @@ void run_tile_matrix_on_hardware(
     bool diff_test = false,
     bool diff_test_real = false,
     uint32_t tile_limit = 0,
-    uint32_t start_batch = 0
+    uint32_t start_batch = 0,
+    uint32_t invocation_id = 1
 ) {
     std::cout << "\n=======================================================" << std::endl;
     std::cout << " RUNNING TILE MATRIX 4-CODEWORD ENGINE ON QUIETBOX 2" << std::endl;
@@ -552,7 +553,7 @@ void run_tile_matrix_on_hardware(
 
     std::vector<uint32_t> r_args = {
         num_batches, max_iterations, num_tiles,
-        static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, 1,
+        static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, invocation_id,
         mu_u32, sigma_bits, 0
     };
     SetRuntimeArgs(program, reader, core, r_args);
@@ -560,13 +561,14 @@ void run_tile_matrix_on_hardware(
     std::vector<uint32_t> w_args = {
         num_batches, max_iterations, num_tiles,
         static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes,
-        mu_u32, sigma_bits, 0, 1,
-        diff_test ? (diff_test_real ? 2u : 1u) : 0u
+        mu_u32, sigma_bits, 0, invocation_id,
+        diff_test ? (diff_test_real ? 2u : 1u) : 0u,
+        start_batch
     };
     SetRuntimeArgs(program, writer, core, w_args);
 
     constexpr uint32_t telem_l1_addr = 0x3DC00;
-    std::vector<uint32_t> c_args = { num_batches, max_iterations, num_tiles, mu_u32, sigma_bits, 1, start_batch };
+    std::vector<uint32_t> c_args = { num_batches, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id, start_batch };
     SetRuntimeArgs(program, compute, core, c_args);
 
     std::cout << "[RUN] Dispatching Optimized Tile Matrix 4-Codeword Workload to Core (0, 0)..." << std::endl;
@@ -982,6 +984,12 @@ void run_tile_matrix_on_hardware(
               << ", CW1=" << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 1]
               << ", CW2=" << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 2] 
               << ", CW3=" << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 3] << std::endl;
+    if (stats[TelemSlot::FIRST_FAILING_BATCH] != 0xFFFFFFFF) {
+        std::cout << " Trapped Failing  : Batch=" << stats[TelemSlot::FIRST_FAILING_BATCH]
+                  << ", CW=" << stats[TelemSlot::FIRST_FAILING_CW]
+                  << ", BE=" << stats[TelemSlot::FIRST_FAILING_BE]
+                  << ", ActiveMask=0x" << std::hex << stats[TelemSlot::FIRST_FAILING_MASK] << std::dec << std::endl;
+    }
     std::cout << " Mean Iterations  : " << mean_iters << std::endl;
     std::cout << " NCRISC HW Cycles : " << hw_cycles << " clock cycles (" << cycles_per_tile << " cyc/tile)" << std::endl;
     std::cout << " TRISC HW Cycles  : " << trisc_cycles << " clock cycles (" << trisc_cycles_per_tile << " cyc/tile)" << std::endl;
@@ -1117,6 +1125,14 @@ void run_waterfall_sweep(
         uint64_t snr_fe = 0;
         uint64_t snr_iters = 0;
 
+        bool first_fe_captured = false;
+        uint32_t captured_fe_invocation_id = 0;
+        uint32_t captured_fe_batch = 0;
+        uint32_t captured_fe_cw = 0;
+        uint32_t captured_fe_be = 0;
+        uint64_t captured_fe_global_block = 0;
+        uint32_t captured_fe_seed = 0;
+
         auto snr_t0 = std::chrono::high_resolution_clock::now();
 
         std::cout << "\n>>> Simulating Eb/N0 = " << std::fixed << std::setprecision(2) << snr << " dB..." << std::endl;
@@ -1174,10 +1190,10 @@ void run_waterfall_sweep(
             std::vector<uint32_t> r_args = { chunk_batches, max_iterations, num_tiles, static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, invocation_id, mu_u32, sigma_bits, global_seed };
             SetRuntimeArgs(program, reader, core, r_args);
 
-            std::vector<uint32_t> w_args = { chunk_batches, max_iterations, num_tiles, static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes, mu_u32, sigma_bits, global_seed, invocation_id, 0u };
+            std::vector<uint32_t> w_args = { chunk_batches, max_iterations, num_tiles, static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes, mu_u32, sigma_bits, global_seed, invocation_id, 0u, 0u };
             SetRuntimeArgs(program, writer, core, w_args);
 
-            std::vector<uint32_t> c_args = { chunk_batches, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id };
+            std::vector<uint32_t> c_args = { chunk_batches, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id, 0u };
             SetRuntimeArgs(program, compute, core, c_args);
 
             distributed::MeshWorkload workload;
@@ -1195,6 +1211,41 @@ void run_waterfall_sweep(
             snr_be += stats[TelemSlot::TOTAL_BE];
             snr_fe += stats[TelemSlot::TOTAL_FE];
             snr_iters += stats[TelemSlot::TOTAL_ITERS];
+
+            if (!first_fe_captured && stats[TelemSlot::FIRST_FAILING_BATCH] != 0xFFFFFFFF) {
+                first_fe_captured = true;
+                captured_fe_invocation_id = invocation_id;
+                captured_fe_batch = stats[TelemSlot::FIRST_FAILING_BATCH];
+                captured_fe_cw = stats[TelemSlot::FIRST_FAILING_CW];
+                captured_fe_be = stats[TelemSlot::FIRST_FAILING_BE];
+                captured_fe_global_block = (snr_blocks - chunk_batches * 4) + captured_fe_batch * 4 + captured_fe_cw;
+                captured_fe_seed = 0x12345678U + (captured_fe_invocation_id * 1013904223U) + captured_fe_batch * 31337U;
+
+                std::cout << "\n=======================================================" << std::endl;
+                std::cout << " [CAPTURED FIRST FRAME ERROR]" << std::endl;
+                std::cout << " Global Block Index : " << captured_fe_global_block << std::endl;
+                std::cout << " Invocation ID      : " << captured_fe_invocation_id << std::endl;
+                std::cout << " Batch in Chunk     : " << captured_fe_batch << std::endl;
+                std::cout << " Codeword           : CW" << captured_fe_cw << std::endl;
+                std::cout << " Bit Errors         : " << captured_fe_be << std::endl;
+                std::cout << " PRNG Seed (T0)     : 0x" << std::hex << captured_fe_seed << std::dec << std::endl;
+                std::cout << " Status             : CONTINUING SIMULATION to target (" 
+                          << min_frame_errors << " FE / " << max_blocks_per_snr << " blocks)..." << std::endl;
+                std::cout << "=======================================================" << std::endl;
+
+                fs::create_directories("dump");
+                std::ofstream f_fe("dump/first_failing_frame_info.txt");
+                if (f_fe.is_open()) {
+                    f_fe << "ebn0_db=" << snr << "\n";
+                    f_fe << "global_block=" << captured_fe_global_block << "\n";
+                    f_fe << "invocation_id=" << captured_fe_invocation_id << "\n";
+                    f_fe << "batch=" << captured_fe_batch << "\n";
+                    f_fe << "cw=" << captured_fe_cw << "\n";
+                    f_fe << "be=" << captured_fe_be << "\n";
+                    f_fe << "seed=0x" << std::hex << captured_fe_seed << std::dec << "\n";
+                    f_fe.close();
+                }
+            }
 
             if (snr_blocks <= 100) {
                 std::cout << "\n[DEBUG TELEMETRY] BE=" << stats[TelemSlot::TOTAL_BE] 
@@ -1310,6 +1361,7 @@ int main(int argc, char** argv) {
     bool diff_test_real = false;
     uint32_t tile_limit = 0;
     uint32_t start_batch = 0;
+    uint32_t invocation_id = 1;
     std::string csv_path = fs::exists("../../Results") 
         ? "../../Results/results_tile_matrix_4cw_ar4ja_r12_ebn0_1.50_2.50_step0.10_max1000000_min20_iter200_1core.csv"
         : "Results/results_tile_matrix_4cw_ar4ja_r12_ebn0_1.50_2.50_step0.10_max1000000_min20_iter200_1core.csv";
@@ -1355,6 +1407,7 @@ int main(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') eb_n0_db = std::stod(argv[++i]);
             if (i + 1 < argc && argv[i + 1][0] != '-') max_iterations = std::stoul(argv[++i]);
             if (i + 1 < argc && argv[i + 1][0] != '-') start_batch = std::stoul(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') invocation_id = std::stoul(argv[++i]);
         } else if (arg == "--tiles" && i + 1 < argc) {
             tile_limit = std::stoul(argv[++i]);
         } else if (arg == "--csv" && i + 1 < argc) {
@@ -1402,7 +1455,7 @@ int main(int argc, char** argv) {
     if (is_waterfall) {
         run_waterfall_sweep(pcm, schedule, snr_start, snr_stop, snr_step, min_fe, max_blocks, max_iterations, single_core, csv_path);
     } else {
-        run_tile_matrix_on_hardware(pcm, schedule, eb_n0_db, num_batches, max_iterations, single_core, benchmark_mode, diff_test, diff_test_real, tile_limit, start_batch);
+        run_tile_matrix_on_hardware(pcm, schedule, eb_n0_db, num_batches, max_iterations, single_core, benchmark_mode, diff_test, diff_test_real, tile_limit, start_batch, invocation_id);
     }
 
     return 0;
