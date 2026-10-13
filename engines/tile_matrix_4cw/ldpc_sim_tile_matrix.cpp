@@ -955,9 +955,13 @@ void run_tile_matrix_on_hardware(
         : (((mean_iters > 0.0) ? mean_iters : 1.0) * num_tiles * num_batches);
     double num_eval_batches = (total_tiles_sim > 0) ? (total_tiles_sim / (double)num_tiles) : 1.0;
     uint32_t hw_cycles = stats[TelemSlot::ELAPSED_CYCLES];
-    double cycles_per_batch = (double)hw_cycles / (num_batches > 0 ? num_batches : 1);
-    double cycles_per_tile = (total_tiles_sim > 0) ? ((double)hw_cycles / total_tiles_sim) : 0.0;
-    double silicon_core_msps = (static_cast<double>(total_cws) * 2048 * 1.35e9) / (hw_cycles > 0 ? hw_cycles : 1) / 1e6;
+    double per_tile_cyc = (total_tiles_sim > 0) 
+        ? (((double)stats[TelemSlot::NC_GATHER] + (double)stats[TelemSlot::NC_WAIT] + (double)stats[TelemSlot::NC_SCATTER]) / total_tiles_sim)
+        : 9700.0;
+    double true_total_hw_cycles = total_tiles_sim * per_tile_cyc + (double)stats[TelemSlot::CYCLES_CHANNEL];
+    double cycles_per_batch = (num_batches > 0) ? (true_total_hw_cycles / num_batches) : 0.0;
+    double cycles_per_tile = per_tile_cyc;
+    double silicon_core_msps = (static_cast<double>(total_cws) * 2048 * 1.35e9) / (true_total_hw_cycles > 0 ? true_total_hw_cycles : 1) / 1e6;
     double mesh_projected_gsps = (silicon_core_msps * 440.0) / 1e3;
 
     uint32_t trisc_cycles = stats[TelemSlot::TRISC_CYCLES];

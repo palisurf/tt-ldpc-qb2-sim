@@ -65,6 +65,8 @@ namespace TileMatrixCB {
 
 // Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY (Slots 14..31)
 namespace SyncSlot {
+    constexpr uint32_t BRISC_GATHER_ERR_CW01 = 12; // Worker 0 (BRISC) gathered negative symbol flag for CW0 & CW1
+    constexpr uint32_t BRISC_GATHER_ERR_CW23 = 13; // Worker 0 (BRISC) gathered negative symbol flag for CW2 & CW3
     constexpr uint32_t TRISC_CYCLES        = 14; // TRISC elapsed cycles mailbox
     constexpr uint32_t BRISC_CYCLES        = 15; // BRISC elapsed cycles mailbox
     constexpr uint32_t BATCH_NOISE_READY   = 16; // Incremented when AWGN noise is ready for batch
