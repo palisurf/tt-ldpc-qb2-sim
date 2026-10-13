@@ -476,6 +476,50 @@ void __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in, uint32_t cb_out
 }
 
 // ------------------------------------------------------------------------------
+// Vector xoshiro128+ PRNG Generator on SFPU (32 Lanes in Parallel)
+// ------------------------------------------------------------------------------
+sfpi_inline sfpi::vUInt arx_hash(sfpi::vUInt x, uint32_t c) {
+    x += c;
+    x ^= (x >> 16);
+    x += (x << 11);
+    x ^= (x >> 7);
+    x += (x << 5);
+    x ^= (x >> 13);
+    x += (x << 17);
+    x ^= (x >> 11);
+    return x;
+}
+
+struct VectorXoshiro128Plus {
+    sfpi::vUInt s0;
+    sfpi::vUInt s1;
+    sfpi::vUInt s2;
+    sfpi::vUInt s3;
+
+    sfpi_inline void init(sfpi::vUInt seed_val) {
+        s0 = arx_hash(seed_val, 0x9E3779B9U);
+        s1 = arx_hash(seed_val, 0x85EBCA6BU);
+        s2 = arx_hash(seed_val, 0xC2B2AE35U);
+        s3 = arx_hash(seed_val, 0x27D4EB2FU);
+        v_if ((s0 | s1 | s2 | s3) == 0) {
+            s0 = 0x13579BDFU;
+        } v_endif;
+    }
+
+    sfpi_inline sfpi::vUInt next() {
+        sfpi::vUInt res = s0 + s3;
+        sfpi::vUInt t = s1 << 9;
+        s2 ^= s0;
+        s3 ^= s1;
+        s1 ^= s2;
+        s0 ^= s3;
+        s2 ^= t;
+        s3 = (s3 << 11) | (s3 >> 21);
+        return res;
+    }
+};
+
+// ------------------------------------------------------------------------------
 // 32-Lane Vector SFPU Channel Observation Generator
 // Generates 10 tiles (8 AWGN / Benchmark tiles + 2 Punctured zero tiles)
 // Directly streams into CB_VNODE_A in native Tensix face quadrant tile format
@@ -503,36 +547,30 @@ void __attribute__((noinline)) generate_channel_tiles(
                     sfpi::dst_reg[r] = v_mu;
                 }
             } else {
-                uint32_t seed_base = 0x12345678U + (invocation_id * 1013904223U) + batch * 31337U + t * 7919U;
-                sfpi::vUInt prng_state = static_cast<uint32_t>(seed_base) + sfpi::as<sfpi::vUInt>(sfpi::vConstTileId);
-                prng_state = (prng_state << 5) ^ sfpi::as<sfpi::vUInt>(sfpi::vConstTileId) ^ 0x55AA55AAU;
-                v_if (prng_state == 0) {
-                    prng_state = 0x13579BDFU;
-                } v_endif;
+                // Phase 1: Vector xoshiro128+ Uniform Draws staged directly into DEST
+                {
+                    VectorXoshiro128Plus rng;
+                    uint32_t seed_base = 0x12345678U + (invocation_id * 1013904223U) + batch * 31337U + t * 7919U;
+                    sfpi::vUInt lane_seed = static_cast<uint32_t>(seed_base) + sfpi::as<sfpi::vUInt>(sfpi::vConstTileId);
+                    rng.init(lane_seed);
 
+                    for (int r = 0; r < 32; ++r) {
+                        sfpi::vUInt raw = rng.next();
+                        sfpi::vUInt u_bits = ((raw >> 9) & 0x007FFFFF) | 0x3F800000;
+                        sfpi::vFloat u = sfpi::as<sfpi::vFloat>(u_bits) - 1.0f;
+                        sfpi::dst_reg[r] = sfpi::max(u, 1e-7f);
+                    }
+                }
+
+                // Phase 2: Transcendental Box-Muller Transformation (PRNG is dead, 0 LReg pressure)
                 sfpi::vFloat v_mu = mu_val;
                 sfpi::vFloat v_sigma = sigma_val;
                 for (int p = 0; p < 16; ++p) {
-                    // Draw U1 in [1e-7, 1.0)
-                    prng_state ^= prng_state << 13;
-                    prng_state ^= prng_state >> 17;
-                    prng_state ^= prng_state << 5;
-                    sfpi::vUInt u1_bits = ((prng_state >> 9) & 0x007FFFFF) | 0x3F800000;
-                    sfpi::vFloat u1 = sfpi::as<sfpi::vFloat>(u1_bits) - 1.0f;
-                    u1 = sfpi::max(u1, 1e-7f);
-
-                    // Compute Radius R = sqrt(-2 * ln(U1))
+                    sfpi::vFloat u1 = sfpi::vFloat(sfpi::dst_reg[2 * p + 0]);
                     sfpi::vFloat ln_u1 = sfpu_fast_ln(u1);
                     sfpi::vFloat r = sfpu_fast_sqrt(ln_u1 * -2.0f);
 
-                    // Draw U2 in [0.0, 1.0)
-                    prng_state ^= prng_state << 13;
-                    prng_state ^= prng_state >> 17;
-                    prng_state ^= prng_state << 5;
-                    sfpi::vUInt u2_bits = ((prng_state >> 9) & 0x007FFFFF) | 0x3F800000;
-                    sfpi::vFloat u2 = sfpi::as<sfpi::vFloat>(u2_bits) - 1.0f;
-
-                    // Compute theta in [-PI, PI)
+                    sfpi::vFloat u2 = sfpi::vFloat(sfpi::dst_reg[2 * p + 1]);
                     sfpi::vFloat theta = u2 * 6.2831853f - 3.14159265f;
                     sfpi::vFloat s_th = theta * theta;
 

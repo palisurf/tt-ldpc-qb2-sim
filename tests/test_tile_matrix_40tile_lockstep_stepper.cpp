@@ -497,9 +497,9 @@ inline BatchStats decode_tile_matrix_batch(
                                 return tensix_precision ? approx_min_star_tensix(a, b) : approx_min_star_fp32(a, b);
                             };
 
-                            float m01 = ams(m0, m0_swap);
-                            float m23 = ams(m1, m1_swap);
-                            float m45 = ams(m2, m2_swap);
+                            float m01 = tensix_precision ? to_bf16(ams(m0, m0_swap)) : ams(m0, m0_swap);
+                            float m23 = tensix_precision ? to_bf16(ams(m1, m1_swap)) : ams(m1, m1_swap);
+                            float m45 = tensix_precision ? to_bf16(ams(m2, m2_swap)) : ams(m2, m2_swap);
 
                             float r_mag_0 = ams(ams(m23, m45), m0_swap);
                             float r_mag_1 = ams(ams(m01, m45), m1_swap);
@@ -1243,9 +1243,9 @@ int main(int argc, char** argv) {
                                     return tensix_precision ? approx_min_star_tensix(a, b) : approx_min_star_fp32(a, b);
                                 };
 
-                                float m01 = ams(m0, m0_swap);
-                                float m23 = ams(m1, m1_swap);
-                                float m45 = ams(m2, m2_swap);
+                                float m01 = tensix_precision ? to_bf16(ams(m0, m0_swap)) : ams(m0, m0_swap);
+                                float m23 = tensix_precision ? to_bf16(ams(m1, m1_swap)) : ams(m1, m1_swap);
+                                float m45 = tensix_precision ? to_bf16(ams(m2, m2_swap)) : ams(m2, m2_swap);
 
                                 float r_mag_0 = ams(ams(m23, m45), m0_swap);
                                 float r_mag_1 = ams(ams(m01, m45), m1_swap);
