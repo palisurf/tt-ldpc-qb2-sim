@@ -99,7 +99,7 @@ void kernel_main() {
 
         for (uint32_t iter = 0; iter < max_iter; ++iter) {
             global_iter++;
-            active_mask = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
+            active_mask = (iter == 0) ? 0x0F : static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
             for (uint32_t t = 0; t < num_tiles; ++t) {
                 step_barrier++;
                 const uint32_t* tile_hoff_w0 = p_hoff_base + t * 96;

@@ -444,7 +444,9 @@ inline void generate_channel_vnodes(
     float sigma_llr,
     uint32_t invocation_id,
     uint32_t batch,
-    float l_ch_max = 7.0f
+    float l_ch_max = 7.0f,
+    bool equalize_noise = false,
+    bool use_minimax_trig = true
 ) {
     for (uint32_t t = 0; t < 8; ++t) {
         VectorXoshiro128Plus rngs[32];
@@ -476,27 +478,50 @@ inline void generate_channel_vnodes(
                 float theta = u2 * 6.2831853f - 3.14159265f;
                 float s_th = theta * theta;
 
-                float cos_val = to_bf16_trunc(0.0000248f);
-                cos_val = cos_val * s_th - to_bf16_trunc(0.0013889f);
-                cos_val = cos_val * s_th + to_bf16_trunc(0.0416667f);
-                cos_val = cos_val * s_th - 0.5f;
-                cos_val = cos_val * s_th + 1.0f;
+                float cos_val, sin_val;
+                if (use_minimax_trig) {
+                    cos_val = to_bf16_trunc(0.00001907f);
+                    cos_val = cos_val * s_th - to_bf16_trunc(0.0013441f);
+                    cos_val = cos_val * s_th + to_bf16_trunc(0.0415223f);
+                    cos_val = cos_val * s_th - 0.5f;
+                    cos_val = cos_val * s_th + 1.0f;
+
+                    sin_val = to_bf16_trunc(0.000002225f);
+                    sin_val = sin_val * s_th - to_bf16_trunc(0.00019424f);
+                    sin_val = sin_val * s_th + to_bf16_trunc(0.0083198f);
+                    sin_val = sin_val * s_th - to_bf16_trunc(0.166667f);
+                    sin_val = sin_val * s_th + 1.0f;
+                } else {
+                    cos_val = to_bf16_trunc(0.0000248f);
+                    cos_val = cos_val * s_th - to_bf16_trunc(0.0013889f);
+                    cos_val = cos_val * s_th + to_bf16_trunc(0.0416667f);
+                    cos_val = cos_val * s_th - 0.5f;
+                    cos_val = cos_val * s_th + 1.0f;
+
+                    sin_val = to_bf16_trunc(0.00000276f);
+                    sin_val = sin_val * s_th - to_bf16_trunc(0.0001984f);
+                    sin_val = sin_val * s_th + to_bf16_trunc(0.0083333f);
+                    sin_val = sin_val * s_th - to_bf16_trunc(0.1666667f);
+                    sin_val = sin_val * s_th + 1.0f;
+                }
+
                 float llr0 = mu_llr + sigma_llr * (r * cos_val);
                 if (l_ch_max > 0.0f) {
                     llr0 = std::min(std::max(llr0, -l_ch_max), l_ch_max);
                 }
-                dst_reg[2 * p + 0][lane] = to_bf16_trunc(llr0);
 
-                float sin_val = to_bf16_trunc(0.00000276f);
-                sin_val = sin_val * s_th - to_bf16_trunc(0.0001984f);
-                sin_val = sin_val * s_th + to_bf16_trunc(0.0083333f);
-                sin_val = sin_val * s_th - to_bf16_trunc(0.1666667f);
-                sin_val = sin_val * s_th + 1.0f;
                 float llr1 = mu_llr + sigma_llr * (r * (sin_val * theta));
                 if (l_ch_max > 0.0f) {
                     llr1 = std::min(std::max(llr1, -l_ch_max), l_ch_max);
                 }
-                dst_reg[2 * p + 1][lane] = to_bf16_trunc(llr1);
+
+                if (equalize_noise && (p % 2 == 1)) {
+                    dst_reg[2 * p + 0][lane] = to_bf16_trunc(llr1);
+                    dst_reg[2 * p + 1][lane] = to_bf16_trunc(llr0);
+                } else {
+                    dst_reg[2 * p + 0][lane] = to_bf16_trunc(llr0);
+                    dst_reg[2 * p + 1][lane] = to_bf16_trunc(llr1);
+                }
             }
         }
 
@@ -952,7 +977,9 @@ int run_monte_carlo_simulation(
     bool use_tensix_noise = false;
     uint32_t tensix_inv = 1;
     uint32_t tensix_start_batch = 0;
-    float l_ch_max = 7.0f;
+    float l_ch_max = 0.0f;  // Unclamped by default (matches LDPC_ENABLE_CH_CLAMP 0 in compute_trisc.cpp)
+    bool equalize_noise = true;  // 50/50 Interleaved is now DEFAULT (matches compute_trisc.cpp)
+    bool use_minimax_trig = true; // Remez Minimax Degree-4 is now DEFAULT
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -973,6 +1000,12 @@ int run_monte_carlo_simulation(
             l_ch_max = 0.0f;
         } else if (arg == "--ch-clip" || arg == "--l-ch-max" || arg == "--ch-clamp" || arg == "--l-ch-clamp") {
             if (i + 1 < argc) l_ch_max = std::stof(argv[++i]);
+        } else if (arg == "--equalize-noise" || arg == "--interleave-trig" || arg == "--balanced-noise") {
+            equalize_noise = true;
+        } else if (arg == "--taylor" || arg == "--legacy-taylor" || arg == "--taylor-trig") {
+            use_minimax_trig = false;
+        } else if (arg == "--minimax" || arg == "--minimax-trig") {
+            use_minimax_trig = true;
         }
     }
 
@@ -982,6 +1015,8 @@ int run_monte_carlo_simulation(
     std::cout << " Noise Generator:   " << (use_tensix_noise ? ("Tensix Vector Box-Muller (Invocation: " + std::to_string(tensix_inv) + ", Start Batch: " + std::to_string(tensix_start_batch) + ")") : "Host Scalar Xoshiro128+") << std::endl;
     if (use_tensix_noise) {
         std::cout << " Channel Clamping:  " << (l_ch_max > 0.0f ? ("|L_ch| <= " + std::to_string(l_ch_max)) : "None (Unclamped)") << std::endl;
+        std::cout << " Codeword Balance:  " << (equalize_noise ? "50/50 Interleaved (Equalized)" : "Direct Unpacker (CW0/2 cos, CW1/3 sin)") << std::endl;
+        std::cout << " Trig Polynomial:   " << (use_minimax_trig ? "Remez Minimax Degree-4 (Default)" : "Taylor Series Degree-4 (Legacy)") << std::endl;
     }
     std::cout << " Eb/N0:             " << std::fixed << std::setprecision(2) << eb_n0_db << " dB" << std::endl;
     std::cout << " Max Blocks:        " << max_blocks << std::endl;
@@ -1085,16 +1120,22 @@ int run_monte_carlo_simulation(
             uint32_t local_be = 0;
             uint64_t local_cw_iters = 0;
 
+            uint32_t actual_batches = 0;
             for (uint32_t b = 0; b < chunk_batches; ++b) {
                 for (auto& fifo : r_msg_fifo) {
                     std::fill(fifo.begin(), fifo.end(), 0);
                 }
                 if (use_tensix_noise) {
                     uint32_t b_idx = tensix_start_batch + global_batch_counter.fetch_add(1, std::memory_order_relaxed);
-                    TensixBM::generate_channel_vnodes(vnode_l1.data(), mu_llr, sigma_llr, tensix_inv, b_idx, l_ch_max);
+                    if (b_idx >= tensix_start_batch + (max_blocks + 3) / 4) {
+                        stop_flag.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                    TensixBM::generate_channel_vnodes(vnode_l1.data(), mu_llr, sigma_llr, tensix_inv, b_idx, l_ch_max, equalize_noise, use_minimax_trig);
                 } else {
                     init_vnodes_host(vnode_l1.data(), mu_llr, sigma_llr, rng);
                 }
+                actual_batches++;
                 BatchStats stats = decode_tile_matrix_batch(
                     pcm, schedule, vnode_l1.data(), r_msg_fifo, scratch_in, scratch_out, max_iter, post_clip, tensix_precision
                 );
@@ -1110,7 +1151,7 @@ int run_monte_carlo_simulation(
                 }
             }
 
-            uint64_t cur_cws = total_codewords.fetch_add(chunk_batches * 4, std::memory_order_relaxed) + chunk_batches * 4;
+            uint64_t cur_cws = total_codewords.fetch_add(actual_batches * 4, std::memory_order_relaxed) + actual_batches * 4;
             uint64_t cur_fe = total_frame_errors.fetch_add(local_fe, std::memory_order_relaxed) + local_fe;
             total_bit_errors.fetch_add(local_be, std::memory_order_relaxed);
             total_cw_iterations.fetch_add(local_cw_iters, std::memory_order_relaxed);
@@ -1222,7 +1263,9 @@ int main(int argc, char** argv) {
     bool tensix_noise_mode = false;
     uint32_t tensix_noise_inv = 1;
     uint32_t tensix_noise_batch = 0;
-    float l_ch_max = 7.0f;
+    float l_ch_max = 0.0f;  // Unclamped by default (matches LDPC_ENABLE_CH_CLAMP 0 in compute_trisc.cpp)
+    bool equalize_noise = true;  // 50/50 Interleaved is now DEFAULT (matches compute_trisc.cpp)
+    bool use_minimax_trig = true; // Remez Minimax Degree-4 is now DEFAULT
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -1257,6 +1300,12 @@ int main(int argc, char** argv) {
             num_iterations = std::stoul(argv[++i]);
         } else if (arg == "--post-clip" && i + 1 < argc) {
             post_clip_max = std::stof(argv[++i]);
+        } else if (arg == "--equalize-noise" || arg == "--interleave-trig" || arg == "--balanced-noise") {
+            equalize_noise = true;
+        } else if (arg == "--taylor" || arg == "--legacy-taylor" || arg == "--taylor-trig") {
+            use_minimax_trig = false;
+        } else if (arg == "--minimax" || arg == "--minimax-trig") {
+            use_minimax_trig = true;
         }
     }
 
@@ -1363,7 +1412,7 @@ int main(int argc, char** argv) {
         float mu_llr = 2.0f / noise_var;
         float sigma_llr = 2.0f / noise_std;
 
-        TensixBM::generate_channel_vnodes(vnode_l1.data(), mu_llr, sigma_llr, tensix_noise_inv, tensix_noise_batch, l_ch_max);
+        TensixBM::generate_channel_vnodes(vnode_l1.data(), mu_llr, sigma_llr, tensix_noise_inv, tensix_noise_batch, l_ch_max, equalize_noise, use_minimax_trig);
         std::cout << "[INFO] Synthesized Bit-Exact Tensix Vector Box-Muller Channel LLRs (mu=" << mu_llr << ", sigma=" << sigma_llr << ")" << std::endl;
     } else if (standalone_mode) {
         float code_rate = static_cast<float>(pcm.K) / (pcm.N - pcm.P); // 1024 / 2048 = 0.5

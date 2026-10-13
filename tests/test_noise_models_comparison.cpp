@@ -153,7 +153,8 @@ inline void generate_tensix_bm_pair(
     bool truncate_u = true,
     bool truncate_output = true,
     bool fast_trig = true,
-    bool fast_ln_sqrt = true
+    bool fast_ln_sqrt = true,
+    bool minimax_trig = false
 ) {
     uint32_t raw1 = rng.next();
     uint32_t u_bits1 = ((raw1 >> 9) & 0x007FFFFF) | 0x3F800000;
@@ -184,18 +185,33 @@ inline void generate_tensix_bm_pair(
 
     if (fast_trig) {
         float s_th = theta * theta;
-        cos_val = to_bf16_trunc(0.0000248f);
-        cos_val = cos_val * s_th - to_bf16_trunc(0.0013889f);
-        cos_val = cos_val * s_th + to_bf16_trunc(0.0416667f);
-        cos_val = cos_val * s_th - 0.5f;
-        cos_val = cos_val * s_th + 1.0f;
+        if (minimax_trig) {
+            cos_val = to_bf16_trunc(0.00001907f);
+            cos_val = cos_val * s_th - to_bf16_trunc(0.0013441f);
+            cos_val = cos_val * s_th + to_bf16_trunc(0.0415223f);
+            cos_val = cos_val * s_th - 0.5f;
+            cos_val = cos_val * s_th + 1.0f;
 
-        sin_val = to_bf16_trunc(0.00000276f);
-        sin_val = sin_val * s_th - to_bf16_trunc(0.0001984f);
-        sin_val = sin_val * s_th + to_bf16_trunc(0.0083333f);
-        sin_val = sin_val * s_th - to_bf16_trunc(0.1666667f);
-        sin_val = sin_val * s_th + 1.0f;
-        sin_val = sin_val * theta;
+            sin_val = to_bf16_trunc(0.000002225f);
+            sin_val = sin_val * s_th - to_bf16_trunc(0.00019424f);
+            sin_val = sin_val * s_th + to_bf16_trunc(0.0083198f);
+            sin_val = sin_val * s_th - to_bf16_trunc(0.166667f);
+            sin_val = sin_val * s_th + 1.0f;
+            sin_val = sin_val * theta;
+        } else {
+            cos_val = to_bf16_trunc(0.0000248f);
+            cos_val = cos_val * s_th - to_bf16_trunc(0.0013889f);
+            cos_val = cos_val * s_th + to_bf16_trunc(0.0416667f);
+            cos_val = cos_val * s_th - 0.5f;
+            cos_val = cos_val * s_th + 1.0f;
+
+            sin_val = to_bf16_trunc(0.00000276f);
+            sin_val = sin_val * s_th - to_bf16_trunc(0.0001984f);
+            sin_val = sin_val * s_th + to_bf16_trunc(0.0083333f);
+            sin_val = sin_val * s_th - to_bf16_trunc(0.1666667f);
+            sin_val = sin_val * s_th + 1.0f;
+            sin_val = sin_val * theta;
+        }
     } else {
         cos_val = std::cos(theta);
         sin_val = std::sin(theta);
@@ -466,7 +482,10 @@ int main(int argc, char** argv) {
         "4. Tensix BM Z1 (r*sin: CW1/CW3)",
         "5. Tensix BM (No U-Trunc)",
         "6. Tensix BM (Exact Math)",
-        "7. Tensix BM (RNE Rounding)"
+        "7. Tensix BM (RNE Rounding)",
+        "8. Tensix Minimax (Both Z0 & Z1)",
+        "9. Tensix Minimax Z0 (r*cos)",
+        "10. Tensix Minimax Z1 (r*sin)"
     };
 
     std::vector<Statistics> model_stats(model_names.size());
@@ -491,12 +510,13 @@ int main(int argc, char** argv) {
 
             Statistics& lstat = thread_stats[tid];
 
-            if (m == 2 || m == 3) {
-                // Models 2 & 3: Evaluate 100M variates of Z0 or Z1 exclusively
+            if (m == 2 || m == 3 || m == 8 || m == 9) {
+                // Models evaluating Z0 or Z1 exclusively
+                bool use_minimax = (m == 8 || m == 9);
                 for (uint64_t p = 0; p < actual_total_samples / num_threads; ++p) {
                     float z0, z1;
-                    TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, true, true, true);
-                    if (m == 2) lstat.add(z0);
+                    TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, true, true, true, use_minimax);
+                    if (m == 2 || m == 8) lstat.add(z0);
                     else lstat.add(z1);
                 }
             } else {
@@ -505,15 +525,17 @@ int main(int argc, char** argv) {
                     if (m == 0) {
                         generate_polar_marsaglia_pair(polar_rng, z0, z1);
                     } else if (m == 1) {
-                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, true, true, true);
+                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, true, true, true, false);
                     } else if (m == 4) {
-                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, false, true, true, true);
+                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, false, true, true, true, false);
                     } else if (m == 5) {
-                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, true, false, false);
+                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, true, false, false, false);
                     } else if (m == 6) {
-                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, false, true, true);
+                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, false, true, true, false);
                         z0 = TensixHw::to_bf16_rne(z0);
                         z1 = TensixHw::to_bf16_rne(z1);
+                    } else if (m == 7) {
+                        TensixHw::generate_tensix_bm_pair(tensix_rng, z0, z1, true, true, true, true, true);
                     }
                     lstat.add(z0);
                     lstat.add(z1);
