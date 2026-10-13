@@ -1187,13 +1187,14 @@ void run_waterfall_sweep(
             auto writer = CreateKernel(program, writer_path, core_range, writer_config);
             auto compute = CreateKernel(program, compute_path, core_range, compute_config);
 
+            uint32_t cur_start_batch = static_cast<uint32_t>(snr_blocks / 4);
             std::vector<uint32_t> r_args = { chunk_batches, max_iterations, num_tiles, static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, invocation_id, mu_u32, sigma_bits, global_seed };
             SetRuntimeArgs(program, reader, core, r_args);
 
-            std::vector<uint32_t> w_args = { chunk_batches, max_iterations, num_tiles, static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes, mu_u32, sigma_bits, global_seed, invocation_id, 0u, 0u };
+            std::vector<uint32_t> w_args = { chunk_batches, max_iterations, num_tiles, static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes, mu_u32, sigma_bits, global_seed, invocation_id, 0u, cur_start_batch };
             SetRuntimeArgs(program, writer, core, w_args);
 
-            std::vector<uint32_t> c_args = { chunk_batches, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id, 0u };
+            std::vector<uint32_t> c_args = { chunk_batches, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id, cur_start_batch };
             SetRuntimeArgs(program, compute, core, c_args);
 
             distributed::MeshWorkload workload;
@@ -1281,7 +1282,7 @@ void run_waterfall_sweep(
             }
 
             global_seed += chunk_batches * 10007 + 1;
-            invocation_id++;
+            // invocation_id remains constant across chunks so start_batch advances monotonically, matching the stepper
 
             double cur_fer = (double)snr_fe / snr_blocks;
             double cur_ber = (double)snr_be / (snr_blocks * 1024.0);
