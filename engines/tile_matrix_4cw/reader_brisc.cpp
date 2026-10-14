@@ -69,6 +69,7 @@ void kernel_main() {
 
     // Signal Worker 1 (NCRISC) that H table setup is complete
     sync_flags[0] = epoch;
+    sync_flags[SyncSlot::HOFF_L1_ADDR] = h_offset_l1;
 
     uint32_t b_start = get_wall_clock();
     uint32_t cycles_gather = 0;
@@ -86,15 +87,6 @@ void kernel_main() {
     // Step 2: Main Simulation Loop (Batches x Iterations x Tiles)
     // --------------------------------------------------------------------------
     for (uint32_t batch = 0; batch < num_batches; ++batch) {
-        constexpr uint32_t active_cb = TileMatrixCB::CB_VNODE_A;
-        uint32_t vnode_l1  = get_read_ptr(active_cb);
-        const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
-        char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
-
-        // Publish L1 pointers for TRISC0 and TRISC2
-        sync_flags[SyncSlot::VNODE_L1_ADDR] = vnode_l1;
-        sync_flags[SyncSlot::HOFF_L1_ADDR]  = h_offset_l1;
-
         // Tri-core batch rendezvous barrier (ensures all cores arrive at batch boundary)
         sync_flags[SyncSlot::BATCH_BARRIER_BRISC] = epoch + batch + 1;
         while (sync_flags[SyncSlot::BATCH_BARRIER_NCRISC] < epoch + batch + 1) { }
@@ -102,6 +94,11 @@ void kernel_main() {
 
         // Wait for channel observations / synthetic pattern to be 100% ready in L1
         while (sync_flags[SyncSlot::BATCH_READY] < epoch + batch + 1) { }
+
+        constexpr uint32_t active_cb = TileMatrixCB::CB_VNODE_A;
+        uint32_t vnode_l1 = sync_flags[SyncSlot::VNODE_L1_ADDR];
+        const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
+        char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
 
         for (uint32_t iter = 0; iter < max_iter; ++iter) {
             global_iter++;
@@ -121,8 +118,32 @@ void kernel_main() {
                 sync_flags[SyncSlot::GATHER_START] = step_barrier;
 
                 // Worker 0 gathers 24 pairs into Face 0
+                if (iter == 0 && t == 0) {
+                    sync_flags[300] = tile_hoff_w0[0];
+                    sync_flags[301] = reinterpret_cast<uint32_t>(tile_hoff_w0);
+                    sync_flags[302] = reinterpret_cast<uint32_t>(vnode_bytes_ptr);
+                    sync_flags[303] = *reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + (tile_hoff_w0[0] & 0xFFFF));
+                    sync_flags[304] = *reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + ((tile_hoff_w0[0] & 0xFFFF) + 4));
+                    sync_flags[305] = scratch_in_addr;
+
+                    const auto* p_v0 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr);
+                    for (int i = 0; i < 8; ++i) sync_flags[310 + i] = p_v0[i];
+
+                    const auto* p_v571 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + 0x10f8);
+                    sync_flags[320] = p_v571[0];
+                    sync_flags[321] = p_v571[1];
+
+                    const auto* p_v43 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + 0x00b8);
+                    sync_flags[322] = p_v43[0];
+                    sync_flags[323] = p_v43[1];
+                }
                 uint32_t t_g1 = get_wall_clock();
                 gather_face_24pairs(scratch_in_addr + 0, tile_hoff_w0, vnode_bytes_ptr);
+                if (iter == 0 && t == 0) {
+                    const auto* p_scat = reinterpret_cast<const uint32_t*>(scratch_in_addr);
+                    sync_flags[330] = p_scat[0];
+                    sync_flags[331] = p_scat[1];
+                }
                 uint32_t t_g2 = get_wall_clock();
                 cycles_brisc_gather_loop += (t_g2 - t_g1);
 
@@ -158,18 +179,29 @@ void kernel_main() {
 
             // Dedicated Parallel Transmitted Variable Node Error Scan
             // Worker 0 (BRISC) scans Information Nodes 0..1023 (Tiles 0..3: bytes 0..8191, 2048 uint32 words)
+            // Codewords that have already converged are masked out (scan disabled)
+            uint8_t active_mask = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
+            uint32_t mask_err01 = ((active_mask & 1) ? 0x00008000 : 0) | ((active_mask & 2) ? 0x80000000 : 0);
+            uint32_t mask_err23 = ((active_mask & 4) ? 0x00008000 : 0) | ((active_mask & 8) ? 0x80000000 : 0);
+
             const auto* p0 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr);
             uint32_t brisc_err01 = 0;
             uint32_t brisc_err23 = 0;
-            #pragma GCC unroll 0
-            for (uint32_t i = 0; i < 2048; i += 16) {
-                brisc_err01 |= (p0[i + 0] | p0[i + 2] | p0[i + 4] | p0[i + 6] |
-                                p0[i + 8] | p0[i + 10] | p0[i + 12] | p0[i + 14]);
-                brisc_err23 |= (p0[i + 1] | p0[i + 3] | p0[i + 5] | p0[i + 7] |
-                                p0[i + 9] | p0[i + 11] | p0[i + 13] | p0[i + 15]);
+            if (mask_err01 != 0 || mask_err23 != 0) {
+                #pragma GCC unroll 0
+                for (uint32_t i = 0; i < 2048; i += 16) {
+                    if (mask_err01) {
+                        brisc_err01 |= (p0[i + 0] | p0[i + 2] | p0[i + 4] | p0[i + 6] |
+                                        p0[i + 8] | p0[i + 10] | p0[i + 12] | p0[i + 14]);
+                    }
+                    if (mask_err23) {
+                        brisc_err23 |= (p0[i + 1] | p0[i + 3] | p0[i + 5] | p0[i + 7] |
+                                        p0[i + 9] | p0[i + 11] | p0[i + 13] | p0[i + 15]);
+                    }
+                }
             }
-            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01] = brisc_err01 & 0x80008000;
-            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23] = brisc_err23 & 0x80008000;
+            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01] = brisc_err01 & mask_err01;
+            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23] = brisc_err23 & mask_err23;
             sync_flags[SyncSlot::BRISC_SCAN_DONE] = epoch + global_iter;
 
             // Wait for Worker 1 (NCRISC) to complete the iteration convergence check
@@ -183,7 +215,7 @@ void kernel_main() {
     }
 
     uint32_t b_end = get_wall_clock();
-    sync_flags[SyncSlot::BRISC_CYCLES]     = b_end - b_start;
+    sync_flags[SyncSlot::BRISC_CYCLES]     = telem_l1;
     sync_flags[TelemSlot::BR_GATHER]       = cycles_gather;
     sync_flags[TelemSlot::BR_WAIT]         = cycles_brisc_wait;
     sync_flags[TelemSlot::BR_SCATTER]      = cycles_scatter;
