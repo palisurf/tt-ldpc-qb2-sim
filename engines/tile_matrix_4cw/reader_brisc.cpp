@@ -202,7 +202,7 @@ void kernel_main() {
 
                 // Worker 0 scatters 48 pairs from Faces 0 & 2 back to variable nodes
                 if (__builtin_expect(active_mask == 0x0F, 1)) {
-                    // Straight-line pipelined fast path (0 branches, 0 stack spills)
+                    // Straight-line zero-spill fast path (0 branches, 0 stack spills)
                     for (uint32_t f = 0; f < 2; ++f) {
                         uint32_t face_offset = (f == 0) ? 0 : 1024;
                         const auto* src_face = reinterpret_cast<const uint32_t*>(scratch_out_addr + face_offset);
@@ -216,14 +216,18 @@ void kernel_main() {
                             #pragma GCC unroll 4
                             for (uint32_t p = 0; p < 4; ++p) {
                                 uint32_t off = p_h[p];
-                                uint32_t e0 = src_even[2 * p];
-                                uint32_t e1 = src_even[2 * p + 1];
-                                uint32_t o0 = src_odd[2 * p];
-                                uint32_t o1 = src_odd[2 * p + 1];
                                 auto* d_e = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off & 0xFFFF));
                                 auto* d_o = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off >> 16));
-                                d_e[0] = e0; d_e[1] = e1;
-                                d_o[0] = o0; d_o[1] = o1;
+
+                                uint32_t e0 = src_even[2 * p + 0];
+                                uint32_t e1 = src_even[2 * p + 1];
+                                d_e[0] = e0;
+                                d_e[1] = e1;
+
+                                uint32_t o0 = src_odd[2 * p + 0];
+                                uint32_t o1 = src_odd[2 * p + 1];
+                                d_o[0] = o0;
+                                d_o[1] = o1;
                             }
                         }
                     }
