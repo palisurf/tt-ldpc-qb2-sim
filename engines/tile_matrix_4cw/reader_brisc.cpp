@@ -72,6 +72,7 @@ void kernel_main() {
 
     uint32_t b_start = get_wall_clock();
     uint32_t cycles_gather = 0;
+    uint32_t cycles_brisc_gather_loop = 0;
     uint32_t cycles_scatter = 0;
     uint32_t cycles_brisc_wait = 0;
     uint32_t cycles_brisc_scat_start_bar = 0;
@@ -100,8 +101,6 @@ void kernel_main() {
         for (uint32_t iter = 0; iter < max_iter; ++iter) {
             global_iter++;
             active_mask = (iter == 0) ? 0x0F : static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
-            uint32_t brisc_gather_err_cw01 = 0;
-            uint32_t brisc_gather_err_cw23 = 0;
             for (uint32_t t = 0; t < num_tiles; ++t) {
                 step_barrier++;
                 const uint32_t* tile_hoff_w0 = p_hoff_base + t * 96;
@@ -118,40 +117,69 @@ void kernel_main() {
                 sync_flags[SyncSlot::GATHER_BARRIER_W0] = step_barrier;
                 while (sync_flags[SyncSlot::GATHER_BARRIER_W1] != step_barrier) { }
 
-                // Worker 0 gathers 48 pairs into Faces 0 & 2 using Compile-Time LUT
-                #pragma GCC unroll 8
-                for (int p = 0; p < 48; ++p) {
-                    uint32_t off = tile_hoff_w0[p];
-                    uint32_t off_even = off & 0xFFFF;
-                    uint32_t off_odd  = off >> 16;
-                    uint32_t s_even = SCRATCH_FACE_LUT.w0_even[p];
-                    uint32_t s_odd  = SCRATCH_FACE_LUT.w0_odd[p];
+                // Worker 0 gathers 48 pairs into Faces 0 & 2 via sequential 128-bit transfers
+                uint32_t t_g1 = get_wall_clock();
+                for (uint32_t f = 0; f < 2; ++f) {
+                    uint32_t face_offset = (f == 0) ? 0 : 1024;
+                    auto* dst_face = reinterpret_cast<uint32_t*>(scratch_in_addr + face_offset);
+                    const uint32_t* p_hoff = tile_hoff_w0 + f * 24;
 
-                    uint64_t val_even = *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_even);
-                    uint64_t val_odd  = *reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off_odd);
+                    for (uint32_t d = 0; d < 6; ++d) {
+                        auto* dst_even = dst_face + d * 16;
+                        auto* dst_odd  = dst_even + 8;
+                        const uint32_t* p_h = p_hoff + d * 4;
 
-                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_even) = val_even;
-                    *reinterpret_cast<uint64_t*>(scratch_in_addr + s_odd)  = val_odd;
+                        // Block 0: Pairs 0 and 1 (8 words: 4 even + 4 odd)
+                        {
+                            uint32_t off0 = p_h[0];
+                            uint32_t off1 = p_h[1];
 
-                    // In-flight gather OR accumulation on transmitted symbols (v < 2048)
-                    if (off_even < 16384) {
-                        brisc_gather_err_cw01 |= (static_cast<uint32_t>(val_even) & 0x80008000);
-                        brisc_gather_err_cw23 |= (static_cast<uint32_t>(val_even >> 32) & 0x80008000);
-                    }
-                    if (off_odd < 16384) {
-                        brisc_gather_err_cw01 |= (static_cast<uint32_t>(val_odd) & 0x80008000);
-                        brisc_gather_err_cw23 |= (static_cast<uint32_t>(val_odd >> 32) & 0x80008000);
+                            uint32_t off0_e = off0 & 0xFFFF;
+                            uint32_t off0_o = off0 >> 16;
+                            uint32_t off1_e = off1 & 0xFFFF;
+                            uint32_t off1_o = off1 >> 16;
+
+                            const auto* s0_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off0_e);
+                            const auto* s0_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off0_o);
+                            const auto* s1_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_e);
+                            const auto* s1_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_o);
+
+                            uint32_t e0 = s0_e[0]; uint32_t e1 = s0_e[1];
+                            uint32_t e2 = s1_e[0]; uint32_t e3 = s1_e[1];
+                            uint32_t o0 = s0_o[0]; uint32_t o1 = s0_o[1];
+                            uint32_t o2 = s1_o[0]; uint32_t o3 = s1_o[1];
+
+                            dst_even[0] = e0; dst_even[1] = e1; dst_even[2] = e2; dst_even[3] = e3;
+                            dst_odd[0]  = o0; dst_odd[1]  = o1; dst_odd[2]  = o2; dst_odd[3]  = o3;
+                        }
+
+                        // Block 1: Pairs 2 and 3 (8 words: 4 even + 4 odd)
+                        {
+                            uint32_t off2 = p_h[2];
+                            uint32_t off3 = p_h[3];
+
+                            uint32_t off2_e = off2 & 0xFFFF;
+                            uint32_t off2_o = off2 >> 16;
+                            uint32_t off3_e = off3 & 0xFFFF;
+                            uint32_t off3_o = off3 >> 16;
+
+                            const auto* s2_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off2_e);
+                            const auto* s2_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off2_o);
+                            const auto* s3_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_e);
+                            const auto* s3_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_o);
+
+                            uint32_t e4 = s2_e[0]; uint32_t e5 = s2_e[1];
+                            uint32_t e6 = s3_e[0]; uint32_t e7 = s3_e[1];
+                            uint32_t o4 = s2_o[0]; uint32_t o5 = s2_o[1];
+                            uint32_t o6 = s3_o[0]; uint32_t o7 = s3_o[1];
+
+                            dst_even[4] = e4; dst_even[5] = e5; dst_even[6] = e6; dst_even[7] = e7;
+                            dst_odd[4]  = o4; dst_odd[5]  = o5; dst_odd[6]  = o6; dst_odd[7]  = o7;
+                        }
                     }
                 }
-
-                // Zero out unused padding rows (rows 12..15 of Face 0 & Face 2)
-                auto* pad_f0 = reinterpret_cast<uint32_t*>(scratch_in_addr + 384);
-                auto* pad_f2 = reinterpret_cast<uint32_t*>(scratch_in_addr + 1408);
-                #pragma GCC unroll 8
-                for (int i = 0; i < 32; ++i) {
-                    pad_f0[i] = 0;
-                    pad_f2[i] = 0;
-                }
+                uint32_t t_g2 = get_wall_clock();
+                cycles_brisc_gather_loop += (t_g2 - t_g1);
 
                 // Wait for Worker 1 to finish gather
                 sync_flags[SyncSlot::GATHER_BARRIER_W0] = step_barrier + 0x80000000;
@@ -173,49 +201,71 @@ void kernel_main() {
                 cycles_brisc_scat_start_bar += (t_s1 - t_s0);
 
                 // Worker 0 scatters 48 pairs from Faces 0 & 2 back to variable nodes
-                if (active_mask == 0x0F) {
-                    #pragma GCC unroll 8
-                    for (int p = 0; p < 48; ++p) {
-                        uint32_t off = tile_hoff_w0[p];
-                        uint32_t off_even = off & 0xFFFF;
-                        uint32_t off_odd  = off >> 16;
-                        uint32_t s_even = SCRATCH_FACE_LUT.w0_even[p];
-                        uint32_t s_odd  = SCRATCH_FACE_LUT.w0_odd[p];
+                if (__builtin_expect(active_mask == 0x0F, 1)) {
+                    // Straight-line pipelined fast path (0 branches, 0 stack spills)
+                    for (uint32_t f = 0; f < 2; ++f) {
+                        uint32_t face_offset = (f == 0) ? 0 : 1024;
+                        const auto* src_face = reinterpret_cast<const uint32_t*>(scratch_out_addr + face_offset);
+                        const uint32_t* p_hoff = tile_hoff_w0 + f * 24;
 
-                        *reinterpret_cast<uint64_t*>(vnode_out_ptr + off_even) =
-                            *reinterpret_cast<const uint64_t*>(scratch_out_addr + s_even);
-                        *reinterpret_cast<uint64_t*>(vnode_out_ptr + off_odd) =
-                            *reinterpret_cast<const uint64_t*>(scratch_out_addr + s_odd);
+                        for (uint32_t d = 0; d < 6; ++d) {
+                            const auto* src_even = src_face + d * 16;
+                            const auto* src_odd  = src_even + 8;
+                            const uint32_t* p_h = p_hoff + d * 4;
+
+                            #pragma GCC unroll 4
+                            for (uint32_t p = 0; p < 4; ++p) {
+                                uint32_t off = p_h[p];
+                                uint32_t e0 = src_even[2 * p];
+                                uint32_t e1 = src_even[2 * p + 1];
+                                uint32_t o0 = src_odd[2 * p];
+                                uint32_t o1 = src_odd[2 * p + 1];
+                                auto* d_e = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off & 0xFFFF));
+                                auto* d_o = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off >> 16));
+                                d_e[0] = e0; d_e[1] = e1;
+                                d_o[0] = o0; d_o[1] = o1;
+                            }
+                        }
                     }
                 } else {
+                    // Slow path: masked scatter for frozen codewords
                     uint32_t mask_low  = ((active_mask & 1) ? 0x0000FFFF : 0) | ((active_mask & 2) ? 0xFFFF0000 : 0);
                     uint32_t mask_high = ((active_mask & 4) ? 0x0000FFFF : 0) | ((active_mask & 8) ? 0xFFFF0000 : 0);
-                    uint32_t inv_low   = ~mask_low;
-                    uint32_t inv_high  = ~mask_high;
+                    bool inv_low   = (mask_low  != 0xFFFFFFFF);
+                    bool inv_high  = (mask_high != 0xFFFFFFFF);
 
-                    #pragma GCC unroll 8
-                    for (int p = 0; p < 48; ++p) {
-                        uint32_t off = tile_hoff_w0[p];
-                        uint32_t off_even = off & 0xFFFF;
-                        uint32_t off_odd  = off >> 16;
-                        uint32_t s_even = SCRATCH_FACE_LUT.w0_even[p];
-                        uint32_t s_odd  = SCRATCH_FACE_LUT.w0_odd[p];
+                    for (uint32_t f = 0; f < 2; ++f) {
+                        uint32_t face_offset = (f == 0) ? 0 : 1024;
+                        const auto* src_face = reinterpret_cast<const uint32_t*>(scratch_out_addr + face_offset);
+                        const uint32_t* p_hoff = tile_hoff_w0 + f * 24;
 
-                        auto* d_even = reinterpret_cast<uint32_t*>(vnode_out_ptr + off_even);
-                        const auto* s_ev = reinterpret_cast<const uint32_t*>(scratch_out_addr + s_even);
-                        d_even[0] = (s_ev[0] & mask_low)  | (d_even[0] & inv_low);
-                        d_even[1] = (s_ev[1] & mask_high) | (d_even[1] & inv_high);
+                        for (uint32_t d = 0; d < 6; ++d) {
+                            const auto* src_even = src_face + d * 16;
+                            const auto* src_odd  = src_even + 8;
+                            const uint32_t* p_h = p_hoff + d * 4;
 
-                        auto* d_odd = reinterpret_cast<uint32_t*>(vnode_out_ptr + off_odd);
-                        const auto* s_od = reinterpret_cast<const uint32_t*>(scratch_out_addr + s_odd);
-                        d_odd[0] = (s_od[0] & mask_low)  | (d_odd[0] & inv_low);
-                        d_odd[1] = (s_od[1] & mask_high) | (d_odd[1] & inv_high);
+                            #pragma GCC unroll 4
+                            for (uint32_t p = 0; p < 4; ++p) {
+                                uint32_t off = p_h[p];
+                                auto* d_e = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off & 0xFFFF));
+                                auto* d_o = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off >> 16));
+                                uint32_t e0 = src_even[2 * p];
+                                uint32_t e1 = src_even[2 * p + 1];
+                                uint32_t o0 = src_odd[2 * p];
+                                uint32_t o1 = src_odd[2 * p + 1];
+
+                                if (inv_low)  { e0 = (e0 & mask_low)  | (d_e[0] & ~mask_low);  o0 = (o0 & mask_low)  | (d_o[0] & ~mask_low); }
+                                if (inv_high) { e1 = (e1 & mask_high) | (d_e[1] & ~mask_high); o1 = (o1 & mask_high) | (d_o[1] & ~mask_high); }
+
+                                d_e[0] = e0; d_e[1] = e1;
+                                d_o[0] = o0; d_o[1] = o1;
+                            }
+                        }
                     }
                 }
                 uint32_t t_s2 = get_wall_clock();
                 cycles_brisc_scat_loop += (t_s2 - t_s1);
 
-                // Signal Worker 1 that Worker 0 scatter is complete
                 sync_flags[SyncSlot::SCATTER_BARRIER_W0] = step_barrier + 0x80000000;
                 while (sync_flags[SyncSlot::SCATTER_BARRIER_W1] != (step_barrier + 0x80000000)) { }
                 uint32_t t_s4 = get_wall_clock();
@@ -224,9 +274,21 @@ void kernel_main() {
                 cycles_scatter += (t_s4 - t_s0);
             }
 
-            // Post in-flight gather error flags to Worker 1
-            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01] = brisc_gather_err_cw01;
-            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23] = brisc_gather_err_cw23;
+            // Dedicated Parallel Transmitted Variable Node Error Scan
+            // Worker 0 (BRISC) scans Information Nodes 0..1023 (Tiles 0..3: bytes 0..8191, 2048 uint32 words)
+            const auto* p0 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr);
+            uint32_t brisc_err01 = 0;
+            uint32_t brisc_err23 = 0;
+            #pragma GCC unroll 0
+            for (uint32_t i = 0; i < 2048; i += 16) {
+                brisc_err01 |= (p0[i + 0] | p0[i + 2] | p0[i + 4] | p0[i + 6] |
+                                p0[i + 8] | p0[i + 10] | p0[i + 12] | p0[i + 14]);
+                brisc_err23 |= (p0[i + 1] | p0[i + 3] | p0[i + 5] | p0[i + 7] |
+                                p0[i + 9] | p0[i + 11] | p0[i + 13] | p0[i + 15]);
+            }
+            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01] = brisc_err01 & 0x80008000;
+            sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23] = brisc_err23 & 0x80008000;
+            sync_flags[SyncSlot::BRISC_SCAN_DONE] = epoch + global_iter;
 
             // Wait for Worker 1 (NCRISC) to complete the iteration convergence check
             while (sync_flags[SyncSlot::ITER_DONE] < epoch + global_iter) { }
@@ -246,5 +308,6 @@ void kernel_main() {
     sync_flags[TelemSlot::BR_SCAT_LOOP]    = cycles_brisc_scat_loop;
     sync_flags[TelemSlot::BR_SCAT_RCOPY]   = cycles_brisc_scat_rcopy;
     sync_flags[TelemSlot::BR_SCAT_END_BAR] = cycles_brisc_scat_end_bar;
+    sync_flags[TelemSlot::BR_GATHER_LOOP]  = cycles_brisc_gather_loop;
     sync_flags[SyncSlot::BATCH_BARRIER_BRISC] = epoch + num_batches + 1;
 }
