@@ -450,13 +450,17 @@ void run_tile_matrix_on_hardware(
     bool diff_test_real = false,
     uint32_t tile_limit = 0,
     uint32_t start_batch = 0,
-    uint32_t invocation_id = 1
+    uint32_t invocation_id = 1,
+    uint32_t min_fe = 25,
+    const std::string& csv_path = "",
+    uint32_t chunk_size = 50000
 ) {
     std::cout << "\n=======================================================" << std::endl;
     std::cout << " RUNNING TILE MATRIX 4-CODEWORD ENGINE ON QUIETBOX 2" << std::endl;
     std::cout << " Target: " << (single_core ? "Single Tensix Core (0, 0)" : "2x2 Blackhole Mesh") << std::endl;
     std::cout << " Batches: " << num_batches << " (4 CWs/batch = " << num_batches * 4 << " CWs)" << std::endl;
-    std::cout << " Eb/N0: " << eb_n0_db << " dB | Max Iterations: " << max_iterations << std::endl;
+    std::cout << " Eb/N0: " << eb_n0_db << " dB | Max Iterations: " << max_iterations 
+              << " | Target FE: " << min_fe << std::endl;
     if (benchmark_mode) std::cout << " Mode: SILICON THROUGHPUT BENCHMARK (sigma=0)" << std::endl;
     if (diff_test) std::cout << " Mode: DIFFERENTIAL SILICON vs EMULATOR CO-VERIFICATION ("
                               << (diff_test_real ? "REAL AWGN NOISE" : "SYNTHETIC PROBING") << ")" << std::endl;
@@ -500,6 +504,7 @@ void run_tile_matrix_on_hardware(
         meta_ptr[t * 2 + 1] = static_cast<uint16_t>(schedule[t].check_degree);
     }
     distributed::EnqueueWriteMeshBuffer(cq, h_dram, h_table, false);
+    cq.finish();
 
     distributed::DeviceLocalBufferConfig stats_dram_config{
         .page_size = stats_cb_bytes,
@@ -508,20 +513,6 @@ void run_tile_matrix_on_hardware(
     auto stats_dram = distributed::MeshBuffer::create(
         distributed::ReplicatedBufferConfig{.size = stats_cb_bytes}, stats_dram_config, mesh_device.get()
     );
-
-    // Program Setup
-    Program program = CreateProgram();
-
-    // CB Allocations in Tensix L1 SRAM:
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_A, 2 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG, 2 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(16 * 1024, {{TileMatrixCB::CB_H_OFFSET, tt::DataFormat::RawUInt16}}).set_page_size(TileMatrixCB::CB_H_OFFSET, 16 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_0, 2 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_1, 2 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_B, 2 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_0, 2 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
-    CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
 
     // Compile Device Kernels:
     std::string reader_path = resolve_filepath("reader_brisc.cpp");
@@ -542,72 +533,174 @@ void run_tile_matrix_on_hardware(
     compute_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
 #endif
 
-    auto reader = CreateKernel(program, reader_path, core_range, reader_config);
-    auto writer = CreateKernel(program, writer_path, core_range, writer_config);
-    auto compute = CreateKernel(program, compute_path, core_range, compute_config);
-
-    // Runtime Args:
     uint32_t num_tiles = (tile_limit > 0) ? tile_limit : schedule.size();
     uint32_t mu_u32 = 0;
     std::memcpy(&mu_u32, &mu_llr, sizeof(float));
 
-    std::vector<uint32_t> r_args = {
-        num_batches, max_iterations, num_tiles,
-        static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, invocation_id,
-        mu_u32, sigma_bits, 0
-    };
-    SetRuntimeArgs(program, reader, core, r_args);
+    // Chunking configuration: default 12,500 batches = 50,000 codewords per progress update
+    uint32_t chunk_codewords = (chunk_size > 0) ? chunk_size : 50000;
+    uint32_t chunk_batches = (diff_test || benchmark_mode || num_batches <= (chunk_codewords / 4)) ? num_batches : (chunk_codewords / 4);
+    uint32_t total_chunks = (num_batches + chunk_batches - 1) / chunk_batches;
 
-    std::vector<uint32_t> w_args = {
-        num_batches, max_iterations, num_tiles,
-        static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes,
-        mu_u32, sigma_bits, 0, invocation_id,
-        diff_test ? (diff_test_real ? 2u : 1u) : 0u,
-        start_batch
-    };
-    SetRuntimeArgs(program, writer, core, w_args);
+    uint64_t total_cws = 0;
+    uint64_t total_be = 0;
+    uint64_t total_fe = 0;
+    uint64_t total_iters = 0;
+    uint64_t total_tiles_sim = 0;
+    uint64_t total_hw_cycles = 0;
+    std::vector<uint32_t> last_stats(stats_cb_bytes / sizeof(uint32_t), 0);
+    uint32_t global_first_failing_batch = 0xFFFFFFFF;
+    uint32_t global_first_failing_cw = 0;
+    uint32_t global_first_failing_be = 0;
+    uint32_t global_first_failing_mask = 0;
+    uint32_t global_first_failing_inv = 0;
 
-    constexpr uint32_t telem_l1_addr = 0x3DC00;
-    std::vector<uint32_t> c_args = { num_batches, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id, start_batch };
-    SetRuntimeArgs(program, compute, core, c_args);
-
-    std::cout << "[RUN] Dispatching Optimized Tile Matrix 4-Codeword Workload to Core (0, 0)..." << std::endl;
+    if (total_chunks > 1) {
+        std::cout << "[RUN] Dispatching in chunks of " << chunk_batches * 4 << " CWs (" << chunk_batches << " batches) to Core (0, 0)..." << std::endl;
+    } else {
+        std::cout << "[RUN] Dispatching Optimized Tile Matrix 4-Codeword Workload to Core (0, 0)..." << std::endl;
+    }
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    distributed::MeshWorkload workload;
-    distributed::MeshCoordinateRange target_range = single_core
-        ? distributed::MeshCoordinateRange(distributed::MeshCoordinate(0, 0), distributed::MeshCoordinate(0, 0))
-        : distributed::MeshCoordinateRange(mesh_device->shape());
-    workload.add_program(target_range, std::move(program));
-    distributed::EnqueueMeshWorkload(cq, workload, false);
-    cq.finish();
+    for (uint32_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
+        uint32_t cur_batches = std::min(chunk_batches, num_batches - chunk_idx * chunk_batches);
+        uint32_t cur_start_batch = start_batch + chunk_idx * chunk_batches;
+        uint32_t cur_invocation_id = invocation_id + chunk_idx;
+
+        Program program = CreateProgram();
+
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_A, 2 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG, 2 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(16 * 1024, {{TileMatrixCB::CB_H_OFFSET, tt::DataFormat::RawUInt16}}).set_page_size(TileMatrixCB::CB_H_OFFSET, 16 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_0, 2 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_1, 2 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_B, 2 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_0, 2 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
+        CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
+
+        auto reader = CreateKernel(program, reader_path, core_range, reader_config);
+        auto writer = CreateKernel(program, writer_path, core_range, writer_config);
+        auto compute = CreateKernel(program, compute_path, core_range, compute_config);
+
+        std::vector<uint32_t> r_args = {
+            cur_batches, max_iterations, num_tiles,
+            static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, cur_invocation_id,
+            mu_u32, sigma_bits, 0
+        };
+        SetRuntimeArgs(program, reader, core, r_args);
+
+        std::vector<uint32_t> w_args = {
+            cur_batches, max_iterations, num_tiles,
+            static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes,
+            mu_u32, sigma_bits, 0, cur_invocation_id,
+            diff_test ? (diff_test_real ? 2u : 1u) : 0u,
+            cur_start_batch
+        };
+        SetRuntimeArgs(program, writer, core, w_args);
+
+        std::vector<uint32_t> c_args = { cur_batches, max_iterations, num_tiles, mu_u32, sigma_bits, cur_invocation_id, cur_start_batch };
+        SetRuntimeArgs(program, compute, core, c_args);
+
+        distributed::MeshWorkload workload;
+        distributed::MeshCoordinateRange target_range = single_core
+            ? distributed::MeshCoordinateRange(distributed::MeshCoordinate(0, 0), distributed::MeshCoordinate(0, 0))
+            : distributed::MeshCoordinateRange(mesh_device->shape());
+        workload.add_program(target_range, std::move(program));
+        distributed::EnqueueMeshWorkload(cq, workload, false);
+        cq.finish();
+
+        std::vector<uint32_t> stats(stats_cb_bytes / sizeof(uint32_t), 0);
+        distributed::ReadShard(cq, stats, stats_dram, distributed::MeshCoordinate(0, 0), true);
+        last_stats = stats;
+
+        total_cws += cur_batches * 4;
+        total_be += stats[TelemSlot::TOTAL_BE];
+        total_fe += stats[TelemSlot::TOTAL_FE];
+        total_iters += stats[TelemSlot::TOTAL_ITERS];
+        total_tiles_sim += stats[TelemSlot::TOTAL_TILES_SIM];
+        total_hw_cycles += stats[TelemSlot::ELAPSED_CYCLES];
+
+        if (stats[TelemSlot::FIRST_FAILING_BATCH] != 0xFFFFFFFF && global_first_failing_batch == 0xFFFFFFFF) {
+            global_first_failing_batch = stats[TelemSlot::FIRST_FAILING_BATCH];
+            global_first_failing_cw    = stats[TelemSlot::FIRST_FAILING_CW];
+            global_first_failing_be    = stats[TelemSlot::FIRST_FAILING_BE];
+            global_first_failing_mask  = stats[TelemSlot::FIRST_FAILING_MASK];
+            global_first_failing_inv   = cur_invocation_id;
+            std::cout << "\n>>> [FIRST ERROR TRAPPED] Batch=" << global_first_failing_batch
+                      << ", Invocation=" << global_first_failing_inv
+                      << ", CW=" << global_first_failing_cw
+                      << ", BE=" << global_first_failing_be
+                      << ", ActiveMask=0x" << std::hex << global_first_failing_mask << std::dec
+                      << " at chunk " << chunk_idx << " <<<\n" << std::endl;
+        }
+
+        if (chunk_idx == 0) {
+            if (stats[TelemSlot::TELEMETRY_L1_ADDR] != 0) {
+                std::cout << "[INFO] Telemetry L1 Base: 0x" << std::hex << stats[TelemSlot::TELEMETRY_L1_ADDR] << std::dec << std::endl;
+            }
+            std::cout << "[INFO] Tile 0 deg from stats[64]: " << stats[TelemSlot::DEG_BASE] << std::endl;
+            std::cout << "[INFO] VNODE_L1_ADDR from stats[27]: 0x" << std::hex << stats[SyncSlot::VNODE_L1_ADDR]
+                      << " | BRISC ptr (stats[28]): 0x" << stats[28]
+                      << " | NCRISC ptr (stats[29]): 0x" << stats[29]
+                      << " | HOFF_L1_ADDR from stats[17]: 0x" << stats[SyncSlot::HOFF_L1_ADDR] << std::dec << std::endl;
+            uint32_t hoff_mismatches = 0;
+            for (uint32_t i = 0; i < 96; ++i) {
+                if (stats[200 + i] != pcm.h_offsets_pairs[i]) {
+                    if (hoff_mismatches < 5) {
+                        std::cout << "  [H_OFF MISMATCH] i=" << i 
+                                  << " Tensix=0x" << std::hex << stats[200 + i]
+                                  << " Host=0x" << pcm.h_offsets_pairs[i] << std::dec << std::endl;
+                    }
+                    hoff_mismatches++;
+                }
+            }
+            std::cout << "[INFO] H_Offsets Tensix L1 vs Host: " << (96 - hoff_mismatches) << " / 96 match (" 
+                      << hoff_mismatches << " mismatches)" << std::endl;
+            std::cout << "  Tile 0 all 32 checks: ";
+            for (int i = 0; i < 32; ++i) std::cout << schedule[0].check_indices[i] << " ";
+            std::cout << std::endl;
+            std::cout << "[BRISC DIAG] tile_hoff_w0[0]=0x" << std::hex << stats[300]
+                      << ", hoff_ptr=0x" << stats[301]
+                      << ", vnode_ptr=0x" << stats[302]
+                      << ", vnode_val_low=0x" << stats[303]
+                      << ", vnode_val_high=0x" << stats[304]
+                      << ", scratch_in_addr=0x" << stats[305] << std::dec << std::endl;
+            std::cout << "  [VNODE BASE PROBE (offset 0..31)]:\n  ";
+            for (int i = 0; i < 8; ++i) std::cout << " 0x" << std::hex << stats[310 + i];
+            std::cout << std::dec << "\n  [VNODE 571 PROBE (offset 0x10f8)]: 0x" << std::hex << stats[320] << " 0x" << stats[321]
+                      << "\n  [VNODE 43 PROBE  (offset 0x00b8)]: 0x" << stats[322] << " 0x" << stats[323]
+                      << "\n  [BRISC GATHER PROBE (scratch[0..1])]: 0x" << stats[330] << " 0x" << stats[331]
+                      << "\n  [NCRISC DUMP PROBE  (scratch[0..1])]: 0x" << stats[332] << " 0x" << stats[333] << " at addr 0x" << stats[334] << std::dec << std::endl;
+        }
+
+        auto now = std::chrono::high_resolution_clock::now();
+        double elapsed_sec = std::chrono::duration<double>(now - t0).count();
+        double cur_fer = (double)total_fe / total_cws;
+        double cur_ber = (double)total_be / (total_cws * 1024.0);
+        double cur_mean_iters = (double)total_iters / total_cws;
+        double cur_tput = (static_cast<double>(total_cws) * 2048.0) / (elapsed_sec * 1e6);
+
+        std::cout << "[PROGRESS] Blocks: " << std::setw(7) << total_cws << "/" << num_batches * 4
+                  << " (" << std::fixed << std::setprecision(1) << (total_cws * 100.0 / (num_batches * 4)) << "%)"
+                  << " | FE: " << std::setw(3) << total_fe << "/" << min_fe
+                  << " | BE: " << std::setw(6) << total_be
+                  << " | FER: " << std::scientific << std::setprecision(3) << cur_fer
+                  << " | BER: " << cur_ber
+                  << " | Iters: " << std::fixed << std::setprecision(2) << cur_mean_iters
+                  << " | Tput: " << std::setprecision(2) << cur_tput << " Msps"
+                  << " | Time: " << std::setprecision(1) << elapsed_sec << "s"
+                  << std::endl << std::flush;
+
+        if (total_fe >= min_fe && !diff_test) {
+            std::cout << "\n[EARLY TERMINATION] Target " << min_fe << " Frame Errors reached at block " << total_cws << "! Stopping simulation." << std::endl;
+            break;
+        }
+    }
 
     auto t1 = std::chrono::high_resolution_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-    std::vector<uint32_t> stats(stats_cb_bytes / sizeof(uint32_t), 0);
-    distributed::ReadShard(cq, stats, stats_dram, distributed::MeshCoordinate(0, 0), true);
-
-    if (stats[TelemSlot::TELEMETRY_L1_ADDR] != 0) {
-        std::cout << "[INFO] Telemetry L1 Base: 0x" << std::hex << stats[TelemSlot::TELEMETRY_L1_ADDR] << std::dec << std::endl;
-    }
-    std::cout << "[INFO] Tile 0 deg from stats[64]: " << stats[TelemSlot::DEG_BASE] << std::endl;
-    uint32_t hoff_mismatches = 0;
-    for (uint32_t i = 0; i < 96; ++i) {
-        if (stats[200 + i] != pcm.h_offsets_pairs[i]) {
-            if (hoff_mismatches < 5) {
-                std::cout << "  [H_OFF MISMATCH] i=" << i 
-                          << " Tensix=0x" << std::hex << stats[200 + i]
-                          << " Host=0x" << pcm.h_offsets_pairs[i] << std::dec << std::endl;
-            }
-            hoff_mismatches++;
-        }
-    }
-    std::cout << "[INFO] H_Offsets Tensix L1 vs Host: " << (96 - hoff_mismatches) << " / 96 match (" 
-              << hoff_mismatches << " mismatches)" << std::endl;
-    std::cout << "  Tile 0 all 32 checks: ";
-    for (int i = 0; i < 32; ++i) std::cout << schedule[0].check_indices[i] << " ";
-    std::cout << std::endl;
+    const auto& stats = last_stats;
 
 #if LDPC_TEST_PASSTHROUGH_MODE
     std::cout << "\n=======================================================" << std::endl;
@@ -887,7 +980,7 @@ void run_tile_matrix_on_hardware(
                 }
 #endif
 
-                if (iter == 0 && t == 0) {
+                if (iter == (max_iterations - 1) && t == 0) {
                     std::ofstream f_gold_scat_in("dump/golden_scratch_in.bin", std::ios::binary);
                     f_gold_scat_in.write(reinterpret_cast<const char*>(scratch_in.data()), 2048);
                     f_gold_scat_in.close();
@@ -947,39 +1040,38 @@ void run_tile_matrix_on_hardware(
         (void)ret;
     }
 
-    uint32_t total_cws = num_batches * 4;
     double throughput_msps = (static_cast<double>(total_cws) * 2048) / (elapsed_ms * 1e3);
-    double mean_iters = (double)stats[TelemSlot::TOTAL_ITERS] / total_cws;
-    double total_tiles_sim = (stats[TelemSlot::TOTAL_TILES_SIM] > 0) 
-        ? static_cast<double>(stats[TelemSlot::TOTAL_TILES_SIM]) 
-        : (((mean_iters > 0.0) ? mean_iters : 1.0) * num_tiles * num_batches);
-    double num_eval_batches = (total_tiles_sim > 0) ? (total_tiles_sim / (double)num_tiles) : 1.0;
-    uint32_t hw_cycles = stats[TelemSlot::ELAPSED_CYCLES];
-    double per_tile_cyc = (total_tiles_sim > 0) 
-        ? (((double)stats[TelemSlot::NC_GATHER] + (double)stats[TelemSlot::NC_WAIT] + (double)stats[TelemSlot::NC_SCATTER]) / total_tiles_sim)
+    double mean_iters = (total_cws > 0) ? ((double)total_iters / total_cws) : 0.0;
+    double total_tiles_eval = (total_tiles_sim > 0) 
+        ? static_cast<double>(total_tiles_sim) 
+        : (((mean_iters > 0.0) ? mean_iters : 1.0) * num_tiles * (total_cws / 4));
+    double num_eval_batches = (total_tiles_eval > 0) ? (total_tiles_eval / (double)num_tiles) : 1.0;
+    uint32_t hw_cycles = (total_hw_cycles > 0) ? static_cast<uint32_t>(total_hw_cycles) : stats[TelemSlot::ELAPSED_CYCLES];
+    double per_tile_cyc = (total_tiles_eval > 0) 
+        ? (((double)stats[TelemSlot::NC_GATHER] + (double)stats[TelemSlot::NC_WAIT] + (double)stats[TelemSlot::NC_SCATTER]) / total_tiles_eval)
         : 9700.0;
-    double true_total_hw_cycles = total_tiles_sim * per_tile_cyc + (double)stats[TelemSlot::CYCLES_CHANNEL];
-    double cycles_per_batch = (num_batches > 0) ? (true_total_hw_cycles / num_batches) : 0.0;
+    double true_total_hw_cycles = total_tiles_eval * per_tile_cyc + (double)stats[TelemSlot::CYCLES_CHANNEL];
+    double cycles_per_batch = (total_cws > 0) ? (true_total_hw_cycles / (total_cws / 4)) : 0.0;
     double cycles_per_tile = per_tile_cyc;
     double silicon_core_msps = (static_cast<double>(total_cws) * 2048 * 1.35e9) / (true_total_hw_cycles > 0 ? true_total_hw_cycles : 1) / 1e6;
     double mesh_projected_gsps = (silicon_core_msps * 440.0) / 1e3;
 
     uint32_t trisc_cycles = stats[TelemSlot::TRISC_CYCLES];
-    double trisc_cycles_per_tile = (total_tiles_sim > 0) ? ((double)trisc_cycles / total_tiles_sim) : 0.0;
-    double brisc_cycles_per_tile = (total_tiles_sim > 0) ? ((double)stats[TelemSlot::BRISC_CYCLES] / total_tiles_sim) : 0.0;
+    double trisc_cycles_per_tile = (total_tiles_eval > 0) ? ((double)trisc_cycles / total_tiles_eval) : 0.0;
+    double brisc_cycles_per_tile = (total_tiles_eval > 0) ? ((double)stats[TelemSlot::BRISC_CYCLES] / total_tiles_eval) : 0.0;
 
     std::cout << "\n=======================================================" << std::endl;
     std::cout << " TILE MATRIX 4-CODEWORD HARDWARE RESULTS" << std::endl;
     std::cout << "=======================================================" << std::endl;
-    std::cout << " Codewords Tested : " << total_cws << " (" << num_batches << " batches of 4)" << std::endl;
+    std::cout << " Codewords Tested : " << total_cws << " (" << (total_cws / 4) << " batches of 4)" << std::endl;
     std::cout << " Init Neg LLRs B0 : CW0=" << stats[TelemSlot::INIT_NEG_CW0 + 0] << ", CW1=" << stats[TelemSlot::INIT_NEG_CW0 + 1]
               << ", CW2=" << stats[TelemSlot::INIT_NEG_CW0 + 2] << ", CW3=" << stats[TelemSlot::INIT_NEG_CW0 + 3] << " (out of 2048)" << std::endl;
     std::cout << " Init BF16 Words  : [0,1]=0x" << std::hex << stats[TelemSlot::INIT_BF16_W01] << ", [2,3]=0x" << stats[TelemSlot::INIT_BF16_W23]
               << ", mu_bits=0x" << stats[TelemSlot::MU_BITS] << ", sigma_bits=0x" << stats[TelemSlot::SIGMA_BITS] << std::dec << std::endl;
-    std::cout << " Total Bit Errors : " << stats[TelemSlot::TOTAL_BE]
-              << " (BER = " << (double)stats[TelemSlot::TOTAL_BE] / (total_cws * 1024.0) << ")" << std::endl;
-    std::cout << " Total Frame Errs : " << stats[TelemSlot::TOTAL_FE] 
-              << " (FER = " << (double)stats[TelemSlot::TOTAL_FE] / total_cws << ")" << std::endl;
+    std::cout << " Total Bit Errors : " << total_be
+              << " (BER = " << std::scientific << std::setprecision(5) << ((double)total_be / (total_cws * 1024.0)) << std::fixed << ")" << std::endl;
+    std::cout << " Total Frame Errs : " << total_fe 
+              << " (FER = " << std::scientific << std::setprecision(5) << ((double)total_fe / (total_cws > 0 ? total_cws : 1)) << std::fixed << ")" << std::endl;
     std::cout << " Final Batch Errs : CW0=" << stats[TelemSlot::LAST_BATCH_BE_CW0 + 0] 
               << ", CW1=" << stats[TelemSlot::LAST_BATCH_BE_CW0 + 1]
               << ", CW2=" << stats[TelemSlot::LAST_BATCH_BE_CW0 + 2] 
@@ -988,11 +1080,19 @@ void run_tile_matrix_on_hardware(
               << ", CW1=" << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 1]
               << ", CW2=" << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 2] 
               << ", CW3=" << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 3] << std::endl;
-    if (stats[TelemSlot::FIRST_FAILING_BATCH] != 0xFFFFFFFF) {
-        std::cout << " Trapped Failing  : Batch=" << stats[TelemSlot::FIRST_FAILING_BATCH]
-                  << ", CW=" << stats[TelemSlot::FIRST_FAILING_CW]
-                  << ", BE=" << stats[TelemSlot::FIRST_FAILING_BE]
-                  << ", ActiveMask=0x" << std::hex << stats[TelemSlot::FIRST_FAILING_MASK] << std::dec << std::endl;
+    uint32_t rep_batch = (global_first_failing_batch != 0xFFFFFFFF) ? global_first_failing_batch : stats[TelemSlot::FIRST_FAILING_BATCH];
+    uint32_t rep_cw    = (global_first_failing_batch != 0xFFFFFFFF) ? global_first_failing_cw    : stats[TelemSlot::FIRST_FAILING_CW];
+    uint32_t rep_be    = (global_first_failing_batch != 0xFFFFFFFF) ? global_first_failing_be    : stats[TelemSlot::FIRST_FAILING_BE];
+    uint32_t rep_mask  = (global_first_failing_batch != 0xFFFFFFFF) ? global_first_failing_mask  : stats[TelemSlot::FIRST_FAILING_MASK];
+    if (rep_batch != 0xFFFFFFFF) {
+        std::cout << " Trapped Failing  : Batch=" << rep_batch
+                  << ", CW=" << rep_cw
+                  << ", BE=" << rep_be
+                  << ", ActiveMask=0x" << std::hex << rep_mask << std::dec;
+        if (global_first_failing_batch != 0xFFFFFFFF) {
+            std::cout << ", Invocation=" << global_first_failing_inv;
+        }
+        std::cout << std::endl;
     }
     std::cout << " Mean Iterations  : " << mean_iters << std::endl;
     std::cout << " NCRISC HW Cycles : " << hw_cycles << " clock cycles (" << cycles_per_tile << " cyc/tile)" << std::endl;
@@ -1017,17 +1117,38 @@ void run_tile_matrix_on_hardware(
     std::cout << "   - End Barrier  : " << (double)stats[TelemSlot::NC_SCAT_END_BAR] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << "   - CB Pop Front : " << (double)stats[TelemSlot::NC_SCAT_POP] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << " --- WORKER 0 (BRISC) BREAKDOWN (per tile) ---" << std::endl;
-    std::cout << " BRISC Gather     : " << (double)stats[TelemSlot::BR_GATHER] / total_tiles_sim << " cyc/tile" << std::endl;
-    std::cout << "   - Pure GatherLp: " << (double)stats[TelemSlot::BR_GATHER_LOOP] / total_tiles_sim << " cyc/tile" << std::endl;
-    std::cout << " BRISC Wait       : " << (double)stats[TelemSlot::BR_WAIT] / total_tiles_sim << " cyc/tile" << std::endl;
-    std::cout << " BRISC Scatter Tot: " << (double)stats[TelemSlot::BR_SCATTER] / total_tiles_sim << " cyc/tile" << std::endl;
-    std::cout << "   - Pure ScatLoop: " << (double)stats[TelemSlot::BR_SCAT_LOOP] / total_tiles_sim << " cyc/tile" << std::endl;
-    std::cout << "   - R_new Copy   : " << (double)stats[TelemSlot::BR_SCAT_RCOPY] / total_tiles_sim << " cyc/tile" << std::endl;
-    std::cout << "   - End Barrier  : " << (double)stats[TelemSlot::BR_SCAT_END_BAR] / total_tiles_sim << " cyc/tile" << std::endl;
+    std::cout << " BRISC Gather     : " << (double)stats[TelemSlot::BR_GATHER] / total_tiles_eval << " cyc/tile" << std::endl;
+    std::cout << "   - Pure GatherLp: " << (double)stats[TelemSlot::BR_GATHER_LOOP] / total_tiles_eval << " cyc/tile" << std::endl;
+    std::cout << " BRISC Wait       : " << (double)stats[TelemSlot::BR_WAIT] / total_tiles_eval << " cyc/tile" << std::endl;
+    std::cout << " BRISC Scatter Tot: " << (double)stats[TelemSlot::BR_SCATTER] / total_tiles_eval << " cyc/tile" << std::endl;
+    std::cout << "   - Pure ScatLoop: " << (double)stats[TelemSlot::BR_SCAT_LOOP] / total_tiles_eval << " cyc/tile" << std::endl;
+    std::cout << "   - R_new Copy   : " << (double)stats[TelemSlot::BR_SCAT_RCOPY] / total_tiles_eval << " cyc/tile" << std::endl;
+    std::cout << "   - End Barrier  : " << (double)stats[TelemSlot::BR_SCAT_END_BAR] / total_tiles_eval << " cyc/tile" << std::endl;
     std::cout << " Silicon Core Tput: " << std::fixed << std::setprecision(2) << silicon_core_msps << " Msps (silicon-only at 1.35 GHz)" << std::endl;
     std::cout << " Mesh Proj. Tput  : " << std::fixed << std::setprecision(2) << mesh_projected_gsps << " Gsps (440 cores)" << std::endl;
     std::cout << " Host Wall-Clock  : " << std::fixed << std::setprecision(2) << elapsed_ms << " ms (incl. PCIe dispatch)" << std::endl;
     std::cout << "=======================================================" << std::endl;
+
+    if (!csv_path.empty()) {
+        bool file_exists = fs::exists(csv_path);
+        std::ofstream csv_file(csv_path, std::ios::app);
+        if (csv_file.is_open()) {
+            if (!file_exists) {
+                csv_file << "ebn0_db,blocks,bit_errors,frame_errors,ber,fer,mean_iters,throughput_msps,time_s\n";
+            }
+            csv_file << std::fixed << std::setprecision(2) << eb_n0_db << ","
+                     << total_cws << ","
+                     << total_be << ","
+                     << total_fe << ","
+                     << std::scientific << std::setprecision(6) << ((double)total_be / (total_cws * 1024.0)) << ","
+                     << std::scientific << std::setprecision(6) << ((double)total_fe / (total_cws > 0 ? total_cws : 1)) << ","
+                     << std::fixed << std::setprecision(2) << mean_iters << ","
+                     << std::fixed << std::setprecision(2) << throughput_msps << ","
+                     << std::fixed << std::setprecision(1) << (elapsed_ms / 1000.0) << "\n";
+            csv_file.close();
+            std::cout << "[INFO] Results saved to CSV: " << csv_path << std::endl;
+        }
+    }
 
     mesh_device->close();
 }
@@ -1369,6 +1490,7 @@ int main(int argc, char** argv) {
     uint32_t tile_limit = 0;
     uint32_t start_batch = 0;
     uint32_t invocation_id = 1;
+    uint32_t chunk_size = 50000;
     std::string csv_path = fs::exists("../../Results") 
         ? "../../Results/results_tile_matrix_4cw_ar4ja_r12_ebn0_1.50_2.50_step0.10_max1000000_min20_iter200_1core.csv"
         : "Results/results_tile_matrix_4cw_ar4ja_r12_ebn0_1.50_2.50_step0.10_max1000000_min20_iter200_1core.csv";
@@ -1417,6 +1539,10 @@ int main(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') invocation_id = std::stoul(argv[++i]);
         } else if (arg == "--tiles" && i + 1 < argc) {
             tile_limit = std::stoul(argv[++i]);
+        } else if ((arg == "--min-errors" || arg == "--min-fe") && i + 1 < argc) {
+            min_fe = std::stoul(argv[++i]);
+        } else if ((arg == "--chunk-size" || arg == "--chunk") && i + 1 < argc) {
+            chunk_size = std::stoul(argv[++i]);
         } else if (arg == "--csv" && i + 1 < argc) {
             csv_path = argv[++i];
         } else if (arg == "--mesh") {
@@ -1462,7 +1588,7 @@ int main(int argc, char** argv) {
     if (is_waterfall) {
         run_waterfall_sweep(pcm, schedule, snr_start, snr_stop, snr_step, min_fe, max_blocks, max_iterations, single_core, csv_path);
     } else {
-        run_tile_matrix_on_hardware(pcm, schedule, eb_n0_db, num_batches, max_iterations, single_core, benchmark_mode, diff_test, diff_test_real, tile_limit, start_batch, invocation_id);
+        run_tile_matrix_on_hardware(pcm, schedule, eb_n0_db, num_batches, max_iterations, single_core, benchmark_mode, diff_test, diff_test_real, tile_limit, start_batch, invocation_id, min_fe, csv_path, chunk_size);
     }
 
     return 0;
