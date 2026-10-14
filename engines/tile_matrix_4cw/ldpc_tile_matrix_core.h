@@ -69,22 +69,29 @@ namespace SyncSlot {
     constexpr uint32_t BRISC_GATHER_ERR_CW23 = 13; // Worker 0 (BRISC) gathered negative symbol flag for CW2 & CW3
     constexpr uint32_t TRISC_CYCLES        = 14; // TRISC elapsed cycles mailbox
     constexpr uint32_t BRISC_CYCLES        = 15; // BRISC elapsed cycles mailbox
-    constexpr uint32_t BATCH_NOISE_READY   = 16; // Incremented when AWGN noise is ready for batch
-    constexpr uint32_t GLOBAL_TILE_DONE    = 17; // Incremented when a tile scatter finishes
+    constexpr uint32_t BATCH_READY         = 16; // Incremented when channel observations are 100% ready in L1
+    constexpr uint32_t HOFF_L1_ADDR        = 17; // CB_H_OFFSET L1 base address
     constexpr uint32_t ACTIVE_MASK         = 18; // Active codeword mask [3:0] (frozen codewords masked out)
     constexpr uint32_t BRISC_SCAN_DONE     = 19; // Worker 0 (BRISC) completed transmitted vnode scan
     constexpr uint32_t EARLY_TERMINATION   = 20; // 1 if all 4 codewords converged early, 0 otherwise
-    constexpr uint32_t GATHER_BARRIER_W0   = 21; // Worker 0 gather sync
-    constexpr uint32_t GATHER_BARRIER_W1   = 22; // Worker 1 gather sync
-    constexpr uint32_t SCATTER_BARRIER_W0  = 23; // Worker 0 scatter sync
-    constexpr uint32_t SCATTER_BARRIER_W1  = 24; // Worker 1 scatter sync
+    constexpr uint32_t GATHER_START        = 21; // Monotonic gather start barrier (written by BRISC: step_barrier)
+    constexpr uint32_t GATHER_DONE_W1      = 22; // Worker 1 (NCRISC: Face 1) gather done (step_barrier)
+    constexpr uint32_t SCATTER_DONE_W0     = 23; // Worker 0 (BRISC: Face 0) scatter done (step_barrier)
+    constexpr uint32_t SCATTER_START       = 24; // Monotonic scatter start barrier (written by NCRISC: step_barrier)
     constexpr uint32_t SCRATCH_GATHER_PTR  = 25; // Active gather L1 write pointer
     constexpr uint32_t SCRATCH_SCATTER_PTR = 26; // Active scatter L1 read pointer
-    constexpr uint32_t ACTIVE_VNODE_CB     = 27; // Active variable node CB index (0 or 5)
+    constexpr uint32_t VNODE_L1_ADDR       = 27; // Active variable node L1 base address
     constexpr uint32_t BATCH_BARRIER_BRISC  = 28; // BRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_NCRISC = 29; // NCRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_TRISC  = 30; // TRISC batch rendezvous
     constexpr uint32_t ITER_DONE            = 31; // Iteration completion synchronization
+
+    // 4-Worker Face Parallel Done Barriers
+    constexpr uint32_t GATHER_DONE_T0      = 186; // Worker 2 (TRISC0: Face 2) gather done (step_barrier)
+    constexpr uint32_t GATHER_DONE_T2      = 187; // Worker 3 (TRISC2: Face 3) gather done (step_barrier)
+    constexpr uint32_t SCATTER_DONE_T0     = 188; // Worker 2 (TRISC0: Face 2) scatter done (step_barrier)
+    constexpr uint32_t SCATTER_DONE_T2     = 189; // Worker 3 (TRISC2: Face 3) scatter done (step_barrier)
+    constexpr uint32_t GATHER_ALL_DONE     = 190; // All 4 faces gathered into scratch_in (written by BRISC: step_barrier)
 }
 
 // Telemetry Buffer Layout in CB_TELEMETRY (1024 uint32 words)
@@ -651,3 +658,138 @@ inline float approx_min_star_scalar(float a, float b) {
     float res = min_val - corr;
     return (res > 0.0f) ? res : 0.0f;
 }
+
+// ------------------------------------------------------------------------------
+// Hardware 1-Face (24 Edge Pairs = 48 Edges) Fast Data Movement Engines
+// Optimized for Zero-Stack-Spill RV32 Execution on Blackhole RISC-V Workers
+// ------------------------------------------------------------------------------
+
+inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_24, const char* vnode_bytes_ptr) {
+    auto* dst_face = reinterpret_cast<uint32_t*>(dst_face_addr);
+    for (uint32_t d = 0; d < 6; ++d) {
+        auto* dst_even = dst_face + d * 16;
+        auto* dst_odd  = dst_even + 8;
+        const uint32_t* p_h = p_hoff_24 + d * 4;
+
+        // Block 0: Pairs 0 and 1 (8 words: 4 even + 4 odd)
+        {
+            uint32_t off0 = p_h[0];
+            uint32_t off1 = p_h[1];
+
+            uint32_t off0_e = off0 & 0xFFFF;
+            uint32_t off0_o = off0 >> 16;
+            uint32_t off1_e = off1 & 0xFFFF;
+            uint32_t off1_o = off1 >> 16;
+
+            const auto* s0_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off0_e);
+            const auto* s0_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off0_o);
+            const auto* s1_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_e);
+            const auto* s1_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_o);
+
+            uint32_t e0 = s0_e[0]; uint32_t e1 = s0_e[1];
+            uint32_t e2 = s1_e[0]; uint32_t e3 = s1_e[1];
+            uint32_t o0 = s0_o[0]; uint32_t o1 = s0_o[1];
+            uint32_t o2 = s1_o[0]; uint32_t o3 = s1_o[1];
+
+            dst_even[0] = e0; dst_even[1] = e1; dst_even[2] = e2; dst_even[3] = e3;
+            dst_odd[0]  = o0; dst_odd[1]  = o1; dst_odd[2]  = o2; dst_odd[3]  = o3;
+        }
+
+        // Block 1: Pairs 2 and 3 (8 words: 4 even + 4 odd)
+        {
+            uint32_t off2 = p_h[2];
+            uint32_t off3 = p_h[3];
+
+            uint32_t off2_e = off2 & 0xFFFF;
+            uint32_t off2_o = off2 >> 16;
+            uint32_t off3_e = off3 & 0xFFFF;
+            uint32_t off3_o = off3 >> 16;
+
+            const auto* s2_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off2_e);
+            const auto* s2_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off2_o);
+            const auto* s3_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_e);
+            const auto* s3_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_o);
+
+            uint32_t e4 = s2_e[0]; uint32_t e5 = s2_e[1];
+            uint32_t e6 = s3_e[0]; uint32_t e7 = s3_e[1];
+            uint32_t o4 = s2_o[0]; uint32_t o5 = s2_o[1];
+            uint32_t o6 = s3_o[0]; uint32_t o7 = s3_o[1];
+
+            dst_even[4] = e4; dst_even[5] = e5; dst_even[6] = e6; dst_even[7] = e7;
+            dst_odd[4]  = o4; dst_odd[5]  = o5; dst_odd[6]  = o6; dst_odd[7]  = o7;
+        }
+    }
+
+    // Zero out the 4 padding rows (Rows 12..15 = 128 bytes = 32 uint32_t words) of this face
+    auto* pad = dst_face + 12 * 8;
+    #pragma GCC unroll 4
+    for (int i = 0; i < 32; ++i) {
+        pad[i] = 0;
+    }
+}
+
+inline void scatter_face_24pairs_fast(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr) {
+    const auto* src_face = reinterpret_cast<const uint32_t*>(src_face_addr);
+    for (uint32_t d = 0; d < 6; ++d) {
+        const auto* src_even = src_face + d * 16;
+        const auto* src_odd  = src_even + 8;
+        const uint32_t* p_h = p_hoff_24 + d * 4;
+
+        #pragma GCC unroll 4
+        for (uint32_t p = 0; p < 4; ++p) {
+            uint32_t off = p_h[p];
+            auto* d_e = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off & 0xFFFF));
+            auto* d_o = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off >> 16));
+
+            uint32_t e0 = src_even[2 * p + 0];
+            uint32_t e1 = src_even[2 * p + 1];
+            d_e[0] = e0;
+            d_e[1] = e1;
+
+            uint32_t o0 = src_odd[2 * p + 0];
+            uint32_t o1 = src_odd[2 * p + 1];
+            d_o[0] = o0;
+            d_o[1] = o1;
+        }
+    }
+}
+
+inline void scatter_face_24pairs_masked(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr, uint8_t active_mask) {
+    uint32_t mask_low  = ((active_mask & 1) ? 0x0000FFFF : 0) | ((active_mask & 2) ? 0xFFFF0000 : 0);
+    uint32_t mask_high = ((active_mask & 4) ? 0x0000FFFF : 0) | ((active_mask & 8) ? 0xFFFF0000 : 0);
+    bool inv_low   = (mask_low  != 0xFFFFFFFF);
+    bool inv_high  = (mask_high != 0xFFFFFFFF);
+
+    const auto* src_face = reinterpret_cast<const uint32_t*>(src_face_addr);
+    for (uint32_t d = 0; d < 6; ++d) {
+        const auto* src_even = src_face + d * 16;
+        const auto* src_odd  = src_even + 8;
+        const uint32_t* p_h = p_hoff_24 + d * 4;
+
+        #pragma GCC unroll 4
+        for (uint32_t p = 0; p < 4; ++p) {
+            uint32_t off = p_h[p];
+            auto* d_e = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off & 0xFFFF));
+            auto* d_o = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off >> 16));
+            uint32_t e0 = src_even[2 * p];
+            uint32_t e1 = src_even[2 * p + 1];
+            uint32_t o0 = src_odd[2 * p];
+            uint32_t o1 = src_odd[2 * p + 1];
+
+            if (inv_low)  { e0 = (e0 & mask_low)  | (d_e[0] & ~mask_low);  o0 = (o0 & mask_low)  | (d_o[0] & ~mask_low); }
+            if (inv_high) { e1 = (e1 & mask_high) | (d_e[1] & ~mask_high); o1 = (o1 & mask_high) | (d_o[1] & ~mask_high); }
+
+            d_e[0] = e0; d_e[1] = e1;
+            d_o[0] = o0; d_o[1] = o1;
+        }
+    }
+}
+
+inline void scatter_face_24pairs(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr, uint8_t active_mask) {
+    if (__builtin_expect(active_mask == 0x0F, 1)) {
+        scatter_face_24pairs_fast(src_face_addr, p_hoff_24, vnode_out_ptr);
+    } else {
+        scatter_face_24pairs_masked(src_face_addr, p_hoff_24, vnode_out_ptr, active_mask);
+    }
+}
+
