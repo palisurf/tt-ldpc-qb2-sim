@@ -781,9 +781,9 @@ void run_tile_matrix_on_hardware(
 
                                 float s_tot = (s0 * s0_swap) * (s1 * s1_swap) * (s2 * s2_swap);
 
-                                float m01 = approx_min_star(m0, m0_swap);
-                                float m23 = approx_min_star(m1, m1_swap);
-                                float m45 = approx_min_star(m2, m2_swap);
+                                float m01 = to_bf16(approx_min_star(m0, m0_swap));
+                                float m23 = to_bf16(approx_min_star(m1, m1_swap));
+                                float m45 = to_bf16(approx_min_star(m2, m2_swap));
 
                                 float r_mag_0 = approx_min_star(approx_min_star(m23, m45), m0_swap);
                                 float r_mag_1 = approx_min_star(approx_min_star(m01, m45), m1_swap);
@@ -1002,6 +1002,7 @@ void run_tile_matrix_on_hardware(
     std::cout << " Total Tiles Sim  : " << static_cast<uint64_t>(total_tiles_sim) << std::endl;
     std::cout << " --- WORKER 1 (NCRISC) BREAKDOWN (per tile) ---" << std::endl;
     std::cout << " Dual Gather Tot  : " << (double)stats[TelemSlot::NC_GATHER] / total_tiles_sim << " cyc/tile" << std::endl;
+    std::cout << "   - Pure GatherLp: " << (double)stats[TelemSlot::NC_GATHER_LOOP] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << " Wait for Compute : " << (double)stats[TelemSlot::NC_WAIT] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << " Dual Scatter Tot : " << (double)stats[TelemSlot::NC_SCATTER] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << " Channel Init Tot : " << (double)stats[TelemSlot::CYCLES_CHANNEL] / num_eval_batches << " cyc/batch ("
@@ -1017,6 +1018,7 @@ void run_tile_matrix_on_hardware(
     std::cout << "   - CB Pop Front : " << (double)stats[TelemSlot::NC_SCAT_POP] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << " --- WORKER 0 (BRISC) BREAKDOWN (per tile) ---" << std::endl;
     std::cout << " BRISC Gather     : " << (double)stats[TelemSlot::BR_GATHER] / total_tiles_sim << " cyc/tile" << std::endl;
+    std::cout << "   - Pure GatherLp: " << (double)stats[TelemSlot::BR_GATHER_LOOP] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << " BRISC Wait       : " << (double)stats[TelemSlot::BR_WAIT] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << " BRISC Scatter Tot: " << (double)stats[TelemSlot::BR_SCATTER] / total_tiles_sim << " cyc/tile" << std::endl;
     std::cout << "   - Pure ScatLoop: " << (double)stats[TelemSlot::BR_SCAT_LOOP] / total_tiles_sim << " cyc/tile" << std::endl;

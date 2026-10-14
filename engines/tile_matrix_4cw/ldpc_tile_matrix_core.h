@@ -72,7 +72,7 @@ namespace SyncSlot {
     constexpr uint32_t BATCH_NOISE_READY   = 16; // Incremented when AWGN noise is ready for batch
     constexpr uint32_t GLOBAL_TILE_DONE    = 17; // Incremented when a tile scatter finishes
     constexpr uint32_t ACTIVE_MASK         = 18; // Active codeword mask [3:0] (frozen codewords masked out)
-    constexpr uint32_t UNPACK_DRAIN_DONE   = 19; // TRISC0 UNPACK batch cleanup barrier
+    constexpr uint32_t BRISC_SCAN_DONE     = 19; // Worker 0 (BRISC) completed transmitted vnode scan
     constexpr uint32_t EARLY_TERMINATION   = 20; // 1 if all 4 codewords converged early, 0 otherwise
     constexpr uint32_t GATHER_BARRIER_W0   = 21; // Worker 0 gather sync
     constexpr uint32_t GATHER_BARRIER_W1   = 22; // Worker 1 gather sync
@@ -118,6 +118,7 @@ namespace TelemSlot {
     constexpr uint32_t NC_SCAT_POP         = 39;
     constexpr uint32_t NC_SCAT_TILE0       = 40;
     constexpr uint32_t NC_SCAT_OTHER       = 41;
+    constexpr uint32_t NC_GATHER_LOOP      = 42;
 
     // BRISC (Worker 0) Tile Breakdown (written by BRISC at exit)
     constexpr uint32_t BR_GATHER           = 48;
@@ -126,6 +127,7 @@ namespace TelemSlot {
     constexpr uint32_t BR_SCAT_LOOP        = 51;
     constexpr uint32_t BR_SCAT_RCOPY       = 52;
     constexpr uint32_t BR_SCAT_END_BAR     = 53;
+    constexpr uint32_t BR_GATHER_LOOP      = 54;
 
     // Check Node Degrees (pre-loaded / verified)
     constexpr uint32_t DEG_BASE            = 64;  // 64..103
