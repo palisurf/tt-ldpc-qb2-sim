@@ -80,6 +80,7 @@ void kernel_main() {
     uint32_t cycles_brisc_scat_rcopy = 0;
     uint32_t cycles_brisc_scat_end_bar = 0;
     uint32_t global_iter = 0;
+    uint32_t step_barrier = 0;
 
     // --------------------------------------------------------------------------
     // Step 2: Main Simulation Loop (Batches x Iterations x Tiles)
@@ -102,12 +103,8 @@ void kernel_main() {
         // Wait for channel observations / synthetic pattern to be 100% ready in L1
         while (sync_flags[SyncSlot::BATCH_READY] < epoch + batch + 1) { }
 
-        uint8_t active_mask = 0x0F;
-        uint32_t step_barrier = 0;
-
         for (uint32_t iter = 0; iter < max_iter; ++iter) {
             global_iter++;
-            active_mask = (iter == 0) ? 0x0F : static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
             for (uint32_t t = 0; t < num_tiles; ++t) {
                 step_barrier++;
                 const uint32_t* tile_hoff_w0 = p_hoff_base + t * 96;
@@ -150,7 +147,7 @@ void kernel_main() {
                 cycles_brisc_scat_start_bar += (t_s1 - t_s0);
 
                 // Worker 0 scatters 24 pairs from Face 0 back to variable nodes
-                scatter_face_24pairs(scratch_out_addr + 0, tile_hoff_w0, vnode_out_ptr, active_mask);
+                scatter_face_24pairs(scratch_out_addr + 0, tile_hoff_w0, vnode_out_ptr);
                 uint32_t t_s2 = get_wall_clock();
                 cycles_brisc_scat_loop += (t_s2 - t_s1);
 
