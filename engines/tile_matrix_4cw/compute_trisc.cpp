@@ -712,10 +712,37 @@ void kernel_main() {
         while (sync_flags[SyncSlot::BATCH_BARRIER_BRISC] < epoch + batch + 1) { }
         while (sync_flags[SyncSlot::BATCH_BARRIER_TRISC] < epoch + batch + 1) { }
 
+#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
+        // Wait for channel observations / synthetic pattern to be 100% ready in L1
+        while (sync_flags[SyncSlot::BATCH_READY] < epoch + batch + 1) { }
+
+        const char* vnode_bytes_ptr = reinterpret_cast<const char*>(sync_flags[SyncSlot::VNODE_L1_ADDR]);
+        char* vnode_out_ptr = reinterpret_cast<char*>(sync_flags[SyncSlot::VNODE_L1_ADDR]);
+        const uint32_t* p_hoff_base = reinterpret_cast<const uint32_t*>(sync_flags[SyncSlot::HOFF_L1_ADDR]);
+        uint32_t step_barrier = 0;
+#endif
+
         for (uint32_t iter = 0; iter < max_iter; ++iter) {
             global_iter++;
+#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
+            uint8_t active_mask = (iter == 0) ? 0x0F : static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
+#endif
             for (uint32_t t = 0; t < num_tiles; ++t) {
                 uint16_t deg = sync_flags[64 + t];
+
+#if defined(TRISC_UNPACK)
+                step_barrier++;
+                while (sync_flags[SyncSlot::GATHER_START] < step_barrier) { }
+                uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
+                gather_face_24pairs(scratch_in_addr + 1024, p_hoff_base + t * 96 + 24, vnode_bytes_ptr);
+                sync_flags[SyncSlot::GATHER_DONE_T0] = step_barrier;
+#elif defined(TRISC_PACK)
+                step_barrier++;
+                while (sync_flags[SyncSlot::GATHER_START] < step_barrier) { }
+                uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
+                gather_face_24pairs(scratch_in_addr + 1536, p_hoff_base + t * 96 + 72, vnode_bytes_ptr);
+                sync_flags[SyncSlot::GATHER_DONE_T2] = step_barrier;
+#endif
 
                 // Execute Vector Check Node Compute (Approximate-Min* Spline)
                 if (deg == 6) {
@@ -723,6 +750,18 @@ void kernel_main() {
                 } else {
                     compute_tile_deg3(cb_scratch_in, cb_scratch_out, cb_r_msg, iter);
                 }
+
+#if defined(TRISC_UNPACK)
+                while (sync_flags[SyncSlot::SCATTER_START] < step_barrier) { }
+                uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
+                scatter_face_24pairs(scratch_out_addr + 1024, p_hoff_base + t * 96 + 24, vnode_out_ptr, active_mask);
+                sync_flags[SyncSlot::SCATTER_DONE_T0] = step_barrier;
+#elif defined(TRISC_PACK)
+                while (sync_flags[SyncSlot::SCATTER_START] < step_barrier) { }
+                uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
+                scatter_face_24pairs(scratch_out_addr + 1536, p_hoff_base + t * 96 + 72, vnode_out_ptr, active_mask);
+                sync_flags[SyncSlot::SCATTER_DONE_T2] = step_barrier;
+#endif
             }
 
             // Synchronize with NCRISC iteration check for early termination
