@@ -314,7 +314,7 @@ void kernel_main() {
             uint32_t ncrisc_err01 = 0;
             uint32_t ncrisc_err23 = 0;
             if (mask_err01 != 0 || mask_err23 != 0) {
-                #pragma GCC unroll 0
+                #pragma GCC unroll 2
                 for (uint32_t i = 0; i < 2048; i += 16) {
                     if (mask_err01) {
                         ncrisc_err01 |= (p1[i + 0] | p1[i + 2] | p1[i + 4] | p1[i + 6] |
@@ -323,6 +323,11 @@ void kernel_main() {
                     if (mask_err23) {
                         ncrisc_err23 |= (p1[i + 1] | p1[i + 3] | p1[i + 5] | p1[i + 7] |
                                          p1[i + 9] | p1[i + 11] | p1[i + 13] | p1[i + 15]);
+                    }
+                    // Fast short-circuit: Once all active codewords have shown >= 1 bit error,
+                    // none can converge in this iteration. Stop scanning immediately!
+                    if ((rv32_andn(mask_err01, ncrisc_err01) | rv32_andn(mask_err23, ncrisc_err23)) == 0) {
+                        break;
                     }
                 }
             }
@@ -336,22 +341,22 @@ void kernel_main() {
             // CW0: bit 15 of word 0
             if ((active_mask & 1) && (total_err_cw01 & 0x00008000) == 0) {
                 iter_converged[0] = iter + 1;
-                active_mask &= ~(1 << 0);
+                active_mask = rv32_andn(active_mask, 1 << 0);
             }
             // CW1: bit 31 of word 0
             if ((active_mask & 2) && (total_err_cw01 & 0x80000000) == 0) {
                 iter_converged[1] = iter + 1;
-                active_mask &= ~(1 << 1);
+                active_mask = rv32_andn(active_mask, 1 << 1);
             }
             // CW2: bit 15 of word 1
             if ((active_mask & 4) && (total_err_cw23 & 0x00008000) == 0) {
                 iter_converged[2] = iter + 1;
-                active_mask &= ~(1 << 2);
+                active_mask = rv32_andn(active_mask, 1 << 2);
             }
             // CW3: bit 31 of word 1
             if ((active_mask & 8) && (total_err_cw23 & 0x80000000) == 0) {
                 iter_converged[3] = iter + 1;
-                active_mask &= ~(1 << 3);
+                active_mask = rv32_andn(active_mask, 1 << 3);
             }
 
             // Broadcast active_mask to Worker 0 (BRISC) for next iteration
@@ -371,15 +376,20 @@ void kernel_main() {
         cw_errs[0] = 0; cw_errs[1] = 0; cw_errs[2] = 0; cw_errs[3] = 0;
         if (active_mask != 0) {
             const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr);
+            uint32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0;
             #pragma GCC unroll 4
             for (uint32_t i = 0; i < 2048; i += 2) {
                 uint32_t w0 = p32[i + 0];
                 uint32_t w1 = p32[i + 1];
-                if (active_mask & 1) cw_errs[0] += ((w0 >> 15) & 1);
-                if (active_mask & 2) cw_errs[1] += (w0 >> 31);
-                if (active_mask & 4) cw_errs[2] += ((w1 >> 15) & 1);
-                if (active_mask & 8) cw_errs[3] += (w1 >> 31);
+                e0 += ((w0 >> 15) & 1);
+                e1 += (w0 >> 31);
+                e2 += ((w1 >> 15) & 1);
+                e3 += (w1 >> 31);
             }
+            if (active_mask & 1) cw_errs[0] = e0;
+            if (active_mask & 2) cw_errs[1] = e1;
+            if (active_mask & 4) cw_errs[2] = e2;
+            if (active_mask & 8) cw_errs[3] = e3;
         }
 
         for (int cw = 0; cw < 4; ++cw) {
