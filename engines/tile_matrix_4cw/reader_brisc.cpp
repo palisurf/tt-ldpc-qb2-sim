@@ -188,7 +188,7 @@ void kernel_main() {
             uint32_t brisc_err01 = 0;
             uint32_t brisc_err23 = 0;
             if (mask_err01 != 0 || mask_err23 != 0) {
-                #pragma GCC unroll 0
+                #pragma GCC unroll 2
                 for (uint32_t i = 0; i < 2048; i += 16) {
                     if (mask_err01) {
                         brisc_err01 |= (p0[i + 0] | p0[i + 2] | p0[i + 4] | p0[i + 6] |
@@ -197,6 +197,11 @@ void kernel_main() {
                     if (mask_err23) {
                         brisc_err23 |= (p0[i + 1] | p0[i + 3] | p0[i + 5] | p0[i + 7] |
                                         p0[i + 9] | p0[i + 11] | p0[i + 13] | p0[i + 15]);
+                    }
+                    // Fast short-circuit: Once all active codewords have shown >= 1 bit error,
+                    // none can converge in this iteration. Stop scanning immediately!
+                    if ((rv32_andn(mask_err01, brisc_err01) | rv32_andn(mask_err23, brisc_err23)) == 0) {
+                        break;
                     }
                 }
             }

@@ -15,6 +15,43 @@ inline uint32_t float_as_uint(float f) {
     converter.f = f;
     return converter.u;
 }
+
+// ------------------------------------------------------------------------------
+// RV32 "Zbb" Native Hardware Bit Manipulation Instructions
+// ------------------------------------------------------------------------------
+#if defined(__riscv)
+static inline uint32_t rv32_andn(uint32_t a, uint32_t b) {
+    uint32_t res;
+    asm volatile(
+        ".option push\n\t"
+        ".option arch, +zbb\n\t"
+        "andn %0, %1, %2\n\t"
+        ".option pop"
+        : "=r"(res) : "r"(a), "r"(b)
+    );
+    return res;
+}
+
+static inline uint32_t rv32_cpop(uint32_t a) {
+    uint32_t res;
+    asm volatile(
+        ".option push\n\t"
+        ".option arch, +zbb\n\t"
+        "cpop %0, %1\n\t"
+        ".option pop"
+        : "=r"(res) : "r"(a)
+    );
+    return res;
+}
+#else
+static inline uint32_t rv32_andn(uint32_t a, uint32_t b) {
+    return a & ~b;
+}
+
+static inline uint32_t rv32_cpop(uint32_t a) {
+    return __builtin_popcount(a);
+}
+#endif
 // ==============================================================================
 // Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Engine
 // Architecture: Decoupled Access-Execute (DAE) with Native 32x32 Tensix Tiles
@@ -772,8 +809,8 @@ inline void scatter_face_24pairs_masked(uint32_t src_face_addr, const uint32_t* 
             uint32_t o0 = src_odd[2 * p];
             uint32_t o1 = src_odd[2 * p + 1];
 
-            if (inv_low)  { e0 = (e0 & mask_low)  | (d_e[0] & ~mask_low);  o0 = (o0 & mask_low)  | (d_o[0] & ~mask_low); }
-            if (inv_high) { e1 = (e1 & mask_high) | (d_e[1] & ~mask_high); o1 = (o1 & mask_high) | (d_o[1] & ~mask_high); }
+            if (inv_low)  { e0 = (e0 & mask_low)  | rv32_andn(d_e[0], mask_low);  o0 = (o0 & mask_low)  | rv32_andn(d_o[0], mask_low); }
+            if (inv_high) { e1 = (e1 & mask_high) | rv32_andn(d_e[1], mask_high); o1 = (o1 & mask_high) | rv32_andn(d_o[1], mask_high); }
 
             d_e[0] = e0; d_e[1] = e1;
             d_o[0] = o0; d_o[1] = o1;
