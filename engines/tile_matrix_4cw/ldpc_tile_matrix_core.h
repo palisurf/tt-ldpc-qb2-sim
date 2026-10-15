@@ -709,7 +709,7 @@ inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_2
     for (uint32_t d = 0; d < 6; ++d) {
         auto* dst_odd = dst_even + 8;
 
-        // Block 0: Pairs 0 and 1 (8 words: 4 even + 4 odd)
+        // Block 0: Pairs 0 and 1 (aligned 128-bit block stores)
         {
             uint32_t off0 = p_h[0];
             uint32_t off1 = p_h[1];
@@ -730,7 +730,7 @@ inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_2
             dst_odd[2]  = s1_o[0]; dst_odd[3]  = s1_o[1];
         }
 
-        // Block 1: Pairs 2 and 3 (8 words: 4 even + 4 odd)
+        // Block 1: Pairs 2 and 3 (aligned 128-bit block stores)
         {
             uint32_t off2 = p_h[2];
             uint32_t off3 = p_h[3];
@@ -755,11 +755,13 @@ inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_2
         p_h += 4;
     }
 
-    // Zero out the 4 padding rows (Rows 12..15 = 128 bytes = 32 uint32_t words) of this face
-    auto* pad = dst_even;
+    // Zero out the 4 padding rows (Rows 12..15 = 128 bytes = 8 x 128-bit aligned vector stores)
+    typedef uint32_t v4ui __attribute__((vector_size(16)));
+    auto* pad128 = reinterpret_cast<v4ui*>(dst_even);
+    v4ui zero = {0, 0, 0, 0};
     #pragma GCC unroll 8
-    for (int i = 0; i < 32; ++i) {
-        pad[i] = 0;
+    for (int i = 0; i < 8; ++i) {
+        pad128[i] = zero;
     }
 }
 
