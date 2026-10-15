@@ -322,6 +322,7 @@ inline uint16_t fp32_to_bf16_trunc(float f) {
 
 // ------------------------------------------------------------------------------
 // Dr. Jones' Branchless Approximate-Min* Formulation
+// Supports both Certified 2-Piece Baseline and Enhanced 3-Piece Convex Hull
 // ------------------------------------------------------------------------------
 // Model A: FP32 Precision (standard IEEE-754 24-bit mantissa)
 inline float approx_min_star_fp32(float a, float b) {
@@ -329,6 +330,13 @@ inline float approx_min_star_fp32(float a, float b) {
     float max_v = std::max(a, b);
     float diff  = max_v - min_v;
 
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+    float line1 = 0.67862f - 0.39622f * diff;
+    float line2 = 0.48710f - 0.18297f * diff;
+    float line3 = 0.17614f - 0.04029f * diff;
+    float corr  = std::max(std::max(std::max(line1, line2), line3), 0.0f);
+    return std::max(min_v - corr, 0.0f);
+#else
     static const float c_0_69315   = bf16_to_fp32(16177);
     static const float c_neg_0_4   = bf16_to_fp32(48844);
     static const float c_0_65715   = bf16_to_fp32(16168);
@@ -338,6 +346,7 @@ inline float approx_min_star_fp32(float a, float b) {
     float line2 = c_0_65715 + c_neg_0_328 * diff;
     float corr  = std::max(std::max(line1, line2), 0.0f);
     return std::max(min_v - corr, 0.0f);
+#endif
 }
 
 // Model B: Tensix Hardware Bit-Exact Precision (Native bfloat16 SFPU emulation)
@@ -346,6 +355,20 @@ inline float approx_min_star_tensix(float a, float b) {
     float max_v = std::max(a, b);
     float diff  = max_v - min_v;
 
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+    static const float c_0_67862     = bf16_to_fp32(16173); // 0x3F2D
+    static const float c_neg_0_39622 = bf16_to_fp32(48842); // 0xBECA
+    static const float c_0_48710     = bf16_to_fp32(16121); // 0x3EF9
+    static const float c_neg_0_18297 = bf16_to_fp32(48699); // 0xBE3B
+    static const float c_0_17614     = bf16_to_fp32(15924); // 0x3E34
+    static const float c_neg_0_04029 = bf16_to_fp32(48421); // 0xBD25
+
+    float line1 = c_0_67862 + c_neg_0_39622 * diff;
+    float line2 = c_0_48710 + c_neg_0_18297 * diff;
+    float line3 = c_0_17614 + c_neg_0_04029 * diff;
+    float corr  = std::max(std::max(std::max(line1, line2), line3), 0.0f);
+    return std::max(min_v - corr, 0.0f);
+#else
     static const float c_0_69315   = bf16_to_fp32(16177); // 0.69315 (sFloat16b)
     static const float c_neg_0_4   = bf16_to_fp32(48844); // -0.4000 (sFloat16b)
     static const float c_0_65715   = bf16_to_fp32(16168); // 0.65715 (sFloat16b)
@@ -355,6 +378,7 @@ inline float approx_min_star_tensix(float a, float b) {
     float line2 = c_0_65715 + c_neg_0_328 * diff;
     float corr  = std::max(std::max(line1, line2), 0.0f);
     return std::max(min_v - corr, 0.0f);
+#endif
 }
 
 // ------------------------------------------------------------------------------
@@ -1013,6 +1037,11 @@ int run_monte_carlo_simulation(
     std::cout << "\n=================================================================" << std::endl;
     std::cout << " TENSIX 40-TILE FACE-ALIGNED LOCKSTEP STEPPER: MONTE CARLO" << std::endl;
     std::cout << " Precision Mode:    " << (tensix_precision ? "Tensix Hardware Bit-Exact (bfloat16 mantissa truncation)" : "Full FP32 Precision") << std::endl;
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+    std::cout << " Approx-Min* Model: Optimal 3-Piece Convex Hull (Phase 3 Enhanced)" << std::endl;
+#else
+    std::cout << " Approx-Min* Model: Certified 2-Piece Baseline (Dr. Jones MILCOM 2003)" << std::endl;
+#endif
     std::cout << " Noise Generator:   " << (use_tensix_noise ? ("Tensix Vector Box-Muller (Invocation: " + std::to_string(tensix_inv) + ", Start Batch: " + std::to_string(tensix_start_batch) + ")") : "Host Scalar Xoshiro128+") << std::endl;
     if (use_tensix_noise) {
         std::cout << " Channel Clamping:  " << (l_ch_max > 0.0f ? ("|L_ch| <= " + std::to_string(l_ch_max)) : "None (Unclamped)") << std::endl;
@@ -1393,6 +1422,11 @@ int main(int argc, char** argv) {
     std::cout << "=================================================================" << std::endl;
     std::cout << " TENSIX 40-TILE FACE-ALIGNED LOCKSTEP STEPPER" << std::endl;
     std::cout << " Precision Mode:    " << (tensix_precision ? "Tensix Hardware Bit-Exact (bfloat16 mantissa truncation)" : "Full FP32 Precision") << std::endl;
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+    std::cout << " Approx-Min* Model: Optimal 3-Piece Convex Hull (Phase 3 Enhanced)" << std::endl;
+#else
+    std::cout << " Approx-Min* Model: Certified 2-Piece Baseline (Dr. Jones MILCOM 2003)" << std::endl;
+#endif
     if (passthrough_mode) {
         std::cout << " Mode:              IDENTITY PASS-THROUGH (R_out=R_in, L_out=L_in)" << std::endl;
         std::cout << " Vnode Pattern:     OFFSET COUNTING NUMBERS (1024..3583)" << std::endl;

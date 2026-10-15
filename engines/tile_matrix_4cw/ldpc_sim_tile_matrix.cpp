@@ -419,6 +419,20 @@ inline float approx_min_star(float a, float b) {
     float max_v = std::max(a, b);
     float diff  = max_v - min_v;
 
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+    static const float c_0_67862     = bf16_to_fp32(16173); // 0x3F2D
+    static const float c_neg_0_39622 = bf16_to_fp32(48842); // 0xBECA
+    static const float c_0_48710     = bf16_to_fp32(16121); // 0x3EF9
+    static const float c_neg_0_18297 = bf16_to_fp32(48699); // 0xBE3B
+    static const float c_0_17614     = bf16_to_fp32(15924); // 0x3E34
+    static const float c_neg_0_04029 = bf16_to_fp32(48421); // 0xBD25
+
+    float line1 = c_0_67862 + c_neg_0_39622 * diff;
+    float line2 = c_0_48710 + c_neg_0_18297 * diff;
+    float line3 = c_0_17614 + c_neg_0_04029 * diff;
+    float corr  = std::max(std::max(std::max(line1, line2), line3), 0.0f);
+    return std::max(min_v - corr, 0.0f);
+#else
     // Exact SFPU immediate values matching TT-Metal sFloat16b compiler truncation:
     // 0.69315f -> 16177 (0x3F31)
     // -0.4000f -> 48844 (0xBECC)
@@ -433,6 +447,7 @@ inline float approx_min_star(float a, float b) {
     float line2 = c_0_65715 + c_neg_0_328 * diff;
     float corr  = std::max(std::max(line1, line2), 0.0f);
     return std::max(min_v - corr, 0.0f);
+#endif
 }
 
 // ------------------------------------------------------------------------------
@@ -531,6 +546,9 @@ void run_tile_matrix_on_hardware(
     reader_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
     writer_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
     compute_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
+#endif
+#if LDPC_USE_3PIECE_AMIN_STAR
+    compute_config.defines["LDPC_USE_3PIECE_AMIN_STAR"] = "1";
 #endif
 
     uint32_t num_tiles = (tile_limit > 0) ? tile_limit : schedule.size();
@@ -1308,6 +1326,9 @@ void run_waterfall_sweep(
             reader_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
             writer_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
             compute_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+#endif
+#if LDPC_USE_3PIECE_AMIN_STAR
+            compute_config.defines["LDPC_USE_3PIECE_AMIN_STAR"] = "1";
 #endif
 
             auto reader = CreateKernel(program, reader_path, core_range, reader_config);

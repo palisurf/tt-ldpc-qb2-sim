@@ -38,6 +38,10 @@ r_dataflow: DEFINES += -DLDPC_TEST_R_DATAFLOW_MODE=1
 r_dataflow: clean $(TARGET)
 	@echo "[R_DATAFLOW BUILD] Compiled $(TARGET) with LDPC_TEST_R_DATAFLOW_MODE=1"
 
+amin_3p: DEFINES += -DLDPC_USE_3PIECE_AMIN_STAR=1
+amin_3p: clean $(TARGET)
+	@echo "[3-PIECE AMIN* BUILD] Compiled $(TARGET) with LDPC_USE_3PIECE_AMIN_STAR=1"
+
 $(TARGET): $(OBJS)
 	@echo "[LINK] $@"
 	$(CXX) $(CXXFLAGS) $(OBJS) -o $@ $(LIBDIRS) $(LIBS)

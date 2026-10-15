@@ -320,22 +320,37 @@ inline uint16_t fp32_to_bf16_trunc(float f) {
 
 // ------------------------------------------------------------------------------
 // Dr. Jones' Branchless Approximate-Min* Formulation
+// Supports both Certified 2-Piece Baseline and Enhanced 3-Piece Convex Hull
 // ------------------------------------------------------------------------------
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+static bool g_use_3piece_amin = true;
+#else
+static bool g_use_3piece_amin = false;
+#endif
+
 // Model A: FP32 Precision (standard IEEE-754 24-bit mantissa)
 inline float approx_min_star_fp32(float a, float b) {
     float min_v = std::min(a, b);
     float max_v = std::max(a, b);
     float diff  = max_v - min_v;
 
-    static const float c_0_69315   = bf16_to_fp32(16177);
-    static const float c_neg_0_4   = bf16_to_fp32(48844);
-    static const float c_0_65715   = bf16_to_fp32(16168);
-    static const float c_neg_0_328 = bf16_to_fp32(48807);
+    if (g_use_3piece_amin) {
+        float line1 = 0.67862f - 0.39622f * diff;
+        float line2 = 0.48710f - 0.18297f * diff;
+        float line3 = 0.17614f - 0.04029f * diff;
+        float corr  = std::max(std::max(std::max(line1, line2), line3), 0.0f);
+        return std::max(min_v - corr, 0.0f);
+    } else {
+        static const float c_0_69315   = bf16_to_fp32(16177);
+        static const float c_neg_0_4   = bf16_to_fp32(48844);
+        static const float c_0_65715   = bf16_to_fp32(16168);
+        static const float c_neg_0_328 = bf16_to_fp32(48807);
 
-    float line1 = c_0_69315 + c_neg_0_4 * diff;
-    float line2 = c_0_65715 + c_neg_0_328 * diff;
-    float corr  = std::max(std::max(line1, line2), 0.0f);
-    return std::max(min_v - corr, 0.0f);
+        float line1 = c_0_69315 + c_neg_0_4 * diff;
+        float line2 = c_0_65715 + c_neg_0_328 * diff;
+        float corr  = std::max(std::max(line1, line2), 0.0f);
+        return std::max(min_v - corr, 0.0f);
+    }
 }
 
 // Model B: Tensix Hardware Bit-Exact Precision (Native bfloat16 SFPU emulation)
@@ -344,15 +359,30 @@ inline float approx_min_star_tensix(float a, float b) {
     float max_v = std::max(a, b);
     float diff  = max_v - min_v;
 
-    static const float c_0_69315   = bf16_to_fp32(16177); // 0.69315 (sFloat16b)
-    static const float c_neg_0_4   = bf16_to_fp32(48844); // -0.4000 (sFloat16b)
-    static const float c_0_65715   = bf16_to_fp32(16168); // 0.65715 (sFloat16b)
-    static const float c_neg_0_328 = bf16_to_fp32(48807); // -0.3280 (sFloat16b)
+    if (g_use_3piece_amin) {
+        static const float c_0_67862     = bf16_to_fp32(16173); // 0x3F2D
+        static const float c_neg_0_39622 = bf16_to_fp32(48842); // 0xBECA
+        static const float c_0_48710     = bf16_to_fp32(16121); // 0x3EF9
+        static const float c_neg_0_18297 = bf16_to_fp32(48699); // 0xBE3B
+        static const float c_0_17614     = bf16_to_fp32(15924); // 0x3E34
+        static const float c_neg_0_04029 = bf16_to_fp32(48421); // 0xBD25
 
-    float line1 = c_0_69315 + c_neg_0_4 * diff;
-    float line2 = c_0_65715 + c_neg_0_328 * diff;
-    float corr  = std::max(std::max(line1, line2), 0.0f);
-    return std::max(min_v - corr, 0.0f);
+        float line1 = c_0_67862 + c_neg_0_39622 * diff;
+        float line2 = c_0_48710 + c_neg_0_18297 * diff;
+        float line3 = c_0_17614 + c_neg_0_04029 * diff;
+        float corr  = std::max(std::max(std::max(line1, line2), line3), 0.0f);
+        return std::max(min_v - corr, 0.0f);
+    } else {
+        static const float c_0_69315   = bf16_to_fp32(16177); // 0.69315 (sFloat16b)
+        static const float c_neg_0_4   = bf16_to_fp32(48844); // -0.4000 (sFloat16b)
+        static const float c_0_65715   = bf16_to_fp32(16168); // 0.65715 (sFloat16b)
+        static const float c_neg_0_328 = bf16_to_fp32(48807); // -0.3280 (sFloat16b)
+
+        float line1 = c_0_69315 + c_neg_0_4 * diff;
+        float line2 = c_0_65715 + c_neg_0_328 * diff;
+        float corr  = std::max(std::max(line1, line2), 0.0f);
+        return std::max(min_v - corr, 0.0f);
+    }
 }
 
 // ------------------------------------------------------------------------------
@@ -888,6 +918,10 @@ int run_monte_carlo_simulation(
             use_tensix_noise = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') tensix_inv = std::stoul(argv[++i]);
             if (i + 1 < argc && argv[i + 1][0] != '-') tensix_start_batch = std::stoul(argv[++i]);
+        } else if (arg == "--use-3piece" || arg == "--amin-3p") {
+            g_use_3piece_amin = true;
+        } else if (arg == "--use-2piece" || arg == "--amin-2p") {
+            g_use_3piece_amin = false;
         } else if (arg == "--no-ch-clip" || arg == "--unclipped") {
             l_ch_max = 0.0f;
         } else if (arg == "--ch-clip" || arg == "--l-ch-max") {
@@ -898,6 +932,7 @@ int run_monte_carlo_simulation(
     std::cout << "\n=================================================================" << std::endl;
     std::cout << " TENSIX 40-TILE FACE-ALIGNED LOCKSTEP STEPPER: MONTE CARLO" << std::endl;
     std::cout << " Precision Mode:    " << (tensix_precision ? "Tensix Hardware Bit-Exact (bfloat16 mantissa truncation)" : "Full FP32 Precision") << std::endl;
+    std::cout << " Approx-Min* Model: " << (g_use_3piece_amin ? "Optimal 3-Piece Convex Hull (Phase 3 Enhanced)" : "Certified 2-Piece Baseline (Dr. Jones MILCOM 2003)") << std::endl;
     std::cout << " Noise Generator:   " << (use_tensix_noise ? ("Tensix Vector Box-Muller (Invocation: " + std::to_string(tensix_inv) + ", Start Batch: " + std::to_string(tensix_start_batch) + ")") : "Host Scalar Xoshiro128+") << std::endl;
     if (use_tensix_noise) {
         std::cout << " Channel Clamping:  " << (l_ch_max > 0.0f ? ("|L_ch| <= " + std::to_string(l_ch_max)) : "None (Unclipped)") << std::endl;
@@ -1180,12 +1215,17 @@ int main(int argc, char** argv) {
             tensix_precision = false;
         } else if (std::string(argv[i]) == "--tensix-precision") {
             tensix_precision = true;
+        } else if (std::string(argv[i]) == "--use-3piece" || std::string(argv[i]) == "--amin-3p") {
+            g_use_3piece_amin = true;
+        } else if (std::string(argv[i]) == "--use-2piece" || std::string(argv[i]) == "--amin-2p") {
+            g_use_3piece_amin = false;
         }
     }
 
     std::cout << "=================================================================" << std::endl;
     std::cout << " TENSIX 40-TILE FACE-ALIGNED LOCKSTEP STEPPER" << std::endl;
     std::cout << " Precision Mode:    " << (tensix_precision ? "Tensix Hardware Bit-Exact (bfloat16 mantissa truncation)" : "Full FP32 Precision") << std::endl;
+    std::cout << " Approx-Min* Model: " << (g_use_3piece_amin ? "Optimal 3-Piece Convex Hull (Phase 3 Enhanced)" : "Certified 2-Piece Baseline (Dr. Jones MILCOM 2003)") << std::endl;
     if (passthrough_mode) {
         std::cout << " Mode:              IDENTITY PASS-THROUGH (R_out=R_in, L_out=L_in)" << std::endl;
         std::cout << " Vnode Pattern:     OFFSET COUNTING NUMBERS (1024..3583)" << std::endl;
