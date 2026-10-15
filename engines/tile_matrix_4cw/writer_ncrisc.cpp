@@ -370,11 +370,11 @@ void kernel_main() {
         // Residual Bit Error Check on Information Bits ONLY for unconverged codewords
         cw_errs[0] = 0; cw_errs[1] = 0; cw_errs[2] = 0; cw_errs[3] = 0;
         if (active_mask != 0) {
-            for (uint32_t v = 0; v < 1024; ++v) {
-                uint32_t off = get_tile_vnode_byte_offset(v);
-                const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off);
-                uint32_t w0 = p32[0];
-                uint32_t w1 = p32[1];
+            const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr);
+            #pragma GCC unroll 4
+            for (uint32_t i = 0; i < 2048; i += 2) {
+                uint32_t w0 = p32[i + 0];
+                uint32_t w1 = p32[i + 1];
                 if (active_mask & 1) cw_errs[0] += ((w0 >> 15) & 1);
                 if (active_mask & 2) cw_errs[1] += (w0 >> 31);
                 if (active_mask & 4) cw_errs[2] += ((w1 >> 15) & 1);

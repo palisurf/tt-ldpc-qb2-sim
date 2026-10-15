@@ -665,11 +665,12 @@ inline float approx_min_star_scalar(float a, float b) {
 // ------------------------------------------------------------------------------
 
 inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_24, const char* vnode_bytes_ptr) {
-    auto* dst_face = reinterpret_cast<uint32_t*>(dst_face_addr);
+    auto* dst_even = reinterpret_cast<uint32_t*>(dst_face_addr);
+    const uint32_t* p_h = p_hoff_24;
+
+    #pragma GCC unroll 6
     for (uint32_t d = 0; d < 6; ++d) {
-        auto* dst_even = dst_face + d * 16;
-        auto* dst_odd  = dst_even + 8;
-        const uint32_t* p_h = p_hoff_24 + d * 4;
+        auto* dst_odd = dst_even + 8;
 
         // Block 0: Pairs 0 and 1 (8 words: 4 even + 4 odd)
         {
@@ -686,13 +687,10 @@ inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_2
             const auto* s1_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_e);
             const auto* s1_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_o);
 
-            uint32_t e0 = s0_e[0]; uint32_t e1 = s0_e[1];
-            uint32_t e2 = s1_e[0]; uint32_t e3 = s1_e[1];
-            uint32_t o0 = s0_o[0]; uint32_t o1 = s0_o[1];
-            uint32_t o2 = s1_o[0]; uint32_t o3 = s1_o[1];
-
-            dst_even[0] = e0; dst_even[1] = e1; dst_even[2] = e2; dst_even[3] = e3;
-            dst_odd[0]  = o0; dst_odd[1]  = o1; dst_odd[2]  = o2; dst_odd[3]  = o3;
+            dst_even[0] = s0_e[0]; dst_even[1] = s0_e[1];
+            dst_even[2] = s1_e[0]; dst_even[3] = s1_e[1];
+            dst_odd[0]  = s0_o[0]; dst_odd[1]  = s0_o[1];
+            dst_odd[2]  = s1_o[0]; dst_odd[3]  = s1_o[1];
         }
 
         // Block 1: Pairs 2 and 3 (8 words: 4 even + 4 odd)
@@ -710,47 +708,45 @@ inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_2
             const auto* s3_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_e);
             const auto* s3_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_o);
 
-            uint32_t e4 = s2_e[0]; uint32_t e5 = s2_e[1];
-            uint32_t e6 = s3_e[0]; uint32_t e7 = s3_e[1];
-            uint32_t o4 = s2_o[0]; uint32_t o5 = s2_o[1];
-            uint32_t o6 = s3_o[0]; uint32_t o7 = s3_o[1];
-
-            dst_even[4] = e4; dst_even[5] = e5; dst_even[6] = e6; dst_even[7] = e7;
-            dst_odd[4]  = o4; dst_odd[5]  = o5; dst_odd[6]  = o6; dst_odd[7]  = o7;
+            dst_even[4] = s2_e[0]; dst_even[5] = s2_e[1];
+            dst_even[6] = s3_e[0]; dst_even[7] = s3_e[1];
+            dst_odd[4]  = s2_o[0]; dst_odd[5]  = s2_o[1];
+            dst_odd[6]  = s3_o[0]; dst_odd[7]  = s3_o[1];
         }
+
+        dst_even += 16;
+        p_h += 4;
     }
 
     // Zero out the 4 padding rows (Rows 12..15 = 128 bytes = 32 uint32_t words) of this face
-    auto* pad = dst_face + 12 * 8;
-    #pragma GCC unroll 4
+    auto* pad = dst_even;
+    #pragma GCC unroll 8
     for (int i = 0; i < 32; ++i) {
         pad[i] = 0;
     }
 }
 
 inline void scatter_face_24pairs_fast(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr) {
-    const auto* src_face = reinterpret_cast<const uint32_t*>(src_face_addr);
+    const auto* src_even = reinterpret_cast<const uint32_t*>(src_face_addr);
+    const uint32_t* p_h = p_hoff_24;
+
+    #pragma GCC unroll 6
     for (uint32_t d = 0; d < 6; ++d) {
-        const auto* src_even = src_face + d * 16;
-        const auto* src_odd  = src_even + 8;
-        const uint32_t* p_h = p_hoff_24 + d * 4;
+        const auto* src_even64 = reinterpret_cast<const uint64_t*>(src_even);
+        const auto* src_odd64  = reinterpret_cast<const uint64_t*>(src_even + 8);
 
         #pragma GCC unroll 4
         for (uint32_t p = 0; p < 4; ++p) {
             uint32_t off = p_h[p];
-            auto* d_e = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off & 0xFFFF));
-            auto* d_o = reinterpret_cast<uint32_t*>(vnode_out_ptr + (off >> 16));
+            auto* d_e64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off & 0xFFFF));
+            auto* d_o64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off >> 16));
 
-            uint32_t e0 = src_even[2 * p + 0];
-            uint32_t e1 = src_even[2 * p + 1];
-            d_e[0] = e0;
-            d_e[1] = e1;
-
-            uint32_t o0 = src_odd[2 * p + 0];
-            uint32_t o1 = src_odd[2 * p + 1];
-            d_o[0] = o0;
-            d_o[1] = o1;
+            *d_e64 = src_even64[p];
+            *d_o64 = src_odd64[p];
         }
+
+        src_even += 16;
+        p_h += 4;
     }
 }
 
