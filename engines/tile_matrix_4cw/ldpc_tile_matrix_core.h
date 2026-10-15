@@ -679,21 +679,37 @@ struct alignas(16) TileMatrixBatchStats {
 
 // ------------------------------------------------------------------------------
 // Approximate-Min* Formulation (Dr. Christopher R. Jones, MILCOM 2003)
-// 2-Region Piecewise Linear Correction:
-// g(Δ) = 0.69315 - 0.40 * Δ        if Δ < 0.5
-//        0.49315 - 0.328 * (Δ - 0.5) if 0.5 <= Δ < 2.0
-//        0.0                         if Δ >= 2.0
+// 2-Region Piecewise Linear Correction (or 3-Region when LDPC_USE_3PIECE_AMIN_STAR is defined):
+// 2-Piece:
+//   g(Δ) = 0.69315 - 0.40 * Δ        if Δ < 0.5
+//          0.49315 - 0.328 * (Δ - 0.5) if 0.5 <= Δ < 2.0
+//          0.0                         if Δ >= 2.0
+// 3-Piece (Optimal Convex Hull):
+//   Piece 1: y = 0.67862 - 0.39622 * Δ
+//   Piece 2: y = 0.48710 - 0.18297 * Δ
+//   Piece 3: y = 0.17614 - 0.04029 * Δ
 // ------------------------------------------------------------------------------
 inline float approx_min_star_scalar(float a, float b) {
     float min_val = (a < b) ? a : b;
     float max_val = (a > b) ? a : b;
     float diff = max_val - min_val;
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+    float line1 = 0.67862f - 0.39622f * diff;
+    float line2 = 0.48710f - 0.18297f * diff;
+    float line3 = 0.17614f - 0.04029f * diff;
+    float corr = (line1 > line2) ? line1 : line2;
+    if (line3 > corr) corr = line3;
+    if (corr < 0.0f) corr = 0.0f;
+    float res = min_val - corr;
+    return (res > 0.0f) ? res : 0.0f;
+#else
     float line1 = 0.69315f - 0.40f * diff;
     float line2 = 0.65715f - 0.328f * diff;
     float corr = (line1 > line2) ? line1 : line2;
     if (corr < 0.0f) corr = 0.0f;
     float res = min_val - corr;
     return (res > 0.0f) ? res : 0.0f;
+#endif
 }
 
 // ------------------------------------------------------------------------------

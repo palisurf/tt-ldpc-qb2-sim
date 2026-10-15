@@ -1,5 +1,7 @@
 # Compiled Binaries & Test Artifacts (executables without extensions)
 ldpc_sim
+ldpc_sim_scalar
+**/ldpc_sim_scalar
 ldpc_sim_tile_matrix
 **/ldpc_sim_tile_matrix
 test_*
@@ -43,6 +45,8 @@ Results/*.png
 Results/**/*.log
 Results/*backup*/
 Results/Scalar_5w/
+tests/Results/
+**/Results/
 *.png
 
 # Whitelist validation artifacts for BPSK noise benchmark

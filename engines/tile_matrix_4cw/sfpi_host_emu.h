@@ -564,12 +564,23 @@ static const vInt vConstTileId = make_vConstTileId();
 // Branchless Approximate-Min* (Verbatim matching compute_trisc.cpp)
 // ------------------------------------------------------------------------------
 sfpi_inline vFloat sfpi_amin_star_branchless(vFloat a, vFloat b) {
+#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+    auto [min_v, max_v] = sfpi::min_max(a, b);
+    vFloat diff   = max_v - min_v;
+    // Fold sequentially to keep active register pressure low
+    vFloat corr   = vFloat(sFloat16b(0.67862f)) + vFloat(sFloat16b(-0.39622f)) * diff;
+    corr = sfpi::max(corr, vFloat(sFloat16b(0.48710f)) + vFloat(sFloat16b(-0.18297f)) * diff);
+    corr = sfpi::max(corr, vFloat(sFloat16b(0.17614f)) + vFloat(sFloat16b(-0.04029f)) * diff);
+    corr = sfpi::max(corr, 0.0f);
+    return sfpi::max(min_v - corr, 0.0f);
+#else
     auto [min_v, max_v] = sfpi::min_max(a, b);
     vFloat diff   = max_v - min_v;
     vFloat line1  = vFloat(sFloat16b(0.69315f)) + vFloat(sFloat16b(-0.4000f)) * diff;
     vFloat line2  = vFloat(sFloat16b(0.65715f)) + vFloat(sFloat16b(-0.3280f)) * diff;
     vFloat corr   = sfpi::max(sfpi::max(line1, line2), 0.0f);
     return sfpi::max(min_v - corr, 0.0f);
+#endif
 }
 
 // ------------------------------------------------------------------------------
