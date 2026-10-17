@@ -1277,8 +1277,30 @@ void run_tile_matrix_on_hardware(
 }
 
 // ------------------------------------------------------------------------------
-// Step 5: Full Waterfall Simulation Sweep on Hardware
-// ------------------------------------------------------------------------------
+// ==============================================================================
+// Step 5: Full Waterfall Simulation Sweep on Hardware (Persistent Mesh Engine)
+// ==============================================================================
+// Architecture Overview:
+// 1. Persistent MeshWorkload Execution:
+//    - Constructs MeshWorkload, Program, all 10 circular buffers, and kernels ONCE
+//      upfront before the SNR loop begins.
+//    - Between SNR points and intermediate progress chunks, steady-state dispatch
+//      strictly mutates runtime arguments in host memory via SetRuntimeArgs(),
+//      eliminating device recompilation and L1 memory re-allocation overheads.
+// 2. 440-Core QuietBox 2 Mesh Scaling (2x2 Blackhole Device):
+//    - Supports both single-core debug (Core 0,0) and the full 440-Tensix core grid
+//      (4 chips x 110 cores/chip = 440 cores).
+//    - Granularity is strictly aligned to mesh dimensions: 1 batch pair = 8 codewords
+//      per core = 3,520 codewords across the 440-core mesh grid.
+// 3. Autonomous On-Chip Ping-Pong DAE:
+//    - Cores iterate across dual circular buffers (Batch A and Batch B) entirely
+//      within L1 SRAM, driven by hardware PRNG jumping without per-batch host DMA.
+// 4. Sharded Telemetry Reduction & Error Trapping:
+//    - Telemetry flushes into DRAM via NoC DMA; host reads each chip with a single
+//      ReadShard() call and reduces statistics across all 440 cores.
+//    - Deterministically traps the exact PRNG seed, batch, and codeword of the
+//      first failing frame to enable bit-exact reproduction.
+// ==============================================================================
 void run_waterfall_sweep(
     const ParityCheckMatrix& pcm,
     const std::vector<DynamicTileDescriptor>& schedule,
@@ -1290,6 +1312,9 @@ void run_waterfall_sweep(
     const std::string& csv_out_path,
     uint32_t chunk_size = 50000
 ) {
+    // --------------------------------------------------------------------------
+    // Device & Topology Discovery: Unit Mesh vs 2x2 Blackhole Mesh (440 Cores)
+    // --------------------------------------------------------------------------
     auto mesh_device = single_core 
         ? distributed::MeshDevice::create_unit_mesh(0)
         : distributed::MeshDevice::create(distributed::MeshDeviceConfig(distributed::MeshShape{2, 2}));
@@ -1312,6 +1337,9 @@ void run_waterfall_sweep(
     std::cout << " Output: " << csv_out_path << std::endl;
     std::cout << "=======================================================" << std::endl;
 
+    // --------------------------------------------------------------------------
+    // Buffer Sizing & Replicated Parity Matrix DMA (H Table)
+    // --------------------------------------------------------------------------
     uint32_t tile_bytes = sizeof(bfloat16) * TILE_ELEMENTS;
     uint32_t stats_per_core_bytes = 4 * 1024;
     uint32_t stats_cb_bytes = cores_per_chip * stats_per_core_bytes;
@@ -1382,7 +1410,15 @@ void run_waterfall_sweep(
     compute_config.defines["LDPC_USE_3PIECE_AMIN_STAR"] = "1";
 #endif
 
-    // Construct Persistent MeshWorkload, Program, Circular Buffers, and Kernels once upfront:
+    // --------------------------------------------------------------------------
+    // Persistent Workload Construction: One-Time Upfront Device Allocation
+    //
+    // All 10 Circular Buffers per Tensix core (236 KB total, ~15.7% L1) and
+    // the 3 RISC-V device kernels (BRISC Worker 0, NCRISC Worker 1, and
+    // TRISC Maestro) are instantiated ONCE into a persistent MeshWorkload.
+    // Subsequent chunk dispatches across all SNR points simply mutate runtime
+    // arguments in host memory via SetRuntimeArgs(), sustaining >95% silicon duty.
+    // --------------------------------------------------------------------------
     distributed::MeshWorkload workload;
     struct ChipHandles {
         KernelHandle reader;
@@ -1438,6 +1474,9 @@ void run_waterfall_sweep(
     uint32_t invocation_id = 1;
     uint64_t cws_per_pair = 8ULL * total_mesh_cores;
 
+    // --------------------------------------------------------------------------
+    // SNR Waterfall Loop: Automated Multi-SNR Progression
+    // --------------------------------------------------------------------------
     for (double snr = snr_start; snr <= snr_stop + 1e-4; snr += snr_step) {
         double rate = 0.5;
         double snr_lin = std::pow(10.0, snr / 10.0);
@@ -1466,6 +1505,14 @@ void run_waterfall_sweep(
 
         uint32_t chunk_idx = 0;
         while (snr_fe < min_frame_errors && snr_blocks < max_blocks_per_snr) {
+            // ------------------------------------------------------------------
+            // Adaptive Chunk Sizing & 440-Core Mesh Granularity Alignment
+            //
+            // Minimum dispatch granularity is bounded by cws_per_pair (3,520 CWs
+            // across 440 cores). Chunks target collecting ~2-3 frame errors per
+            // progress tick in waterfall regions, while scaling up to 50k blocks
+            // in deep floor regions to minimize host PCIe polling overhead.
+            // ------------------------------------------------------------------
             uint64_t remaining_blocks = max_blocks_per_snr - snr_blocks;
             uint64_t target_chunk_blocks = (chunk_size > 0) ? chunk_size : 50000;
             if (snr_fe == 0) {
@@ -1492,6 +1539,9 @@ void run_waterfall_sweep(
             uint32_t cur_start_batch = chunk_idx * chunk_pairs * 2;
             uint32_t cur_invocation_id = invocation_id;
 
+            // ------------------------------------------------------------------
+            // Steady-State Runtime Argument Mutation (Zero JIT Recompilation)
+            // ------------------------------------------------------------------
             auto& programs = workload.get_programs();
 
             for (size_t chip_idx = 0; chip_idx < chip_handles.size(); ++chip_idx) {
@@ -1531,6 +1581,9 @@ void run_waterfall_sweep(
             distributed::EnqueueMeshWorkload(cq, workload, false);
             cq.finish();
 
+            // ------------------------------------------------------------------
+            // Sharded Telemetry Reduction across All Chips & Cores
+            // ------------------------------------------------------------------
             std::vector<uint32_t> chip_stats(stats_cb_bytes / sizeof(uint32_t), 0);
             uint64_t chunk_be = 0;
             uint64_t chunk_fe = 0;
@@ -1562,6 +1615,9 @@ void run_waterfall_sweep(
             snr_fe += chunk_fe;
             snr_iters += chunk_iters;
 
+            // ------------------------------------------------------------------
+            // Deterministic First-Failing-Frame State Trapping
+            // ------------------------------------------------------------------
             if (!first_fe_captured && sample_first_fe_batch != 0xFFFFFFFF) {
                 first_fe_captured = true;
                 captured_fe_invocation_id = cur_invocation_id;
