@@ -37,15 +37,32 @@ inline uint32_t dst_reg_to_element_index(uint32_t reg_idx, uint32_t lane) {
     return f * 256 + row_in_face * 16 + col_in_face;
 }
 
-// Golden scalar Approximate-Min* function (matches SFPU branchless spline)
+// Golden scalar Approximate-Min* function (matches SFPU branchless spline or LUT)
 inline float gold_approx_min_star(float a, float b) {
     float min_v = std::min(a, b);
     float max_v = std::max(a, b);
     float diff  = max_v - min_v;
+#if defined(LDPC_USE_SFPU_LUT)
+    float slope = 0.0f;
+    float intercept = 0.0f;
+    if (diff < 0.5f) {
+        slope = -0.4000f;
+        intercept = 0.69315f;
+    } else if (diff < 2.0f) {
+        slope = -0.3280f;
+        intercept = 0.65715f;
+    } else {
+        slope = 0.0f;
+        intercept = 0.0f;
+    }
+    float corr = slope * diff + intercept;
+    return std::max(min_v - corr, 0.0f);
+#else
     float line1 = 0.69315f - 0.4000f * diff;
     float line2 = 0.65715f - 0.3280f * diff;
     float corr  = std::max(std::max(line1, line2), 0.0f);
     return std::max(min_v - corr, 0.0f);
+#endif
 }
 
 // Golden scalar Degree-6 check node
@@ -288,9 +305,13 @@ int main() {
         program, "tests/unit_sfpu/writer_unit_tile.cpp", core_range,
         DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default}
     );
+    ComputeConfig compute_config{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = true};
+#if defined(LDPC_USE_SFPU_LUT)
+    compute_config.defines["LDPC_USE_SFPU_LUT"] = "1";
+#endif
     auto compute = CreateKernel(
         program, "tests/unit_sfpu/compute_unit_sfpu_amin_star.cpp", core_range,
-        ComputeConfig{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = true}
+        compute_config
     );
 
     std::vector<uint32_t> r_args = { static_cast<uint32_t>(in_dram->address()), 0, tile_bytes };
