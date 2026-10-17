@@ -1516,16 +1516,19 @@ void run_waterfall_sweep(
             uint64_t remaining_blocks = max_blocks_per_snr - snr_blocks;
             uint64_t target_chunk_blocks = (chunk_size > 0) ? chunk_size : 50000;
             if (snr_fe == 0) {
-                if (snr_blocks >= 100000) target_chunk_blocks = 50000;
-                else if (snr_blocks >= 20000) target_chunk_blocks = 20000;
-                else if (snr_blocks >= 5000)  target_chunk_blocks = 5000;
-                else if (snr_blocks >= 1000)  target_chunk_blocks = 1000;
+                if (snr_blocks >= 100000000ULL) target_chunk_blocks = std::max<uint64_t>(chunk_size, 10000000ULL);
+                else if (snr_blocks >= 10000000ULL) target_chunk_blocks = std::max<uint64_t>(chunk_size, 2000000ULL);
+                else if (snr_blocks >= 1000000ULL)  target_chunk_blocks = std::max<uint64_t>(chunk_size, 500000ULL);
+                else if (snr_blocks >= 100000ULL)   target_chunk_blocks = std::max<uint64_t>(chunk_size, 100000ULL);
+                else if (snr_blocks >= 20000)    target_chunk_blocks = 20000;
+                else if (snr_blocks >= 5000)     target_chunk_blocks = 5000;
+                else if (snr_blocks >= 1000)     target_chunk_blocks = 1000;
                 else target_chunk_blocks = 200;
             } else {
                 double est_fer = static_cast<double>(snr_fe) / snr_blocks;
                 uint64_t blocks_for_target = static_cast<uint64_t>(2.5 / est_fer);
                 if (blocks_for_target < 200) blocks_for_target = 200;
-                if (blocks_for_target > 50000) blocks_for_target = 50000;
+                if (blocks_for_target > 5000000ULL) blocks_for_target = 5000000ULL;
                 target_chunk_blocks = blocks_for_target;
             }
 
@@ -1660,25 +1663,30 @@ void run_waterfall_sweep(
             double cur_fer = (double)snr_fe / snr_blocks;
             double cur_ber = (double)snr_be / (snr_blocks * 1024.0);
             double cur_iter = (double)snr_iters / snr_blocks;
+            auto cur_t = std::chrono::high_resolution_clock::now();
+            double cur_elapsed = std::chrono::duration<double>(cur_t - snr_t0).count();
+            double cur_msps = (cur_elapsed > 0) ? ((double)snr_blocks * 2048.0 / (cur_elapsed * 1e6)) : 0.0;
 
             static const bool is_tty = isatty(fileno(stdout));
             if (is_tty) {
                 std::cout << "\r  [" << std::fixed << std::setprecision(2) << snr << " dB] Blocks: "
-                          << std::setw(8) << snr_blocks << "/" << max_blocks_per_snr
-                          << " | FE: " << std::setw(4) << snr_fe << "/" << min_frame_errors
+                          << std::setw(11) << snr_blocks << "/" << max_blocks_per_snr
+                          << " | FE: " << std::setw(3) << snr_fe << "/" << min_frame_errors
                           << " | BE: " << std::setw(8) << snr_be
                           << " | FER: " << std::scientific << std::setprecision(3) << cur_fer
                           << " | BER: " << cur_ber
                           << " | Iter: " << std::fixed << std::setprecision(2) << cur_iter
+                          << " | " << std::setprecision(1) << cur_msps << " Msps (" << static_cast<int>(cur_elapsed) << "s)"
                           << std::flush;
             } else {
                 std::cout << "  [" << std::fixed << std::setprecision(2) << snr << " dB] Blocks: "
-                          << std::setw(8) << snr_blocks << "/" << max_blocks_per_snr
-                          << " | FE: " << std::setw(4) << snr_fe << "/" << min_frame_errors
+                          << std::setw(11) << snr_blocks << "/" << max_blocks_per_snr
+                          << " | FE: " << std::setw(3) << snr_fe << "/" << min_frame_errors
                           << " | BE: " << std::setw(8) << snr_be
                           << " | FER: " << std::scientific << std::setprecision(3) << cur_fer
                           << " | BER: " << cur_ber
                           << " | Iter: " << std::fixed << std::setprecision(2) << cur_iter
+                          << " | " << std::setprecision(1) << cur_msps << " Msps (" << static_cast<int>(cur_elapsed) << "s)"
                           << std::endl;
             }
         }
