@@ -5,8 +5,17 @@
 // ==============================================================================
 // Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Engine
 // Component: Data Movement Kernel 1 (NCRISC - Worker 1: Dual Gather & Dual Scatter)
-// Architecture: Decoupled Access-Execute (DAE) with Native 32x32 Tensix Tiles
+// Architecture: Centralized TRISC1 Maestro with Bounded Satellite Autonomy (DAE)
 // Target: Tenstorrent Blackhole (440 Tensix Cores, 2,200 RISC-V Processors)
+// Specification: docs/MD_files/CENTRALIZED_TRISC1_ORCHESTRATOR_AND_BOUNDED_AUTONOMY_SPECIFICATION.md
+//
+// Key Responsibilities:
+// 1. Face 1 Gather & Scatter: Autonomously gathers Face 1 (lanes 16..31, checks 0..3)
+//    and scatters updated posterior LLRs directly into L1 SRAM variable node arrays.
+// 2. Parity Node Early Termination Scan: On Tile 39, scans sign bits across 1,024
+//    parity bits for CW0..3 and reports the 4-bit error mask to SyncSlot::PARITY_REPORT_W1.
+// 3. Batch Telemetry & Inter-Pair Control: Resets TRISC1_CMD to CMD_IDLE at pair
+//    boundaries, publishes BATCH_READY, and records final cumulative telemetry to stats.
 // ==============================================================================
 
 static inline uint32_t get_wall_clock() {
@@ -140,6 +149,7 @@ void kernel_main() {
         sync_flags[SyncSlot::BRISC_SCAN_DONE_B] = 0;
         sync_flags[SyncSlot::VNODE_L1_ADDR_A]   = vnode_l1_a;
         sync_flags[SyncSlot::VNODE_L1_ADDR_B]   = vnode_l1_b;
+        sync_flags[SyncSlot::TRISC1_CMD]        = static_cast<uint32_t>(MaestroCmd::CMD_IDLE);
 
         // Tri-core batch rendezvous barrier
         sync_flags[SyncSlot::BATCH_BARRIER_NCRISC] = epoch + pair + 1;
@@ -156,8 +166,12 @@ void kernel_main() {
         // Signal all workers that channel observations are 100% ready in L1
         sync_flags[SyncSlot::BATCH_READY] = epoch + pair + 1;
 
+        // Satellite Pre-Step Gate: Wait for TRISC1 Maestro to launch Step 0
+        while (sync_flags[SyncSlot::TRISC1_CMD] != static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC) ||
+               sync_flags[SyncSlot::TRISC1_GRANT_STEP] < pair * total_steps + 1) { }
+
         // ----------------------------------------------------------------------
-        // Interleaved Dual-Batch DAE Gather/Scatter Engine (Zero-RAW Direct Store)
+        // Interleaved Dual-Batch DAE Gather/Scatter Engine (Bounded Autonomy)
         // ----------------------------------------------------------------------
         for (uint32_t k = 0; k < total_steps; ++k) {
             uint32_t bar = pair * total_steps + k + 1;
@@ -166,9 +180,22 @@ void kernel_main() {
             uint32_t vnode_l1 = vnodes[b_dae];
             const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
             char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
-            uint8_t active_mask = (b_dae == 0) ? active_mask_a : active_mask_b;
 
-            // 1. Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
+            // 1. Wait for TRISC1 Macro Step Grant
+            while (sync_flags[SyncSlot::TRISC1_GRANT_STEP] < bar) {
+                if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+                    break;
+                }
+            }
+            if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+                break;
+            }
+
+            uint8_t active_mask = static_cast<uint8_t>(
+                (b_dae == 0) ? sync_flags[SyncSlot::ACTIVE_MASK_A] : sync_flags[SyncSlot::ACTIVE_MASK_B]
+            );
+
+            // 2. Autonomous Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
             if (s_dae >= 1 && (s_dae - 1) < max_steps) {
                 uint32_t t_w0 = get_wall_clock();
                 uint32_t active_out_cb = cb_scat_out[b_dae];
@@ -193,9 +220,10 @@ void kernel_main() {
                 while (sync_flags[SyncSlot::SCATTER_DONE_T0] < bar) { }
                 while (sync_flags[SyncSlot::SCATTER_DONE_T2] < bar) { }
                 cb_pop_front(active_out_cb, 1);
+                sync_flags[SyncSlot::SCATTER_DONE_W1] = bar;
                 cycles_scatter += (get_wall_clock() - t_s0);
 
-                // Check node iteration completion scan on Parity Nodes
+                // Autonomous Check node iteration completion scan on Parity Nodes (Tile 39)
                 if (t_scat == num_tiles - 1) {
                     uint32_t t_es0 = get_wall_clock();
                     uint32_t mask_err01 = ((active_mask & 1) ? 0x00008000 : 0) | ((active_mask & 2) ? 0x80000000 : 0);
@@ -221,44 +249,18 @@ void kernel_main() {
                         }
                     }
 
-                    uint32_t cur_iter = s_scat / num_tiles;
-                    if (b_dae == 0) {
-                        while (sync_flags[SyncSlot::BRISC_SCAN_DONE_A] < bar) { }
-                        uint32_t total_err_cw01 = (ncrisc_err01 & mask_err01) | sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01_A];
-                        uint32_t total_err_cw23 = (ncrisc_err23 & mask_err23) | sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23_A];
-                        if ((active_mask_a & 1) && (total_err_cw01 & 0x00008000) == 0) { iter_converged_a[0] = cur_iter + 1; active_mask_a &= ~1; }
-                        if ((active_mask_a & 2) && (total_err_cw01 & 0x80000000) == 0) { iter_converged_a[1] = cur_iter + 1; active_mask_a &= ~2; }
-                        if ((active_mask_a & 4) && (total_err_cw23 & 0x00008000) == 0) { iter_converged_a[2] = cur_iter + 1; active_mask_a &= ~4; }
-                        if ((active_mask_a & 8) && (total_err_cw23 & 0x80000000) == 0) { iter_converged_a[3] = cur_iter + 1; active_mask_a &= ~8; }
-                        sync_flags[SyncSlot::ACTIVE_MASK_A] = active_mask_a;
-                        if (active_mask_a == 0 && active_mask_b == 0) {
-                            sync_flags[SyncSlot::EARLY_TERMINATION] = 1;
-                        }
-                        sync_flags[SyncSlot::ITER_DONE_A] = bar;
-                    } else {
-                        while (sync_flags[SyncSlot::BRISC_SCAN_DONE_B] < bar) { }
-                        uint32_t total_err_cw01 = (ncrisc_err01 & mask_err01) | sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01_B];
-                        uint32_t total_err_cw23 = (ncrisc_err23 & mask_err23) | sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23_B];
-                        if ((active_mask_b & 1) && (total_err_cw01 & 0x00008000) == 0) { iter_converged_b[0] = cur_iter + 1; active_mask_b &= ~1; }
-                        if ((active_mask_b & 2) && (total_err_cw01 & 0x80000000) == 0) { iter_converged_b[1] = cur_iter + 1; active_mask_b &= ~2; }
-                        if ((active_mask_b & 4) && (total_err_cw23 & 0x00008000) == 0) { iter_converged_b[2] = cur_iter + 1; active_mask_b &= ~4; }
-                        if ((active_mask_b & 8) && (total_err_cw23 & 0x80000000) == 0) { iter_converged_b[3] = cur_iter + 1; active_mask_b &= ~8; }
-                        sync_flags[SyncSlot::ACTIVE_MASK_B] = active_mask_b;
-                        if (active_mask_a == 0 && active_mask_b == 0) {
-                            sync_flags[SyncSlot::EARLY_TERMINATION] = 1;
-                        }
-                        sync_flags[SyncSlot::ITER_DONE_B] = bar;
-                    }
+                    // Post 4-bit parity error mask to TRISC1 Maestro
+                    uint32_t parity_err_mask = 0;
+                    if ((ncrisc_err01 & 0x00008000) && (active_mask & 1)) parity_err_mask |= 1;
+                    if ((ncrisc_err01 & 0x80000000) && (active_mask & 2)) parity_err_mask |= 2;
+                    if ((ncrisc_err23 & 0x00008000) && (active_mask & 4)) parity_err_mask |= 4;
+                    if ((ncrisc_err23 & 0x80000000) && (active_mask & 8)) parity_err_mask |= 8;
+                    sync_flags[SyncSlot::PARITY_REPORT_W1] = parity_err_mask;
                     cycles_error_scan += (get_wall_clock() - t_es0);
                 }
             }
 
-            // Early termination check: Release batch pair when both batches have converged
-            if (sync_flags[SyncSlot::EARLY_TERMINATION]) {
-                break;
-            }
-
-            // 2. Gather Stage: Gather current tile s_dae of Batch b_dae
+            // 3. Autonomous Gather Stage: Gather current tile s_dae of Batch b_dae
             if (s_dae < max_steps) {
                 uint32_t t_g0 = get_wall_clock();
                 while (sync_flags[SyncSlot::GATHER_START] < bar) { }
@@ -277,6 +279,15 @@ void kernel_main() {
         }
 
         // Residual Bit Error Check on Information Bits for Unconverged Codewords
+        active_mask_a = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK_A]);
+        active_mask_b = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK_B]);
+        for (int cw = 0; cw < 4; ++cw) {
+            uint32_t it_a = stats[TelemSlot::LAST_BATCH_ITER_CW0 + cw];
+            if (it_a != 0) iter_converged_a[cw] = it_a;
+            uint32_t it_b = stats[TelemSlot::LAST_BATCH_ITER_CW0 + 4 + cw];
+            if (it_b != 0) iter_converged_b[cw] = it_b;
+        }
+
         if (active_mask_a != 0) {
             const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_l1_a);
             uint32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0;

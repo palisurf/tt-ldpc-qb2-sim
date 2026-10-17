@@ -5,8 +5,17 @@
 // ==============================================================================
 // Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Engine
 // Component: Data Movement Kernel 0 (BRISC - Worker 0: Dual Gather & Dual Scatter)
-// Architecture: Decoupled Access-Execute (DAE) with Native 32x32 Tensix Tiles
+// Architecture: Centralized TRISC1 Maestro with Bounded Satellite Autonomy (DAE)
 // Target: Tenstorrent Blackhole (440 Tensix Cores, 2,200 RISC-V Processors)
+// Specification: docs/MD_files/CENTRALIZED_TRISC1_ORCHESTRATOR_AND_BOUNDED_AUTONOMY_SPECIFICATION.md
+//
+// Key Responsibilities:
+// 1. Face 0 Gather & Scatter: Autonomously gathers Face 0 (lanes 0..15, checks 0..3)
+//    and scatters updated posterior LLRs directly into L1 SRAM variable node arrays.
+// 2. Information Node Parity Scan: On Tile 39, scans sign bits across 1,024 info
+//    bits for CW0..3 and reports the 4-bit error mask to SyncSlot::PARITY_REPORT_W0.
+// 3. Bounded Autonomy: Executes all intra-tile memory operations autonomously, but
+//    gates step advancement and pair launch strictly on TRISC1_GRANT_STEP and TRISC1_CMD.
 // ==============================================================================
 
 static inline uint32_t get_wall_clock() {
@@ -89,12 +98,16 @@ void kernel_main() {
         // Wait for channel observations to be 100% ready in L1
         while (sync_flags[SyncSlot::BATCH_READY] < epoch + pair + 1) { }
 
+        // Satellite Pre-Step Gate: Wait for TRISC1 Maestro to launch Step 0
+        while (sync_flags[SyncSlot::TRISC1_CMD] != static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC) ||
+               sync_flags[SyncSlot::TRISC1_GRANT_STEP] < pair * total_steps + 1) { }
+
         uint32_t vnode_l1_a = sync_flags[SyncSlot::VNODE_L1_ADDR_A];
         uint32_t vnode_l1_b = sync_flags[SyncSlot::VNODE_L1_ADDR_B];
         uint32_t vnodes[2] = {vnode_l1_a, vnode_l1_b};
 
         // ----------------------------------------------------------------------
-        // Interleaved Dual-Batch DAE Gather/Scatter Engine (Zero-RAW Direct Store)
+        // Interleaved Dual-Batch DAE Gather/Scatter Engine (Bounded Autonomy)
         // ----------------------------------------------------------------------
         for (uint32_t k = 0; k < total_steps; ++k) {
             uint32_t bar = pair * total_steps + k + 1;
@@ -103,11 +116,22 @@ void kernel_main() {
             uint32_t vnode_l1 = vnodes[b_dae];
             const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
             char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
+
+            // 1. Wait for TRISC1 Macro Step Grant
+            while (sync_flags[SyncSlot::TRISC1_GRANT_STEP] < bar) {
+                if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+                    break;
+                }
+            }
+            if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+                break;
+            }
+
             uint8_t active_mask = static_cast<uint8_t>(
                 (b_dae == 0) ? sync_flags[SyncSlot::ACTIVE_MASK_A] : sync_flags[SyncSlot::ACTIVE_MASK_B]
             );
 
-            // 1. Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
+            // 2. Autonomous Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
             if (s_dae >= 1 && (s_dae - 1) < max_steps) {
                 uint32_t t_w0 = get_wall_clock();
                 while (sync_flags[SyncSlot::SCATTER_START] < bar) { }
@@ -127,7 +151,7 @@ void kernel_main() {
                 sync_flags[SyncSlot::SCATTER_DONE_W0] = bar;
                 cycles_scatter += (get_wall_clock() - t_s0);
 
-                // Check node iteration completion scan on Information Nodes
+                // Autonomous Check node iteration completion scan on Information Nodes (Tile 39)
                 if (t_scat == num_tiles - 1) {
                     uint32_t mask_err01 = ((active_mask & 1) ? 0x00008000 : 0) | ((active_mask & 2) ? 0x80000000 : 0);
                     uint32_t mask_err23 = ((active_mask & 4) ? 0x00008000 : 0) | ((active_mask & 8) ? 0x80000000 : 0);
@@ -151,26 +175,16 @@ void kernel_main() {
                             }
                         }
                     }
-                    if (b_dae == 0) {
-                        sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01_A] = brisc_err01 & mask_err01;
-                        sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23_A] = brisc_err23 & mask_err23;
-                        sync_flags[SyncSlot::BRISC_SCAN_DONE_A] = bar;
-                        while (sync_flags[SyncSlot::ITER_DONE_A] < bar) { }
-                    } else {
-                        sync_flags[SyncSlot::BRISC_GATHER_ERR_CW01_B] = brisc_err01 & mask_err01;
-                        sync_flags[SyncSlot::BRISC_GATHER_ERR_CW23_B] = brisc_err23 & mask_err23;
-                        sync_flags[SyncSlot::BRISC_SCAN_DONE_B] = bar;
-                        while (sync_flags[SyncSlot::ITER_DONE_B] < bar) { }
-                    }
+                    uint32_t info_err_mask = 0;
+                    if ((brisc_err01 & 0x00008000) && (active_mask & 1)) info_err_mask |= 1;
+                    if ((brisc_err01 & 0x80000000) && (active_mask & 2)) info_err_mask |= 2;
+                    if ((brisc_err23 & 0x00008000) && (active_mask & 4)) info_err_mask |= 4;
+                    if ((brisc_err23 & 0x80000000) && (active_mask & 8)) info_err_mask |= 8;
+                    sync_flags[SyncSlot::PARITY_REPORT_W0] = info_err_mask;
                 }
             }
 
-            // Early termination check: Release batch pair when both batches have converged
-            if (sync_flags[SyncSlot::EARLY_TERMINATION]) {
-                break;
-            }
-
-            // 2. Gather Stage: Gather current tile s_dae of Batch b_dae
+            // 3. Autonomous Gather Stage: Gather current tile s_dae of Batch b_dae
             if (s_dae < max_steps) {
                 uint32_t t_g0 = get_wall_clock();
                 uint32_t active_in_cb = cb_scat_in[b_dae];
@@ -190,6 +204,7 @@ void kernel_main() {
                 while (sync_flags[SyncSlot::GATHER_DONE_T0] < bar) { }
                 while (sync_flags[SyncSlot::GATHER_DONE_T2] < bar) { }
                 cb_push_back(active_in_cb, 1);
+                sync_flags[SyncSlot::GATHER_DONE_W0] = bar;
                 cycles_gather += (get_wall_clock() - t_g0);
             }
         }
