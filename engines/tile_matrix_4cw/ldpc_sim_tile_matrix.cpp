@@ -555,7 +555,9 @@ void run_tile_matrix_on_hardware(
     writer_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
     compute_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
 #endif
-#if LDPC_USE_3PIECE_AMIN_STAR
+#if LDPC_USE_SFPU_LUT
+    compute_config.defines["LDPC_USE_SFPU_LUT"] = "1";
+#elif LDPC_USE_3PIECE_AMIN_STAR
     compute_config.defines["LDPC_USE_3PIECE_AMIN_STAR"] = "1";
 #endif
 
@@ -1431,7 +1433,9 @@ void run_waterfall_sweep(
             writer_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
             compute_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
 #endif
-#if LDPC_USE_3PIECE_AMIN_STAR
+#if LDPC_USE_SFPU_LUT
+            compute_config.defines["LDPC_USE_SFPU_LUT"] = "1";
+#elif LDPC_USE_3PIECE_AMIN_STAR
             compute_config.defines["LDPC_USE_3PIECE_AMIN_STAR"] = "1";
 #endif
 

@@ -83,7 +83,20 @@ sfpi_inline sfpi::vFloat sfpu_fast_sqrt(sfpi::vFloat val) {
 // ------------------------------------------------------------------------------
 sfpi_inline sfpi::vFloat sfpi_amin_star_branchless(sfpi::vFloat a,
                                                    sfpi::vFloat b) {
-#if defined(LDPC_USE_3PIECE_AMIN_STAR)
+#if defined(LDPC_USE_SFPU_LUT)
+  auto [min_v, max_v] = sfpi::min_max(a, b);
+  sfpi::vFloat diff = max_v - min_v;
+  sfpi::vLut16ss s01(-0.4000f, -0.3280f);
+  sfpi::vLut16ii i01(0.69315f, 0.65715f);
+  sfpi::vLut16ss s23(-0.3280f, -0.3280f);
+  sfpi::vLut16ii i23(0.65715f, 0.65715f);
+  sfpi::vLut16ss s45(0.0f, 0.0f);
+  sfpi::vLut16ii i45(0.0f, 0.0f);
+
+  sfpi::vFloat corr = sfpi::lut<sfpi::LutMode::Fp16x6_HWM3>(
+      diff, s01, i01, s23, i23, s45, i45, sfpi::LutSign::Update);
+  return sfpi::max(min_v - corr, 0.0f);
+#elif defined(LDPC_USE_3PIECE_AMIN_STAR)
   auto [min_v, max_v] = sfpi::min_max(a, b);
   sfpi::vFloat diff = max_v - min_v;
   // Fold sequentially to keep active LReg pressure <= 4 registers
@@ -481,68 +494,73 @@ void __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::dst_reg[sc3] = q_e0;
       }
 
-      // Stage 2: Block 0 check node compute (edges E0: p0 lo, E1: p0 hi, E2:
-      // sc1)
+      // Step 2a: Block 0 sign parity -> store s_tot in dst_reg[32 + p0]
       {
-        sfpi::vFloat q0 = sfpi::dst_reg[p0];
-        sfpi::vFloat q0_sw = sfpi::dst_reg[sc0];
-        sfpi::vFloat q_e2 = sfpi::dst_reg[sc1];
+        sfpi::vInt s0    = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[p0]));
+        sfpi::vInt s0_sw = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+        sfpi::vInt s_e2  = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc1]));
+        sfpi::dst_reg[32 + p0] = sfpi::as<sfpi::vFloat>((s0 ^ s0_sw) ^ s_e2);
+      }
 
-        sfpi::vInt s0 = sfpi::as<sfpi::vInt>(q0);
-        sfpi::vInt s0_sw = sfpi::as<sfpi::vInt>(q0_sw);
-        sfpi::vInt s_e2 = sfpi::as<sfpi::vInt>(q_e2);
-        sfpi::vInt s_tot = (s0 ^ s0_sw) ^ s_e2;
-
-        sfpi::vFloat m0 = sfpi::abs(q0);
-        sfpi::vFloat m0_sw = sfpi::abs(q0_sw);
-
-        // 1. Compute r_mag_e2 and stage to sc1 immediately (frees m0 and s_e2)
+      // Step 2b: Compute r_out_e2 -> stage in dst_reg[32 + p1]
+      {
+        sfpi::vFloat m0    = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[p0]));
+        sfpi::vFloat m0_sw = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat r_mag_e2 = sfpi_amin_star_branchless(m0, m0_sw);
-        sfpi::dst_reg[sc1] =
-            round_bf16_fast(sfpi::copysgn(r_mag_e2, s_tot ^ s_e2));
+        sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[32 + p0]));
+        sfpi::vInt s_e2  = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc1]));
+        sfpi::dst_reg[32 + p1] = round_bf16_fast(sfpi::copysgn(r_mag_e2, s_tot ^ s_e2));
+      }
 
-        // 2. Compute r_mag0 with fresh load of m_e2
-        sfpi::vFloat m_e2 = sfpi::abs(sfpi::vFloat(q_e2));
+      // Step 2c: Compute r_out0 -> write R_new to p0, L_new to 32 + p0
+      {
+        sfpi::vFloat m0_sw = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[sc0]));
+        sfpi::vFloat m_e2  = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[sc1]));
         sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m0_sw, m_e2);
+        sfpi::vFloat q0     = sfpi::dst_reg[p0];
+        sfpi::vInt s_tot    = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[32 + p0]));
+        sfpi::vInt s0       = sfpi::as<sfpi::vInt>(q0);
         sfpi::vFloat r_out0 = round_bf16(sfpi::copysgn(r_mag0, s_tot ^ s0));
         sfpi::dst_reg[32 + p0] = round_bf16_fast(q0 + r_out0); // L_new in Tile 1
-        sfpi::dst_reg[p0] = r_out0;                            // R_new in Tile 0
+        sfpi::dst_reg[p0]      = r_out0;                       // R_new in Tile 0
       }
 
-      // Stage 3: Block 1 check node compute (edges E0: sc3, E1: p2 lo, E2: p2
-      // hi)
+      // Step 3a: Block 1 sign parity -> store s_tot in dst_reg[32 + p2]
       {
-        sfpi::vFloat q2 = sfpi::dst_reg[p2];
-        sfpi::vFloat q2_sw = sfpi::dst_reg[sc2];
-        sfpi::vFloat q_e0 = sfpi::dst_reg[sc3];
+        sfpi::vInt s2    = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[p2]));
+        sfpi::vInt s2_sw = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc2]));
+        sfpi::vInt s_e0  = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc3]));
+        sfpi::dst_reg[32 + p2] = sfpi::as<sfpi::vFloat>((s2 ^ s2_sw) ^ s_e0);
+      }
 
-        sfpi::vInt s2 = sfpi::as<sfpi::vInt>(q2);
-        sfpi::vInt s2_sw = sfpi::as<sfpi::vInt>(q2_sw);
-        sfpi::vInt s_e0 = sfpi::as<sfpi::vInt>(q_e0);
-        sfpi::vInt s_tot = (s2 ^ s2_sw) ^ s_e0;
-
-        sfpi::vFloat m2 = sfpi::abs(q2);
-        sfpi::vFloat m2_sw = sfpi::abs(q2_sw);
-
-        // 1. Compute r_mag_e0 and stage to sc3 immediately (frees m2 and s_e0)
+      // Step 3b: Compute r_out_e0 -> stage in dst_reg[sc0]
+      {
+        sfpi::vFloat m2    = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[p2]));
+        sfpi::vFloat m2_sw = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[sc2]));
         sfpi::vFloat r_mag_e0 = sfpi_amin_star_branchless(m2, m2_sw);
-        sfpi::dst_reg[sc3] =
-            round_bf16_fast(sfpi::copysgn(r_mag_e0, s_tot ^ s_e0));
+        sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[32 + p2]));
+        sfpi::vInt s_e0  = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc3]));
+        sfpi::dst_reg[sc0] = round_bf16_fast(sfpi::copysgn(r_mag_e0, s_tot ^ s_e0));
+      }
 
-        // 2. Compute r_mag2 with fresh load of m_e0
-        sfpi::vFloat m_e0 = sfpi::abs(sfpi::vFloat(q_e0));
+      // Step 3c: Compute r_out2 -> write R_new to p2, L_new to 32 + p2
+      {
+        sfpi::vFloat m2_sw = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[sc2]));
+        sfpi::vFloat m_e0  = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[sc3]));
         sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m2_sw, m_e0);
+        sfpi::vFloat q2     = sfpi::dst_reg[p2];
+        sfpi::vInt s_tot    = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[32 + p2]));
+        sfpi::vInt s2       = sfpi::as<sfpi::vInt>(q2);
         sfpi::vFloat r_out2 = round_bf16(sfpi::copysgn(r_mag2, s_tot ^ s2));
         sfpi::dst_reg[32 + p2] = round_bf16_fast(q2 + r_out2); // L_new in Tile 1
-        sfpi::dst_reg[p2] = r_out2;                            // R_new in Tile 0
+        sfpi::dst_reg[p2]      = r_out2;                       // R_new in Tile 0
       }
 
-      // Stage 4: Assemble p1 (lower 16 lanes is r_out_e2, upper 16 lanes is
-      // r_out_e0)
+      // Stage 4: Assemble p1 (lower 16 lanes is r_out_e2, upper 16 lanes is r_out_e0)
       {
-        sfpi::vFloat r_out1 = sfpi::dst_reg[sc1];
+        sfpi::vFloat r_out1 = sfpi::dst_reg[32 + p1];
         v_if(sfpi::as<sfpi::vUInt>(sfpi::vConstTileId) >= 32) {
-          r_out1 = sfpi::vFloat(sfpi::dst_reg[sc3]);
+          r_out1 = sfpi::vFloat(sfpi::dst_reg[sc0]);
         }
         v_endif;
 
@@ -852,37 +870,99 @@ void kernel_main() {
     while (sync_flags[SyncSlot::BATCH_READY] < epoch + pair + 1) {
     }
 
-    // Step 4: Interleaved Dual-Batch TRISC Compute Pipeline
-    for (uint32_t k = 1; k < 2 * max_steps + 1; ++k) {
-      uint32_t b_comp = (k - 1) % 2;
-      uint32_t s_comp = (k - 1) / 2;
-      uint32_t t_comp = s_comp % num_tiles;
-      uint32_t iter_comp = s_comp / num_tiles;
+    // Step 4: Interleaved Dual-Batch 4-Worker DAE & TRISC Compute Pipeline
+    const char* vnode_bytes_a = reinterpret_cast<const char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_A]);
+    const char* vnode_bytes_b = reinterpret_cast<const char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_B]);
+    char* vnode_out_a = reinterpret_cast<char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_A]);
+    char* vnode_out_b = reinterpret_cast<char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_B]);
+    const char* vnodes_bytes[2] = {vnode_bytes_a, vnode_bytes_b};
+    char* vnodes_out[2] = {vnode_out_a, vnode_out_b};
+    const uint32_t* p_hoff_base = reinterpret_cast<const uint32_t*>(sync_flags[SyncSlot::HOFF_L1_ADDR]);
 
-      // At start of each new iteration (t_comp == 0, iter > 0):
-      // Synchronize with NCRISC parity scan of previous iteration
-      if (t_comp == 0 && iter_comp > 0) {
-        uint32_t expected_bar = pair * total_steps + 2 * iter_comp * num_tiles + (b_comp == 0 ? 1 : 2);
-        if (b_comp == 0) {
-          while (sync_flags[SyncSlot::ITER_DONE_A] < expected_bar) { }
-        } else {
-          while (sync_flags[SyncSlot::ITER_DONE_B] < expected_bar) { }
+    for (uint32_t k = 0; k < total_steps; ++k) {
+      uint32_t bar = pair * total_steps + k + 1;
+      uint32_t b_dae = k % 2;
+      uint32_t s_dae = k / 2;
+      uint8_t active_mask = static_cast<uint8_t>(
+          (b_dae == 0) ? sync_flags[SyncSlot::ACTIVE_MASK_A] : sync_flags[SyncSlot::ACTIVE_MASK_B]
+      );
+
+      // 1. Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
+#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
+      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
+        while (sync_flags[SyncSlot::SCATTER_START] < bar) { }
+        uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
+        uint32_t s_scat = s_dae - 1;
+        uint32_t t_scat = s_scat % num_tiles;
+        char* vnode_out_ptr = vnodes_out[b_dae];
+#if defined(TRISC_UNPACK)
+        if (active_mask != 0) {
+          scatter_face_24pairs(scratch_out_addr + 1024, p_hoff_base + t_scat * 96 + 24, vnode_out_ptr);
         }
+        sync_flags[SyncSlot::SCATTER_DONE_T0] = bar;
+#elif defined(TRISC_PACK)
+        if (active_mask != 0) {
+          scatter_face_24pairs(scratch_out_addr + 1536, p_hoff_base + t_scat * 96 + 72, vnode_out_ptr);
+        }
+        sync_flags[SyncSlot::SCATTER_DONE_T2] = bar;
+#endif
       }
+#endif
 
+      // Early termination check: Release batch pair when both batches have converged
       if (sync_flags[SyncSlot::EARLY_TERMINATION]) {
         break;
       }
 
-      uint32_t cb_in  = (b_comp == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
-      uint32_t cb_out = (b_comp == 0) ? cb_scratch_out_a : cb_scratch_out_b;
-      uint32_t cb_r   = (b_comp == 0) ? cb_r_msg_a       : cb_r_msg_b;
+      // 2. Gather Stage: Gather current tile s_dae of Batch b_dae
+#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
+      if (s_dae < max_steps) {
+        while (sync_flags[SyncSlot::GATHER_START] < bar) { }
+        uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
+        uint32_t t_gath = s_dae % num_tiles;
+        const char* vnode_bytes_ptr = vnodes_bytes[b_dae];
+#if defined(TRISC_UNPACK)
+        if (active_mask != 0) {
+          gather_face_24pairs(scratch_in_addr + 1024, p_hoff_base + t_gath * 96 + 24, vnode_bytes_ptr);
+        }
+        sync_flags[SyncSlot::GATHER_DONE_T0] = bar;
+#elif defined(TRISC_PACK)
+        if (active_mask != 0) {
+          gather_face_24pairs(scratch_in_addr + 1536, p_hoff_base + t_gath * 96 + 72, vnode_bytes_ptr);
+        }
+        sync_flags[SyncSlot::GATHER_DONE_T2] = bar;
+#endif
+      }
+#endif
 
-      uint16_t deg = sync_flags[64 + t_comp];
-      if (deg == 6) {
-        compute_tile_deg6(cb_in, cb_out, cb_r, iter_comp);
-      } else {
-        compute_tile_deg3(cb_in, cb_out, cb_r, iter_comp);
+      // 3. Compute Stage: Compute check nodes for tile (k - 1)
+      if (k >= 1 && k <= 2 * max_steps) {
+        uint32_t b_comp = (k - 1) % 2;
+        uint32_t s_comp = (k - 1) / 2;
+        uint32_t t_comp = s_comp % num_tiles;
+        uint32_t iter_comp = s_comp / num_tiles;
+
+        // At start of each new iteration (t_comp == 0, iter > 0):
+        // Synchronize with NCRISC parity scan of previous iteration
+        if (t_comp == 0 && iter_comp > 0) {
+          uint32_t expected_bar = pair * total_steps + 2 * iter_comp * num_tiles + (b_comp == 0 ? 1 : 2);
+          if (b_comp == 0) {
+            while (sync_flags[SyncSlot::ITER_DONE_A] < expected_bar) { }
+          } else {
+            while (sync_flags[SyncSlot::ITER_DONE_B] < expected_bar) { }
+          }
+        }
+
+        uint32_t cb_in  = (b_comp == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
+        uint32_t cb_out = (b_comp == 0) ? cb_scratch_out_a : cb_scratch_out_b;
+        uint32_t cb_r   = (b_comp == 0) ? cb_r_msg_a       : cb_r_msg_b;
+
+        uint16_t deg = sync_flags[64 + t_comp];
+        if (deg == 6) {
+          compute_tile_deg6(cb_in, cb_out, cb_r, iter_comp);
+        } else {
+          compute_tile_deg3(cb_in, cb_out, cb_r, iter_comp);
+        }
       }
     }
 
