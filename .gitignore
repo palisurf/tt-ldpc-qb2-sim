@@ -36,6 +36,7 @@ Thumbs.db
 # Local private docs & results
 docs/*
 AGENTS.md
+Performance.md
 TenstorrentRequests/Archive/
 
 Results/**/*.csv
