@@ -169,6 +169,7 @@ namespace SyncSlot {
     constexpr uint32_t ITER_DONE_B         = 197;
     constexpr uint32_t ITER_DONE           = ITER_DONE_A;
     constexpr uint32_t BRISC_SCAN_DONE     = BRISC_SCAN_DONE_A;
+    constexpr uint32_t DRAIN_ACK_W1        = 198; // NCRISC acknowledgment of residual scatter FIFO drain
 }
 
 // Telemetry Buffer Layout in CB_TELEMETRY (1024 uint32 words)
