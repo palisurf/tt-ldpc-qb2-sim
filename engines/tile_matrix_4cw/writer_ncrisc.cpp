@@ -3,6 +3,8 @@
 #include "ldpc_tile_matrix_core.h"
 
 // ==============================================================================
+// Working 440 code 8CW pipelined simulation, still needs orchestration optimization and FER performance analysis
+//
 // Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Engine
 // Component: Data Movement Kernel 1 (NCRISC - Worker 1: Dual Gather & Dual Scatter)
 // Architecture: Centralized TRISC1 Maestro with Bounded Satellite Autonomy (DAE)

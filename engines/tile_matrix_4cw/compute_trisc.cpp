@@ -9,6 +9,8 @@
 #include <cstdint>
 
 // ==============================================================================
+// Working 440 code 8CW pipelined simulation, still needs orchestration optimization and FER performance analysis
+//
 // Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Engine
 // Component: Tri-TRISC Compute & Centralized Macro-Orchestrator Kernel
 // Architecture: Centralized TRISC1 Maestro with Bounded Satellite Autonomy (DAE)
