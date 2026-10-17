@@ -138,6 +138,14 @@ while [[ $# -gt 0 ]]; do
             FORWARD_ARGS+=("--engine" "$2")
             shift 2
             ;;
+        --mesh)
+            FORWARD_ARGS+=("--mesh")
+            shift
+            ;;
+        --chunk-size|--chunk|-c)
+            FORWARD_ARGS+=("--chunk" "$2")
+            shift 2
+            ;;
         *)
             if parse_ebn0_tuple "$1" 2>/dev/null; then
                 shift

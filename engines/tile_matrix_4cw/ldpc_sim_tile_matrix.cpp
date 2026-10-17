@@ -1287,28 +1287,34 @@ void run_waterfall_sweep(
     uint64_t max_blocks_per_snr,
     uint32_t max_iterations,
     bool single_core,
-    const std::string& csv_out_path
+    const std::string& csv_out_path,
+    uint32_t chunk_size = 50000
 ) {
-    (void)single_core;
+    auto mesh_device = single_core 
+        ? distributed::MeshDevice::create_unit_mesh(0)
+        : distributed::MeshDevice::create(distributed::MeshDeviceConfig(distributed::MeshShape{2, 2}));
+    auto& cq = mesh_device->mesh_command_queue();
+
+    auto grid_size = mesh_device->compute_with_storage_grid_size();
+    uint32_t cores_per_chip = single_core ? 1 : (grid_size.x * grid_size.y);
+    uint32_t num_chips = single_core ? 1 : (mesh_device->num_rows() * mesh_device->num_cols());
+    uint32_t total_mesh_cores = cores_per_chip * num_chips;
+    CoreRange core_range = single_core 
+        ? CoreRange(CoreCoord(0, 0), CoreCoord(0, 0))
+        : CoreRange(CoreCoord(0, 0), CoreCoord(grid_size.x - 1, grid_size.y - 1));
+
     std::cout << "\n=======================================================" << std::endl;
     std::cout << " QUIETBOX 2: TILE MATRIX 4-CW WATERFALL SWEEP" << std::endl;
-    std::cout << " Target: Single Tensix Core (0, 0)" << std::endl;
+    std::cout << " Target: " << (single_core ? "Single Tensix Core (0, 0)" : ("440-Core Mesh Grid (2x2 Blackhole, " + std::to_string(total_mesh_cores) + " cores)")) << std::endl;
     std::cout << " Range : [" << snr_start << " : " << snr_stop << " : " << snr_step << "] dB" << std::endl;
     std::cout << " Goal  : " << min_frame_errors << " Frame Errors or " << max_blocks_per_snr << " Blocks / SNR" << std::endl;
     std::cout << " MaxIt : " << max_iterations << " iterations" << std::endl;
     std::cout << " Output: " << csv_out_path << std::endl;
     std::cout << "=======================================================" << std::endl;
 
-    auto mesh_device = single_core 
-        ? distributed::MeshDevice::create_unit_mesh(0)
-        : distributed::MeshDevice::create(distributed::MeshDeviceConfig(distributed::MeshShape{2, 2}));
-    auto& cq = mesh_device->mesh_command_queue();
-
-    CoreCoord core = {0, 0};
-    CoreRange core_range(core, core);
-
     uint32_t tile_bytes = sizeof(bfloat16) * TILE_ELEMENTS;
-    uint32_t stats_cb_bytes = 4 * 1024;
+    uint32_t stats_per_core_bytes = 4 * 1024;
+    uint32_t stats_cb_bytes = cores_per_chip * stats_per_core_bytes;
     uint32_t h_cb_bytes = 16 * 1024;
 
     distributed::DeviceLocalBufferConfig h_dram_config{
@@ -1356,10 +1362,81 @@ void run_waterfall_sweep(
     std::string writer_path = resolve_filepath("writer_ncrisc.cpp");
     std::string compute_path = resolve_filepath("compute_trisc.cpp");
     uint32_t num_tiles = schedule.size();
-    constexpr uint32_t telem_l1_addr = 0x3DC00;
 
-    uint32_t global_seed = 0x12345678;
+    DataMovementConfig reader_config{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default};
+    DataMovementConfig writer_config{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default};
+    ComputeConfig compute_config{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = false};
+
+#if LDPC_TEST_PASSTHROUGH_MODE
+    reader_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+    writer_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+    compute_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
+#elif LDPC_TEST_R_DATAFLOW_MODE
+    reader_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
+    writer_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
+    compute_config.defines["LDPC_TEST_R_DATAFLOW_MODE"] = "1";
+#endif
+#if LDPC_USE_SFPU_LUT
+    compute_config.defines["LDPC_USE_SFPU_LUT"] = "1";
+#elif LDPC_USE_3PIECE_AMIN_STAR
+    compute_config.defines["LDPC_USE_3PIECE_AMIN_STAR"] = "1";
+#endif
+
+    // Construct Persistent MeshWorkload, Program, Circular Buffers, and Kernels once upfront:
+    distributed::MeshWorkload workload;
+    struct ChipHandles {
+        KernelHandle reader;
+        KernelHandle writer;
+        KernelHandle compute;
+        distributed::MeshCoordinateRange coord_range;
+    };
+    std::vector<ChipHandles> chip_handles;
+
+    for (uint32_t chip_row = 0; chip_row < (single_core ? 1 : mesh_device->num_rows()); ++chip_row) {
+        for (uint32_t chip_col = 0; chip_col < (single_core ? 1 : mesh_device->num_cols()); ++chip_col) {
+            uint32_t chip_idx = chip_row * (single_core ? 1 : mesh_device->num_cols()) + chip_col;
+            Program program = CreateProgram();
+
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_A, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_A, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(16 * 1024, {{TileMatrixCB::CB_H_OFFSET, tt::DataFormat::RawUInt16}}).set_page_size(TileMatrixCB::CB_H_OFFSET, 16 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_0, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_1, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_B, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_0, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_B, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
+
+            auto reader = CreateKernel(program, reader_path, core_range, reader_config);
+            auto writer = CreateKernel(program, writer_path, core_range, writer_config);
+            auto compute = CreateKernel(program, compute_path, core_range, compute_config);
+
+            for (uint32_t local_core = 0; local_core < cores_per_chip; ++local_core) {
+                CoreCoord c = single_core ? CoreCoord{0, 0} : CoreCoord{local_core % grid_size.x, local_core / grid_size.x};
+                uint32_t global_core_id = chip_idx * cores_per_chip + local_core;
+                uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + local_core * stats_per_core_bytes;
+
+                std::vector<uint32_t> r_args = { 1, max_iterations, num_tiles, static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, 1, 0, 0, 0x12345678U, global_core_id };
+                SetRuntimeArgs(program, reader, c, r_args);
+
+                std::vector<uint32_t> w_args = { 1, max_iterations, num_tiles, core_stats_addr, 0, stats_cb_bytes, 0, 0, 0x12345678U, 1, 0u, 0, global_core_id };
+                SetRuntimeArgs(program, writer, c, w_args);
+
+                std::vector<uint32_t> c_args = { 1, max_iterations, num_tiles, 0, 0, 1, 0, global_core_id, 0x12345678U };
+                SetRuntimeArgs(program, compute, c, c_args);
+            }
+
+            auto coord = distributed::MeshCoordinate(chip_row, chip_col);
+            auto coord_range = distributed::MeshCoordinateRange(coord);
+            chip_handles.push_back({reader, writer, compute, coord_range});
+            workload.add_program(coord_range, std::move(program));
+        }
+    }
+
+    uint32_t global_seed = 0x12345678U;
     uint32_t invocation_id = 1;
+    uint64_t cws_per_pair = 8ULL * total_mesh_cores;
 
     for (double snr = snr_start; snr <= snr_stop + 1e-4; snr += snr_step) {
         double rate = 0.5;
@@ -1387,9 +1464,10 @@ void run_waterfall_sweep(
 
         std::cout << "\n>>> Simulating Eb/N0 = " << std::fixed << std::setprecision(2) << snr << " dB..." << std::endl;
 
+        uint32_t chunk_idx = 0;
         while (snr_fe < min_frame_errors && snr_blocks < max_blocks_per_snr) {
             uint64_t remaining_blocks = max_blocks_per_snr - snr_blocks;
-            uint64_t target_chunk_blocks = 100;
+            uint64_t target_chunk_blocks = (chunk_size > 0) ? chunk_size : 50000;
             if (snr_fe == 0) {
                 if (snr_blocks >= 100000) target_chunk_blocks = 50000;
                 else if (snr_blocks >= 20000) target_chunk_blocks = 20000;
@@ -1398,102 +1476,99 @@ void run_waterfall_sweep(
                 else target_chunk_blocks = 200;
             } else {
                 double est_fer = static_cast<double>(snr_fe) / snr_blocks;
-                // Target collecting ~2 errors per chunk to balance progress telemetry with high throughput
                 uint64_t blocks_for_target = static_cast<uint64_t>(2.5 / est_fer);
                 if (blocks_for_target < 200) blocks_for_target = 200;
-                if (blocks_for_target > 25000) blocks_for_target = 25000;
+                if (blocks_for_target > 50000) blocks_for_target = 50000;
                 target_chunk_blocks = blocks_for_target;
             }
 
-            uint32_t chunk_pairs = static_cast<uint32_t>((target_chunk_blocks + 7) / 8);
-            if (static_cast<uint64_t>(chunk_pairs * 8) > remaining_blocks) {
-                chunk_pairs = static_cast<uint32_t>((remaining_blocks + 7) / 8);
+            // Ensure chunk size aligns with mesh granularity (cws_per_pair = 8 * total_mesh_cores)
+            uint32_t chunk_pairs = static_cast<uint32_t>((target_chunk_blocks + cws_per_pair - 1) / cws_per_pair);
+            if (static_cast<uint64_t>(chunk_pairs) * cws_per_pair > remaining_blocks) {
+                chunk_pairs = static_cast<uint32_t>((remaining_blocks + cws_per_pair - 1) / cws_per_pair);
             }
-            if (chunk_pairs == 0) break;
+            if (chunk_pairs == 0) chunk_pairs = 1;
 
-            Program program = CreateProgram();
+            uint32_t cur_start_batch = chunk_idx * chunk_pairs * 2;
+            uint32_t cur_invocation_id = invocation_id;
 
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_A, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_A, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(16 * 1024, {{TileMatrixCB::CB_H_OFFSET, tt::DataFormat::RawUInt16}}).set_page_size(TileMatrixCB::CB_H_OFFSET, 16 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_0, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_1, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_B, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_0, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_B, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
+            auto& programs = workload.get_programs();
 
-            DataMovementConfig reader_config{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default};
-            DataMovementConfig writer_config{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default};
-            ComputeConfig compute_config{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = false};
+            for (size_t chip_idx = 0; chip_idx < chip_handles.size(); ++chip_idx) {
+                auto& ch = chip_handles[chip_idx];
+                Program& program = programs.at(ch.coord_range);
 
-#if LDPC_TEST_PASSTHROUGH_MODE
-            reader_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
-            writer_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
-            compute_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
-#endif
-#if LDPC_USE_SFPU_LUT
-            compute_config.defines["LDPC_USE_SFPU_LUT"] = "1";
-#elif LDPC_USE_3PIECE_AMIN_STAR
-            compute_config.defines["LDPC_USE_3PIECE_AMIN_STAR"] = "1";
-#endif
+                for (uint32_t local_core = 0; local_core < cores_per_chip; ++local_core) {
+                    CoreCoord c = single_core ? CoreCoord{0, 0} : CoreCoord{local_core % grid_size.x, local_core / grid_size.x};
+                    uint32_t global_core_id = chip_idx * cores_per_chip + local_core;
+                    uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + local_core * stats_per_core_bytes;
 
-            auto reader = CreateKernel(program, reader_path, core_range, reader_config);
-            auto writer = CreateKernel(program, writer_path, core_range, writer_config);
-            auto compute = CreateKernel(program, compute_path, core_range, compute_config);
+                    std::vector<uint32_t> r_args = {
+                        chunk_pairs, max_iterations, num_tiles,
+                        static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, cur_invocation_id,
+                        mu_u32, sigma_bits, global_seed, global_core_id
+                    };
+                    SetRuntimeArgs(program, ch.reader, c, r_args);
 
-            uint32_t cur_start_batch = static_cast<uint32_t>(snr_blocks / 4);
-            if (single_core) {
-                std::vector<uint32_t> r_args = { chunk_pairs, max_iterations, num_tiles, static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, invocation_id, mu_u32, sigma_bits, global_seed, 0 /* core_id */ };
-                SetRuntimeArgs(program, reader, core, r_args);
+                    std::vector<uint32_t> w_args = {
+                        chunk_pairs, max_iterations, num_tiles,
+                        core_stats_addr, 0, stats_cb_bytes,
+                        mu_u32, sigma_bits, global_seed, cur_invocation_id,
+                        0u, cur_start_batch, global_core_id
+                    };
+                    SetRuntimeArgs(program, ch.writer, c, w_args);
 
-                std::vector<uint32_t> w_args = { chunk_pairs, max_iterations, num_tiles, static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes, mu_u32, sigma_bits, global_seed, invocation_id, 0u, cur_start_batch, 0 /* core_id */ };
-                SetRuntimeArgs(program, writer, core, w_args);
+                    std::vector<uint32_t> c_args = {
+                        chunk_pairs, max_iterations, num_tiles,
+                        mu_u32, sigma_bits, cur_invocation_id, cur_start_batch,
+                        global_core_id, global_seed
+                    };
+                    SetRuntimeArgs(program, ch.compute, c, c_args);
+                }
+            }
 
-                std::vector<uint32_t> c_args = { chunk_pairs, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id, cur_start_batch, 0 /* core_id */, global_seed };
-                SetRuntimeArgs(program, compute, core, c_args);
-            } else {
-                uint32_t c_idx = 0;
-                for (uint32_t y = 0; y < mesh_device->compute_with_storage_grid_size().y; ++y) {
-                    for (uint32_t x = 0; x < mesh_device->compute_with_storage_grid_size().x; ++x) {
-                        CoreCoord c{x, y};
-                        std::vector<uint32_t> r_args = { chunk_pairs, max_iterations, num_tiles, static_cast<uint32_t>(h_dram->address()), 0, h_cb_bytes, invocation_id, mu_u32, sigma_bits, global_seed, c_idx };
-                        SetRuntimeArgs(program, reader, c, r_args);
+            // High-throughput persistent dispatch: Zero recompilation, zero re-allocation
+            distributed::EnqueueMeshWorkload(cq, workload, false);
+            cq.finish();
 
-                        std::vector<uint32_t> w_args = { chunk_pairs, max_iterations, num_tiles, static_cast<uint32_t>(stats_dram->address()), 0, stats_cb_bytes, mu_u32, sigma_bits, global_seed, invocation_id, 0u, cur_start_batch, c_idx };
-                        SetRuntimeArgs(program, writer, c, w_args);
+            std::vector<uint32_t> chip_stats(stats_cb_bytes / sizeof(uint32_t), 0);
+            uint64_t chunk_be = 0;
+            uint64_t chunk_fe = 0;
+            uint64_t chunk_iters = 0;
+            uint32_t sample_first_fe_batch = 0xFFFFFFFF;
+            uint32_t sample_first_fe_cw = 0;
+            uint32_t sample_first_fe_be = 0;
 
-                        std::vector<uint32_t> c_args = { chunk_pairs, max_iterations, num_tiles, mu_u32, sigma_bits, invocation_id, cur_start_batch, c_idx, global_seed };
-                        SetRuntimeArgs(program, compute, c, c_args);
-                        c_idx++;
+            for (uint32_t chip_row = 0; chip_row < (single_core ? 1 : mesh_device->num_rows()); ++chip_row) {
+                for (uint32_t chip_col = 0; chip_col < (single_core ? 1 : mesh_device->num_cols()); ++chip_col) {
+                    distributed::ReadShard(cq, chip_stats, stats_dram, distributed::MeshCoordinate(chip_row, chip_col), true);
+                    for (uint32_t local_core = 0; local_core < cores_per_chip; ++local_core) {
+                        const uint32_t* cstats = chip_stats.data() + (local_core * stats_per_core_bytes / sizeof(uint32_t));
+                        chunk_be += cstats[TelemSlot::TOTAL_BE];
+                        chunk_fe += cstats[TelemSlot::TOTAL_FE];
+                        chunk_iters += cstats[TelemSlot::TOTAL_ITERS];
+                        if (cstats[TelemSlot::FIRST_FAILING_BATCH] != 0xFFFFFFFF && sample_first_fe_batch == 0xFFFFFFFF) {
+                            sample_first_fe_batch = cstats[TelemSlot::FIRST_FAILING_BATCH];
+                            sample_first_fe_cw = cstats[TelemSlot::FIRST_FAILING_CW];
+                            sample_first_fe_be = cstats[TelemSlot::FIRST_FAILING_BE];
+                        }
                     }
                 }
             }
 
-            distributed::MeshWorkload workload;
-            distributed::MeshCoordinateRange target_range = single_core
-                ? distributed::MeshCoordinateRange(distributed::MeshCoordinate(0, 0), distributed::MeshCoordinate(0, 0))
-                : distributed::MeshCoordinateRange(mesh_device->shape());
-            workload.add_program(target_range, std::move(program));
-            distributed::EnqueueMeshWorkload(cq, workload, false);
-            cq.finish();
+            uint64_t chunk_actual_blocks = static_cast<uint64_t>(chunk_pairs) * cws_per_pair;
+            snr_blocks += chunk_actual_blocks;
+            snr_be += chunk_be;
+            snr_fe += chunk_fe;
+            snr_iters += chunk_iters;
 
-            std::vector<uint32_t> stats(stats_cb_bytes / sizeof(uint32_t), 0);
-            distributed::ReadShard(cq, stats, stats_dram, distributed::MeshCoordinate(0, 0), true);
-
-            snr_blocks += chunk_pairs * 8;
-            snr_be += stats[TelemSlot::TOTAL_BE];
-            snr_fe += stats[TelemSlot::TOTAL_FE];
-            snr_iters += stats[TelemSlot::TOTAL_ITERS];
-
-            if (!first_fe_captured && stats[TelemSlot::FIRST_FAILING_BATCH] != 0xFFFFFFFF) {
+            if (!first_fe_captured && sample_first_fe_batch != 0xFFFFFFFF) {
                 first_fe_captured = true;
-                captured_fe_invocation_id = invocation_id;
-                captured_fe_batch = stats[TelemSlot::FIRST_FAILING_BATCH];
-                captured_fe_cw = stats[TelemSlot::FIRST_FAILING_CW];
-                captured_fe_be = stats[TelemSlot::FIRST_FAILING_BE];
-                captured_fe_global_block = (snr_blocks - chunk_pairs * 8) + captured_fe_batch * 4 + captured_fe_cw;
+                captured_fe_invocation_id = cur_invocation_id;
+                captured_fe_batch = sample_first_fe_batch;
+                captured_fe_cw = sample_first_fe_cw;
+                captured_fe_be = sample_first_fe_be;
+                captured_fe_global_block = (snr_blocks - chunk_actual_blocks) + captured_fe_batch * 4 + captured_fe_cw;
                 captured_fe_seed = 0x12345678U + (captured_fe_invocation_id * 1013904223U) + captured_fe_batch * 31337U;
 
                 std::cout << "\n=======================================================" << std::endl;
@@ -1522,41 +1597,9 @@ void run_waterfall_sweep(
                 }
             }
 
-            if (snr_blocks <= 100) {
-                std::cout << "\n[DEBUG TELEMETRY] BE=" << stats[TelemSlot::TOTAL_BE] 
-                          << " FE=" << stats[TelemSlot::TOTAL_FE] 
-                          << " Iters=" << stats[TelemSlot::TOTAL_ITERS]
-                          << "\n  InitNeg=[" << stats[TelemSlot::INIT_NEG_CW0 + 0] << "," 
-                          << stats[TelemSlot::INIT_NEG_CW0 + 1] << "," 
-                          << stats[TelemSlot::INIT_NEG_CW0 + 2] << "," 
-                          << stats[TelemSlot::INIT_NEG_CW0 + 3] << "]"
-                          << " s01=0x" << std::hex << stats[TelemSlot::INIT_BF16_W01] 
-                          << " s23=0x" << stats[TelemSlot::INIT_BF16_W23] << std::dec
-                          << "\n  LastBatch Errs=[" << stats[TelemSlot::LAST_BATCH_BE_CW0 + 0] << "," 
-                          << stats[TelemSlot::LAST_BATCH_BE_CW0 + 1] << "," 
-                          << stats[TelemSlot::LAST_BATCH_BE_CW0 + 2] << "," 
-                          << stats[TelemSlot::LAST_BATCH_BE_CW0 + 3] << "]"
-                          << " Iters=[" << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 0] << "," 
-                          << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 1] << "," 
-                          << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 2] << "," 
-                          << stats[TelemSlot::LAST_BATCH_ITER_CW0 + 3] << "]"
-                          << std::endl;
-                if (stats[TelemSlot::FAILING_CW0_COUNT] > 0) {
-                    std::cout << "  Failing VNs CW0 (" << stats[TelemSlot::FAILING_CW0_COUNT] << "): ";
-                    for (uint32_t i = 0; i < std::min<uint32_t>(stats[TelemSlot::FAILING_CW0_COUNT], 16); ++i)
-                        std::cout << stats[TelemSlot::FAILING_CW0_BASE + i] << " ";
-                    std::cout << std::endl;
-                }
-                if (stats[TelemSlot::FAILING_CW1_COUNT] > 0) {
-                    std::cout << "  Failing VNs CW1 (" << stats[TelemSlot::FAILING_CW1_COUNT] << "): ";
-                    for (uint32_t i = 0; i < std::min<uint32_t>(stats[TelemSlot::FAILING_CW1_COUNT], 16); ++i)
-                        std::cout << stats[TelemSlot::FAILING_CW1_BASE + i] << " ";
-                    std::cout << std::endl;
-                }
-            }
-
             global_seed += chunk_pairs * 10007 + 1;
-            // invocation_id remains constant across chunks so start_batch advances monotonically, matching the stepper
+            invocation_id++;
+            chunk_idx++;
 
             double cur_fer = (double)snr_fe / snr_blocks;
             double cur_ber = (double)snr_be / (snr_blocks * 1024.0);
@@ -1565,8 +1608,8 @@ void run_waterfall_sweep(
             static const bool is_tty = isatty(fileno(stdout));
             if (is_tty) {
                 std::cout << "\r  [" << std::fixed << std::setprecision(2) << snr << " dB] Blocks: "
-                          << std::setw(7) << snr_blocks << "/" << max_blocks_per_snr
-                          << " | FE: " << std::setw(3) << snr_fe << "/" << min_frame_errors
+                          << std::setw(8) << snr_blocks << "/" << max_blocks_per_snr
+                          << " | FE: " << std::setw(4) << snr_fe << "/" << min_frame_errors
                           << " | BE: " << std::setw(8) << snr_be
                           << " | FER: " << std::scientific << std::setprecision(3) << cur_fer
                           << " | BER: " << cur_ber
@@ -1574,8 +1617,8 @@ void run_waterfall_sweep(
                           << std::flush;
             } else {
                 std::cout << "  [" << std::fixed << std::setprecision(2) << snr << " dB] Blocks: "
-                          << std::setw(7) << snr_blocks << "/" << max_blocks_per_snr
-                          << " | FE: " << std::setw(3) << snr_fe << "/" << min_frame_errors
+                          << std::setw(8) << snr_blocks << "/" << max_blocks_per_snr
+                          << " | FE: " << std::setw(4) << snr_fe << "/" << min_frame_errors
                           << " | BE: " << std::setw(8) << snr_be
                           << " | FER: " << std::scientific << std::setprecision(3) << cur_fer
                           << " | BER: " << cur_ber
@@ -1638,9 +1681,7 @@ int main(int argc, char** argv) {
     uint32_t start_batch = 0;
     uint32_t invocation_id = 1;
     uint32_t chunk_size = 50000;
-    std::string csv_path = fs::exists("../../Results") 
-        ? "../../Results/results_tile_matrix_4cw_ar4ja_r12_ebn0_1.50_2.50_step0.10_max1000000_min20_iter200_1core.csv"
-        : "Results/results_tile_matrix_4cw_ar4ja_r12_ebn0_1.50_2.50_step0.10_max1000000_min20_iter200_1core.csv";
+    std::string csv_path = "";
 
     // Check for command line flags
     for (int i = 1; i < argc; ++i) {
@@ -1702,6 +1743,21 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (csv_path.empty()) {
+        std::string core_suffix = single_core ? "1core" : "440core";
+        if (is_waterfall) {
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2);
+            ss << "Results/results_tile_matrix_4cw_ar4ja_r12_waterfall_ebn0_" << snr_start << "_" << snr_stop << "_step" << snr_step << "_max" << max_blocks << "_min" << min_fe << "_iter" << max_iterations << "_" << core_suffix << ".csv";
+            csv_path = fs::exists("../../Results") ? ("../../" + ss.str()) : ss.str();
+        } else {
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2);
+            ss << "Results/results_tile_matrix_4cw_ar4ja_r12_ebn0_" << eb_n0_db << "_" << core_suffix << ".csv";
+            csv_path = fs::exists("../../Results") ? ("../../" + ss.str()) : ss.str();
+        }
+    }
+
     std::cout << "-------------------------------------------------------" << std::endl;
     std::cout << " Tenstorrent QuietBox 2: Tile Matrix 4-Codeword Harness" << std::endl;
     std::cout << " Architecture: Decoupled Access-Execute (DAE)" << std::endl;
@@ -1733,7 +1789,7 @@ int main(int argc, char** argv) {
     }
 
     if (is_waterfall) {
-        run_waterfall_sweep(pcm, schedule, snr_start, snr_stop, snr_step, min_fe, max_blocks, max_iterations, single_core, csv_path);
+        run_waterfall_sweep(pcm, schedule, snr_start, snr_stop, snr_step, min_fe, max_blocks, max_iterations, single_core, csv_path, chunk_size);
     } else {
         run_tile_matrix_on_hardware(pcm, schedule, eb_n0_db, num_batches, max_iterations, single_core, benchmark_mode, diff_test, diff_test_real, tile_limit, start_batch, invocation_id, min_fe, csv_path, chunk_size);
     }
