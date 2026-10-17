@@ -36,8 +36,11 @@ static std::string resolve_filepath(const std::string& filename) {
 }
 
 // ==============================================================================
+// Working 440 code 8CW pipelined simulation, still needs orchestration optimization and FER performance analysis
+//
 // Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Simulator & Hardware Harness
 // Architecture: Decoupled Access-Execute (DAE) with Native 32x32 Tensix Tiles
+// Target: 2x2 Blackhole Mesh Device (4 Chips x 110 Tensix Cores = 440 Cores)
 // Target: Tenstorrent Blackhole (440 Tensix Cores)
 // ==============================================================================
 

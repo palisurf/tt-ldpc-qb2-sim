@@ -1,4 +1,9 @@
 #pragma once
+// ==============================================================================
+// Working 440 code 8CW pipelined simulation, still needs orchestration optimization and FER performance analysis
+//
+// Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Core Architecture
+// ==============================================================================
 
 #include <stdint.h>
 #include <cmath>
