@@ -121,24 +121,22 @@ void kernel_main() {
         cycles_channel += (get_wall_clock() - t_ch0);
 
         if (pair == 0) {
-            const auto* p0 = reinterpret_cast<const uint32_t*>(vnode_l1_a);
-            stats[TelemSlot::INIT_BF16_W01] = p0[0];
-            stats[TelemSlot::INIT_BF16_W23] = p0[1];
+            const auto* pa = reinterpret_cast<const uint32_t*>(vnode_l1_a);
+            stats[TelemSlot::INIT_BF16_W01] = pa[0];
+            stats[TelemSlot::INIT_BF16_W23] = pa[1];
             stats[TelemSlot::MU_BITS]       = mu_bits;
             stats[TelemSlot::SIGMA_BITS]    = sigma_bits;
-            uint32_t neg0 = 0, neg1 = 0, neg2 = 0, neg3 = 0;
+            uint32_t na0 = 0, na1 = 0, na2 = 0, na3 = 0;
             for (uint32_t i = 0; i < 2048; i += 2) {
-                uint32_t w0 = p0[i + 0];
-                uint32_t w1 = p0[i + 1];
-                neg0 += ((w0 >> 15) & 1);
-                neg1 += (w0 >> 31);
-                neg2 += ((w1 >> 15) & 1);
-                neg3 += (w1 >> 31);
+                uint32_t w0 = pa[i + 0];
+                uint32_t w1 = pa[i + 1];
+                na0 += ((w0 >> 15) & 1); na1 += (w0 >> 31);
+                na2 += ((w1 >> 15) & 1); na3 += (w1 >> 31);
             }
-            stats[TelemSlot::INIT_NEG_CW0 + 0] = neg0;
-            stats[TelemSlot::INIT_NEG_CW0 + 1] = neg1;
-            stats[TelemSlot::INIT_NEG_CW0 + 2] = neg2;
-            stats[TelemSlot::INIT_NEG_CW0 + 3] = neg3;
+            stats[TelemSlot::INIT_NEG_CW0 + 0] = na0;
+            stats[TelemSlot::INIT_NEG_CW0 + 1] = na1;
+            stats[TelemSlot::INIT_NEG_CW0 + 2] = na2;
+            stats[TelemSlot::INIT_NEG_CW0 + 3] = na3;
         }
 
         // Reset early termination flag, active masks, and scan flags
@@ -150,6 +148,11 @@ void kernel_main() {
         sync_flags[SyncSlot::VNODE_L1_ADDR_A]   = vnode_l1_a;
         sync_flags[SyncSlot::VNODE_L1_ADDR_B]   = vnode_l1_b;
         sync_flags[SyncSlot::TRISC1_CMD]        = static_cast<uint32_t>(MaestroCmd::CMD_IDLE);
+        sync_flags[SyncSlot::DRAIN_ACK_W1]      = pair;
+        for (int c = 0; c < 8; ++c) {
+            stats[TelemSlot::LAST_BATCH_ITER_CW0 + c] = 0;
+            stats[TelemSlot::LAST_BATCH_BE_CW0 + c]   = 0;
+        }
 
         // Tri-core batch rendezvous barrier
         sync_flags[SyncSlot::BATCH_BARRIER_NCRISC] = epoch + pair + 1;
@@ -173,6 +176,7 @@ void kernel_main() {
         // ----------------------------------------------------------------------
         // Interleaved Dual-Batch DAE Gather/Scatter Engine (Bounded Autonomy)
         // ----------------------------------------------------------------------
+        uint32_t last_completed_k = 0;
         for (uint32_t k = 0; k < total_steps; ++k) {
             uint32_t bar = pair * total_steps + k + 1;
             uint32_t b_dae = k % 2;
@@ -276,7 +280,29 @@ void kernel_main() {
                 sync_flags[SyncSlot::GATHER_DONE_W1] = bar;
                 cycles_gather += (get_wall_clock() - t_g0);
             }
+            last_completed_k = k;
         }
+
+        // ----------------------------------------------------------------------
+        // Drain Residual Speculative Scatter Tile upon Early Termination
+        // ----------------------------------------------------------------------
+        // TT-Metal Microarchitectural Invariant:
+        // Circular buffer read/write pointers are maintained thread-locally in hardware registers.
+        // Because Worker 1 (NCRISC) is the sole consumer of cb_scat_out (cb_scratch_out_a/b),
+        // NCRISC must execute the residual tile drain itself when an iteration terminates early.
+        // If another thread (e.g. TRISC0) attempts to pop cb_scat_out, NCRISC's thread-local read
+        // pointer fails to advance, leaving it offset by 1 page (2,048 B). In subsequent pairs,
+        // NCRISC would then scatter tile t-1 into tile t's check equations, corrupting companion
+        // codewords. Once drained, NCRISC signals DRAIN_ACK_W1 to TRISC1 Maestro.
+        if (sync_flags[SyncSlot::TRISC1_CMD] == static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+            if (last_completed_k >= 1 && last_completed_k <= 2 * max_steps) {
+                uint32_t b_prev = (last_completed_k - 1) % 2;
+                uint32_t res_out = cb_scat_out[b_prev];
+                cb_wait_front(res_out, 1);
+                cb_pop_front(res_out, 1);
+            }
+        }
+        sync_flags[SyncSlot::DRAIN_ACK_W1] = pair + 1;
 
         // Residual Bit Error Check on Information Bits for Unconverged Codewords
         active_mask_a = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK_A]);

@@ -902,6 +902,8 @@ void kernel_main() {
     sync_flags[SyncSlot::ACTIVE_MASK_A]     = 0x0F;
     sync_flags[SyncSlot::ACTIVE_MASK_B]     = 0x0F;
     sync_flags[SyncSlot::EARLY_TERMINATION] = 0;
+    sync_flags[SyncSlot::DRAIN_ACK_T0]      = pair;
+    sync_flags[SyncSlot::DRAIN_ACK_W1]      = pair;
     sync_flags[SyncSlot::TRISC1_GRANT_STEP] = pair * total_steps + 1; // Grant Step 0
     sync_flags[SyncSlot::TRISC1_CMD]        = static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC);
 #endif
@@ -1054,8 +1056,16 @@ void kernel_main() {
         }
       }
 
+      // --------------------------------------------------------------------
+      // Synchronized Dual-Drain Barrier for Early Termination
+      // --------------------------------------------------------------------
+      // Maestro waits for both consumer threads to acknowledge draining:
+      // 1. Worker 2 (TRISC0) drains cb_scratch_in and check message FIFOs (DRAIN_ACK_T0).
+      // 2. Worker 1 (NCRISC) drains speculative cb_scratch_out (DRAIN_ACK_W1).
+      // This strictly prevents cross-batch circular buffer pointer drift in TT-Metal.
       if (early_exit) {
         while (sync_flags[SyncSlot::DRAIN_ACK_T0] < pair + 1) { }
+        while (sync_flags[SyncSlot::DRAIN_ACK_W1] < pair + 1) { }
         sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_BATCH_DONE);
         break;
       }
@@ -1065,24 +1075,25 @@ void kernel_main() {
       } else {
         sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_BATCH_DONE);
         while (sync_flags[SyncSlot::DRAIN_ACK_T0] < pair + 1) { }
+        while (sync_flags[SyncSlot::DRAIN_ACK_W1] < pair + 1) { }
       }
 #endif
     }
 
 #ifdef TRISC_UNPACK
+    // ----------------------------------------------------------------------
+    // Drain In-Flight Input Pages & Check Messages (Consumer: TRISC_UNPACK)
+    // ----------------------------------------------------------------------
+    // Note: cb_scratch_out is consumed by NCRISC, so it is drained in writer_ncrisc.cpp.
+    // TRISC_UNPACK only drains the queues it consumes: cb_scratch_in and cb_r_msg_a/b.
     if (sync_flags[SyncSlot::TRISC1_CMD] == static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
       uint32_t b_dae = last_completed_k % 2;
       uint32_t s_dae = last_completed_k / 2;
       uint32_t res_in  = (b_dae == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
-      uint32_t res_out = (b_dae == 0) ? cb_scratch_out_b : cb_scratch_out_a;
 
       if (s_dae < max_steps) {
         cb_wait_front(res_in, 1);
         cb_pop_front(res_in, 1);
-      }
-      if (last_completed_k >= 1 && last_completed_k <= 2 * max_steps) {
-        cb_wait_front(res_out, 1);
-        cb_pop_front(res_out, 1);
       }
     }
 
