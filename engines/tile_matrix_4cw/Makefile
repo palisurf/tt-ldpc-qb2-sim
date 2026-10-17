@@ -8,7 +8,7 @@ TT_METAL_HOME ?= /home/ttuser/tt-metal
 
 CXX          := g++
 CXXFLAGS     := -std=c++20 -O3 -Wall -Wextra -pthread -fPIC
-DEFINES      := -DARCH_BLACKHOLE -DSPDLOG_COMPILED_LIB -DSPDLOG_FMT_EXTERNAL
+DEFINES      := -DARCH_BLACKHOLE -DSPDLOG_COMPILED_LIB -DSPDLOG_FMT_EXTERNAL -DLDPC_USE_SFPU_LUT=1
 
 INCLUDES     := -I. \
                 -I$(TT_METAL_HOME) \
@@ -41,6 +41,10 @@ r_dataflow: clean $(TARGET)
 amin_3p: DEFINES += -DLDPC_USE_3PIECE_AMIN_STAR=1
 amin_3p: clean $(TARGET)
 	@echo "[3-PIECE AMIN* BUILD] Compiled $(TARGET) with LDPC_USE_3PIECE_AMIN_STAR=1"
+
+amin_lut: DEFINES += -DLDPC_USE_SFPU_LUT=1
+amin_lut: clean $(TARGET)
+	@echo "[SFPU LUT BUILD] Compiled $(TARGET) with LDPC_USE_SFPU_LUT=1"
 
 $(TARGET): $(OBJS)
 	@echo "[LINK] $@"

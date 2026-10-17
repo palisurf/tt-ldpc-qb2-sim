@@ -120,9 +120,9 @@ void kernel_main() {
                 uint32_t t_scat = s_scat % num_tiles;
                 const uint32_t* tile_hoff_w0 = p_hoff_base + t_scat * 96;
 
-                // Worker 0 scatters 48 pairs (Faces 0 & 2) back to variable nodes with direct store
+                // Worker 0 scatters 24 pairs (Face 0) back to variable nodes with direct store
                 if (active_mask != 0) {
-                    scatter_face_48pairs_w0(scratch_out_addr, tile_hoff_w0, vnode_out_ptr);
+                    scatter_face_24pairs(scratch_out_addr + 0, tile_hoff_w0 + 0, vnode_out_ptr);
                 }
                 sync_flags[SyncSlot::SCATTER_DONE_W0] = bar;
                 cycles_scatter += (get_wall_clock() - t_s0);
@@ -183,10 +183,12 @@ void kernel_main() {
                 if (active_mask != 0) {
                     uint32_t t_gath = s_dae % num_tiles;
                     const uint32_t* tile_hoff_w0 = p_hoff_base + t_gath * 96;
-                    gather_face_48pairs_w0(scratch_in_addr, tile_hoff_w0, vnode_bytes_ptr);
+                    gather_face_24pairs(scratch_in_addr + 0, tile_hoff_w0 + 0, vnode_bytes_ptr);
                 }
 
                 while (sync_flags[SyncSlot::GATHER_DONE_W1] < bar) { }
+                while (sync_flags[SyncSlot::GATHER_DONE_T0] < bar) { }
+                while (sync_flags[SyncSlot::GATHER_DONE_T2] < bar) { }
                 cb_push_back(active_in_cb, 1);
                 cycles_gather += (get_wall_clock() - t_g0);
             }
