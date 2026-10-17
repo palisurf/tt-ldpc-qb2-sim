@@ -255,9 +255,6 @@ void kernel_main() {
 
             // Early termination check: Release batch pair when both batches have converged
             if (sync_flags[SyncSlot::EARLY_TERMINATION]) {
-                uint32_t comp_cb_out = (b_dae == 0) ? cb_scratch_out_b : cb_scratch_out_a;
-                cb_wait_front(comp_cb_out, 1);
-                cb_pop_front(comp_cb_out, 1);
                 break;
             }
 
