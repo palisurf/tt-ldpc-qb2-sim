@@ -63,6 +63,16 @@ struct sLut16si {
     sLut16si(float s = 0.0f, float i = 0.0f) : slope(s), intercept(i) {}
 };
 
+struct vLut16ss {
+    float s0, s1;
+    vLut16ss(float _s0 = 0.0f, float _s1 = 0.0f) : s0(_s0), s1(_s1) {}
+};
+
+struct vLut16ii {
+    float i0, i1;
+    vLut16ii(float _i0 = 0.0f, float _i1 = 0.0f) : i0(_i0), i1(_i1) {}
+};
+
 // ------------------------------------------------------------------------------
 // Thread-Safe Predication Context Stack for v_if / v_endif
 // ------------------------------------------------------------------------------
@@ -561,29 +571,6 @@ inline vInt make_vConstTileId() {
 static const vInt vConstTileId = make_vConstTileId();
 
 // ------------------------------------------------------------------------------
-// Branchless Approximate-Min* (Verbatim matching compute_trisc.cpp)
-// ------------------------------------------------------------------------------
-sfpi_inline vFloat sfpi_amin_star_branchless(vFloat a, vFloat b) {
-#if defined(LDPC_USE_3PIECE_AMIN_STAR)
-    auto [min_v, max_v] = sfpi::min_max(a, b);
-    vFloat diff   = max_v - min_v;
-    // Fold sequentially to keep active register pressure low
-    vFloat corr   = vFloat(sFloat16b(0.67862f)) + vFloat(sFloat16b(-0.39622f)) * diff;
-    corr = sfpi::max(corr, vFloat(sFloat16b(0.48710f)) + vFloat(sFloat16b(-0.18297f)) * diff);
-    corr = sfpi::max(corr, vFloat(sFloat16b(0.17614f)) + vFloat(sFloat16b(-0.04029f)) * diff);
-    corr = sfpi::max(corr, 0.0f);
-    return sfpi::max(min_v - corr, 0.0f);
-#else
-    auto [min_v, max_v] = sfpi::min_max(a, b);
-    vFloat diff   = max_v - min_v;
-    vFloat line1  = vFloat(sFloat16b(0.69315f)) + vFloat(sFloat16b(-0.4000f)) * diff;
-    vFloat line2  = vFloat(sFloat16b(0.65715f)) + vFloat(sFloat16b(-0.3280f)) * diff;
-    vFloat corr   = sfpi::max(sfpi::max(line1, line2), 0.0f);
-    return sfpi::max(min_v - corr, 0.0f);
-#endif
-}
-
-// ------------------------------------------------------------------------------
 // SFPU Hardware Look-Up Table (SFPLUTFP32) Emulation
 // ------------------------------------------------------------------------------
 static sLut16si lut_table_hwm3[6];
@@ -614,6 +601,62 @@ inline vFloat lut(const vFloat& delta, LutSign /*sign*/ = LutSign::Retain) {
         out.data[i] = entry.slope * d + entry.intercept;
     }
     return out;
+}
+
+template<LutMode M = LutMode::Fp16x6_HWM3>
+inline vFloat lut(const vFloat& delta,
+                  vLut16ss s01, vLut16ii i01,
+                  vLut16ss s23, vLut16ii i23,
+                  vLut16ss s45, vLut16ii i45,
+                  LutSign /*sign*/ = LutSign::Retain) {
+    vFloat out;
+    for (int i = 0; i < 32; ++i) {
+        float d = delta.data[i];
+        float slope = 0.0f, intercept = 0.0f;
+        if      (d < 0.5f) { slope = s01.s0; intercept = i01.i0; }
+        else if (d < 1.0f) { slope = s01.s1; intercept = i01.i1; }
+        else if (d < 1.5f) { slope = s23.s0; intercept = i23.i0; }
+        else if (d < 2.0f) { slope = s23.s1; intercept = i23.i1; }
+        else if (d < 3.0f) { slope = s45.s0; intercept = i45.i0; }
+        else               { slope = s45.s1; intercept = i45.i1; }
+        out.data[i] = slope * d + intercept;
+    }
+    return out;
+}
+
+// ------------------------------------------------------------------------------
+// Branchless Approximate-Min* (Verbatim matching compute_trisc.cpp)
+// ------------------------------------------------------------------------------
+sfpi_inline vFloat sfpi_amin_star_branchless(vFloat a, vFloat b) {
+#if defined(LDPC_USE_SFPU_LUT)
+    auto [min_v, max_v] = sfpi::min_max(a, b);
+    vFloat diff = max_v - min_v;
+    vLut16ss s01(-0.4000f, -0.3280f);
+    vLut16ii i01(0.69315f, 0.65715f);
+    vLut16ss s23(-0.3280f, -0.3280f);
+    vLut16ii i23(0.65715f, 0.65715f);
+    vLut16ss s45(0.0f, 0.0f);
+    vLut16ii i45(0.0f, 0.0f);
+    vFloat corr = sfpi::lut<sfpi::LutMode::Fp16x6_HWM3>(
+        diff, s01, i01, s23, i23, s45, i45, sfpi::LutSign::Update);
+    return sfpi::max(min_v - corr, 0.0f);
+#elif defined(LDPC_USE_3PIECE_AMIN_STAR)
+    auto [min_v, max_v] = sfpi::min_max(a, b);
+    vFloat diff   = max_v - min_v;
+    // Fold sequentially to keep active register pressure low
+    vFloat corr   = vFloat(sFloat16b(0.67862f)) + vFloat(sFloat16b(-0.39622f)) * diff;
+    corr = sfpi::max(corr, vFloat(sFloat16b(0.48710f)) + vFloat(sFloat16b(-0.18297f)) * diff);
+    corr = sfpi::max(corr, vFloat(sFloat16b(0.17614f)) + vFloat(sFloat16b(-0.04029f)) * diff);
+    corr = sfpi::max(corr, 0.0f);
+    return sfpi::max(min_v - corr, 0.0f);
+#else
+    auto [min_v, max_v] = sfpi::min_max(a, b);
+    vFloat diff   = max_v - min_v;
+    vFloat line1  = vFloat(sFloat16b(0.69315f)) + vFloat(sFloat16b(-0.4000f)) * diff;
+    vFloat line2  = vFloat(sFloat16b(0.65715f)) + vFloat(sFloat16b(-0.3280f)) * diff;
+    vFloat corr   = sfpi::max(sfpi::max(line1, line2), 0.0f);
+    return sfpi::max(min_v - corr, 0.0f);
+#endif
 }
 
 // ------------------------------------------------------------------------------
