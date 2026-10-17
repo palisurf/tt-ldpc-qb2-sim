@@ -909,6 +909,15 @@ void kernel_main() {
       }
 #endif
 
+      // Synchronize with NCRISC parity scan at iteration completion boundary
+      if (s_dae >= 1 && ((s_dae - 1) % num_tiles) == (num_tiles - 1)) {
+        if (b_dae == 0) {
+          while (sync_flags[SyncSlot::ITER_DONE_A] < bar) { }
+        } else {
+          while (sync_flags[SyncSlot::ITER_DONE_B] < bar) { }
+        }
+      }
+
       // Early termination check: Release batch pair when both batches have converged
       if (sync_flags[SyncSlot::EARLY_TERMINATION]) {
         break;
