@@ -10,9 +10,22 @@
 
 // ==============================================================================
 // Tenstorrent QuietBox 2: Tile Matrix 4-Codeword LDPC Decoder Engine
-// Component: Tri-TRISC Compute & Access Coordination Kernel
-// Architecture: Decoupled Access-Execute (DAE) with Native 32x32 Tensix Tiles
+// Component: Tri-TRISC Compute & Centralized Macro-Orchestrator Kernel
+// Architecture: Centralized TRISC1 Maestro with Bounded Satellite Autonomy (DAE)
 // Target: Tenstorrent Blackhole (440 Tensix Cores, 2,200 RISC-V Processors)
+// Specification: docs/MD_files/CENTRALIZED_TRISC1_ORCHESTRATOR_AND_BOUNDED_AUTONOMY_SPECIFICATION.md
+//
+// Key Principles:
+// 1. Hub-and-Spoke Orchestration: TRISC1 (MATH) is the fastest compute engine (~780 cyc)
+//    and acts as the sole Maestro, governing macro-step grants (TRISC1_GRANT_STEP) and
+//    command dispatch (TRISC1_CMD: CMD_STEP_EXEC, CMD_DRAIN_RESIDUAL, CMD_BATCH_DONE).
+// 2. Bounded Satellite Autonomy: TRISC0 (UNPACK) & TRISC2 (PACK) execute intra-tile
+//    gather/scatter and unpacking/packing 100% autonomously, but have zero authority
+//    to advance steps or early-terminate without TRISC1 grant.
+// 3. Inter-Pair Quiescence & Pre-Step Gate: TRISC1_CMD is reset to CMD_IDLE before
+//    the tri-core batch rendezvous barrier. Satellites wait for CMD_STEP_EXEC and
+//    GRANT_STEP >= pair*total_steps+1 before launching Step 0, preventing premature
+//    termination on stale command residual flags.
 // ==============================================================================
 
 #ifndef LDPC_ENABLE_CH_CLAMP
@@ -820,6 +833,7 @@ void kernel_main() {
   uint32_t stats_l1 = ckernel::get_tile_address(cb_telemetry, 0);
   volatile uint32_t *sync_flags =
       reinterpret_cast<volatile uint32_t *>(stats_l1);
+  volatile uint32_t *stats = sync_flags;
 
   volatile uint32_t *const wall_clock_reg =
       reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
@@ -843,6 +857,9 @@ void kernel_main() {
   // Main Simulation Loop (Dual-Batch Pairs)
   // --------------------------------------------------------------------------
   for (uint32_t pair = 0; pair < num_batch_pairs; ++pair) {
+#ifdef TRISC_MATH
+    sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_IDLE);
+#endif
     // Step 1: Generate Channel Observations for Batch A (CB_VNODE_A)
     uint32_t seed_a = rng_core.next();
     generate_channel_tiles(cb_vnode_a, mu_val, sigma_val, benchmark_mode,
@@ -879,16 +896,48 @@ void kernel_main() {
     char* vnodes_out[2] = {vnode_out_a, vnode_out_b};
     const uint32_t* p_hoff_base = reinterpret_cast<const uint32_t*>(sync_flags[SyncSlot::HOFF_L1_ADDR]);
 
+#ifdef TRISC_MATH
+    uint8_t active_mask_a = 0x0F;
+    uint8_t active_mask_b = 0x0F;
+    sync_flags[SyncSlot::ACTIVE_MASK_A]     = 0x0F;
+    sync_flags[SyncSlot::ACTIVE_MASK_B]     = 0x0F;
+    sync_flags[SyncSlot::EARLY_TERMINATION] = 0;
+    sync_flags[SyncSlot::TRISC1_GRANT_STEP] = pair * total_steps + 1; // Grant Step 0
+    sync_flags[SyncSlot::TRISC1_CMD]        = static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC);
+#endif
+
+#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
+    // Satellite Pre-Step Gate: Wait for TRISC1 Maestro to launch Step 0
+    while (sync_flags[SyncSlot::TRISC1_CMD] != static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC) ||
+           sync_flags[SyncSlot::TRISC1_GRANT_STEP] < pair * total_steps + 1) { }
+#endif
+
+#ifdef TRISC_UNPACK
+    uint32_t last_completed_k = 0;
+#endif
+
     for (uint32_t k = 0; k < total_steps; ++k) {
       uint32_t bar = pair * total_steps + k + 1;
       uint32_t b_dae = k % 2;
       uint32_t s_dae = k / 2;
+
+      // 1. Wait for TRISC1 Macro Step Grant (Satellites: TRISC0 & TRISC2)
+#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
+      while (sync_flags[SyncSlot::TRISC1_GRANT_STEP] < bar) {
+        if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+          break;
+        }
+      }
+      if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+        break;
+      }
+#endif
+
+      // 2. Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
+#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
       uint8_t active_mask = static_cast<uint8_t>(
           (b_dae == 0) ? sync_flags[SyncSlot::ACTIVE_MASK_A] : sync_flags[SyncSlot::ACTIVE_MASK_B]
       );
-
-      // 1. Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
-#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
       if (s_dae >= 1 && (s_dae - 1) < max_steps) {
         while (sync_flags[SyncSlot::SCATTER_START] < bar) { }
         uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
@@ -909,21 +958,7 @@ void kernel_main() {
       }
 #endif
 
-      // Synchronize with NCRISC parity scan at iteration completion boundary
-      if (s_dae >= 1 && ((s_dae - 1) % num_tiles) == (num_tiles - 1)) {
-        if (b_dae == 0) {
-          while (sync_flags[SyncSlot::ITER_DONE_A] < bar) { }
-        } else {
-          while (sync_flags[SyncSlot::ITER_DONE_B] < bar) { }
-        }
-      }
-
-      // Early termination check: Release batch pair when both batches have converged
-      if (sync_flags[SyncSlot::EARLY_TERMINATION]) {
-        break;
-      }
-
-      // 2. Gather Stage: Gather current tile s_dae of Batch b_dae
+      // 3. Gather Stage: Gather current tile s_dae of Batch b_dae
 #if defined(TRISC_UNPACK) || defined(TRISC_PACK)
       if (s_dae < max_steps) {
         while (sync_flags[SyncSlot::GATHER_START] < bar) { }
@@ -944,23 +979,12 @@ void kernel_main() {
       }
 #endif
 
-      // 3. Compute Stage: Compute check nodes for tile (k - 1)
+      // 4. Compute Stage: Compute check nodes for tile (k - 1)
       if (k >= 1 && k <= 2 * max_steps) {
         uint32_t b_comp = (k - 1) % 2;
         uint32_t s_comp = (k - 1) / 2;
         uint32_t t_comp = s_comp % num_tiles;
         uint32_t iter_comp = s_comp / num_tiles;
-
-        // At start of each new iteration (t_comp == 0, iter > 0):
-        // Synchronize with NCRISC parity scan of previous iteration
-        if (t_comp == 0 && iter_comp > 0) {
-          uint32_t expected_bar = pair * total_steps + 2 * iter_comp * num_tiles + (b_comp == 0 ? 1 : 2);
-          if (b_comp == 0) {
-            while (sync_flags[SyncSlot::ITER_DONE_A] < expected_bar) { }
-          } else {
-            while (sync_flags[SyncSlot::ITER_DONE_B] < expected_bar) { }
-          }
-        }
 
         uint32_t cb_in  = (b_comp == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
         uint32_t cb_out = (b_comp == 0) ? cb_scratch_out_a : cb_scratch_out_b;
@@ -973,9 +997,95 @@ void kernel_main() {
           compute_tile_deg3(cb_in, cb_out, cb_r, iter_comp);
         }
       }
+
+#ifdef TRISC_UNPACK
+      last_completed_k = k;
+#endif
+
+#ifdef TRISC_MATH
+      // 5. TRISC1 Conductor: Poll all satellites for step k
+      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
+        while (sync_flags[SyncSlot::SCATTER_DONE_W0] < bar) { }
+        while (sync_flags[SyncSlot::SCATTER_DONE_W1] < bar) { }
+        while (sync_flags[SyncSlot::SCATTER_DONE_T0] < bar) { }
+        while (sync_flags[SyncSlot::SCATTER_DONE_T2] < bar) { }
+      }
+      if (s_dae < max_steps) {
+        while (sync_flags[SyncSlot::GATHER_DONE_W0] < bar) { }
+        while (sync_flags[SyncSlot::GATHER_DONE_W1] < bar) { }
+        while (sync_flags[SyncSlot::GATHER_DONE_T0] < bar) { }
+        while (sync_flags[SyncSlot::GATHER_DONE_T2] < bar) { }
+      }
+
+      // 6. TRISC1 Iteration Boundary & Parity Evaluation (Tile 39)
+      bool early_exit = false;
+      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
+        uint32_t s_scat = s_dae - 1;
+        uint32_t t_scat = s_scat % num_tiles;
+        if (t_scat == num_tiles - 1) {
+          uint32_t iter_scat = s_scat / num_tiles;
+          uint32_t info_errs   = sync_flags[SyncSlot::PARITY_REPORT_W0];
+          uint32_t parity_errs = sync_flags[SyncSlot::PARITY_REPORT_W1];
+          uint32_t total_cw_errs = info_errs | parity_errs;
+
+          if (b_dae == 0) {
+            for (uint32_t c = 0; c < 4; ++c) {
+              if (((total_cw_errs & (1 << c)) == 0) && (active_mask_a & (1 << c))) {
+                active_mask_a &= ~(1 << c);
+                stats[TelemSlot::LAST_BATCH_ITER_CW0 + c] = iter_scat + 1;
+              }
+            }
+            sync_flags[SyncSlot::ACTIVE_MASK_A] = active_mask_a;
+          } else {
+            for (uint32_t c = 0; c < 4; ++c) {
+              if (((total_cw_errs & (1 << c)) == 0) && (active_mask_b & (1 << c))) {
+                active_mask_b &= ~(1 << c);
+                stats[TelemSlot::LAST_BATCH_ITER_CW0 + 4 + c] = iter_scat + 1;
+              }
+            }
+            sync_flags[SyncSlot::ACTIVE_MASK_B] = active_mask_b;
+          }
+
+          if (active_mask_a == 0 && active_mask_b == 0) {
+            sync_flags[SyncSlot::EARLY_TERMINATION] = 1;
+            sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL);
+            early_exit = true;
+          }
+        }
+      }
+
+      if (early_exit) {
+        while (sync_flags[SyncSlot::DRAIN_ACK_T0] < pair + 1) { }
+        sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_BATCH_DONE);
+        break;
+      }
+
+      if (k + 1 < total_steps) {
+        sync_flags[SyncSlot::TRISC1_GRANT_STEP] = pair * total_steps + (k + 1) + 1;
+      } else {
+        sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_BATCH_DONE);
+        while (sync_flags[SyncSlot::DRAIN_ACK_T0] < pair + 1) { }
+      }
+#endif
     }
 
 #ifdef TRISC_UNPACK
+    if (sync_flags[SyncSlot::TRISC1_CMD] == static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
+      uint32_t b_dae = last_completed_k % 2;
+      uint32_t s_dae = last_completed_k / 2;
+      uint32_t res_in  = (b_dae == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
+      uint32_t res_out = (b_dae == 0) ? cb_scratch_out_b : cb_scratch_out_a;
+
+      if (s_dae < max_steps) {
+        cb_wait_front(res_in, 1);
+        cb_pop_front(res_in, 1);
+      }
+      if (last_completed_k >= 1 && last_completed_k <= 2 * max_steps) {
+        cb_wait_front(res_out, 1);
+        cb_pop_front(res_out, 1);
+      }
+    }
+
     // Drain circular FIFO check messages
     for (uint32_t t = 0; t < num_tiles; ++t) {
       cb_wait_front(cb_r_msg_a, 1);
@@ -983,6 +1093,7 @@ void kernel_main() {
       cb_wait_front(cb_r_msg_b, 1);
       cb_pop_front(cb_r_msg_b, 1);
     }
+    sync_flags[SyncSlot::DRAIN_ACK_T0] = pair + 1;
 #endif
   }
 

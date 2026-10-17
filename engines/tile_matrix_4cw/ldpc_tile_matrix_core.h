@@ -110,7 +110,16 @@ namespace TileMatrixCB {
     constexpr uint8_t CB_SCRATCH_SCATTER_B = CB_SCRATCH_SCATTER_1;
 }
 
-// Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY (Slots 12..31, 186..199)
+// Maestro Command Enum issued by Centralized TRISC1 Orchestrator (Slot 22)
+enum class MaestroCmd : uint32_t {
+    CMD_IDLE           = 0, // Initial idle state
+    CMD_STEP_EXEC      = 1, // Execute Step k (Scatter k-2, Gather k)
+    CMD_DRAIN_RESIDUAL = 2, // Early termination: pop in-flight residual tile
+    CMD_BATCH_DONE     = 3, // Batch pair complete: rendezvous for next batch
+    CMD_HALT           = 4  // Simulation finished: halt all cores
+};
+
+// Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY (Slots 12..31, 184..199)
 namespace SyncSlot {
     constexpr uint32_t BRISC_GATHER_ERR_CW01_A = 12; // Worker 0 (BRISC) gathered negative symbol flag for CW0 & CW1 (Batch A)
     constexpr uint32_t BRISC_GATHER_ERR_CW23_A = 13; // Worker 0 (BRISC) gathered negative symbol flag for CW2 & CW3 (Batch A)
@@ -121,10 +130,10 @@ namespace SyncSlot {
     constexpr uint32_t ACTIVE_MASK_A       = 18; // Active codeword mask [3:0] for Batch A
     constexpr uint32_t ACTIVE_MASK_B       = 19; // Active codeword mask [3:0] for Batch B
     constexpr uint32_t EARLY_TERMINATION   = 20; // 1 if both Batch A and Batch B have converged early
-    constexpr uint32_t GATHER_START        = 21; // Monotonic gather start barrier (written by BRISC: step_barrier)
-    constexpr uint32_t GATHER_DONE_W1      = 22; // Worker 1 (NCRISC: Face 1) gather done (step_barrier)
-    constexpr uint32_t SCATTER_DONE_W0     = 23; // Worker 0 (BRISC: Face 0) scatter done (step_barrier)
-    constexpr uint32_t SCATTER_START       = 24; // Monotonic scatter start barrier (written by NCRISC: step_barrier)
+    constexpr uint32_t TRISC1_GRANT_STEP   = 21; // Monotonic step grant issued by TRISC1 Orchestrator
+    constexpr uint32_t TRISC1_CMD          = 22; // Command enum (MaestroCmd) issued by TRISC1
+    constexpr uint32_t DRAIN_ACK_T0        = 23; // TRISC0 acknowledgment of residual FIFO drain
+    constexpr uint32_t GATHER_START        = 24; // Signaled by BRISC when SCRATCH_GATHER_PTR is published
     constexpr uint32_t SCRATCH_GATHER_PTR  = 25; // Active gather L1 write pointer
     constexpr uint32_t SCRATCH_SCATTER_PTR = 26; // Active scatter L1 read pointer
     constexpr uint32_t VNODE_L1_ADDR_A     = 27; // Batch A variable node L1 base address
@@ -139,21 +148,26 @@ namespace SyncSlot {
     constexpr uint32_t BRISC_GATHER_ERR_CW01 = BRISC_GATHER_ERR_CW01_A;
     constexpr uint32_t BRISC_GATHER_ERR_CW23 = BRISC_GATHER_ERR_CW23_A;
 
-    // 4-Worker Face Parallel Done Barriers
-    constexpr uint32_t GATHER_DONE_T0      = 186; // Worker 2 (TRISC0: Face 2) gather done (step_barrier)
-    constexpr uint32_t GATHER_DONE_T2      = 187; // Worker 3 (TRISC2: Face 3) gather done (step_barrier)
-    constexpr uint32_t SCATTER_DONE_T0     = 188; // Worker 2 (TRISC0: Face 2) scatter done (step_barrier)
-    constexpr uint32_t SCATTER_DONE_T2     = 189; // Worker 3 (TRISC2: Face 3) scatter done (step_barrier)
-    constexpr uint32_t GATHER_ALL_DONE     = 190; // All 4 faces gathered into scratch_in (written by BRISC: step_barrier)
-    constexpr uint32_t ITER_DONE           = 191; // Global step completion synchronization
+    // 4-Worker Face Parallel Done Barriers (Slots 184..191)
+    constexpr uint32_t GATHER_DONE_W0      = 184; // Worker 0 (BRISC: Face 0) gather done
+    constexpr uint32_t GATHER_DONE_W1      = 185; // Worker 1 (NCRISC: Face 1) gather done
+    constexpr uint32_t GATHER_DONE_T0      = 186; // Worker 2 (TRISC0: Face 2) gather done
+    constexpr uint32_t GATHER_DONE_T2      = 187; // Worker 3 (TRISC2: Face 3) gather done
+    constexpr uint32_t SCATTER_DONE_W0     = 188; // Worker 0 (BRISC: Face 0) scatter done
+    constexpr uint32_t SCATTER_DONE_W1     = 189; // Worker 1 (NCRISC: Face 1) scatter done
+    constexpr uint32_t SCATTER_DONE_T0     = 190; // Worker 2 (TRISC0: Face 2) scatter done
+    constexpr uint32_t SCATTER_DONE_T2     = 191; // Worker 3 (TRISC2: Face 3) scatter done
+    constexpr uint32_t GATHER_ALL_DONE     = 192; // All 4 faces gathered into scratch_in
+    constexpr uint32_t SCATTER_START       = 193; // Signaled by NCRISC when SCRATCH_SCATTER_PTR is published
 
-    // Dual-batch specific barriers
-    constexpr uint32_t BRISC_GATHER_ERR_CW01_B = 192;
-    constexpr uint32_t BRISC_GATHER_ERR_CW23_B = 193;
-    constexpr uint32_t BRISC_SCAN_DONE_A   = 194;
-    constexpr uint32_t BRISC_SCAN_DONE_B   = 195;
+    // Satellite Parity Reports to TRISC1 (Slots 194..195)
+    constexpr uint32_t PARITY_REPORT_W0    = 194; // Worker 0 reports info error mask for CW0, CW1
+    constexpr uint32_t PARITY_REPORT_W1    = 195; // Worker 1 reports info error mask for CW2, CW3
+    constexpr uint32_t BRISC_SCAN_DONE_A   = PARITY_REPORT_W0;
+    constexpr uint32_t BRISC_SCAN_DONE_B   = PARITY_REPORT_W1;
     constexpr uint32_t ITER_DONE_A         = 196;
     constexpr uint32_t ITER_DONE_B         = 197;
+    constexpr uint32_t ITER_DONE           = ITER_DONE_A;
     constexpr uint32_t BRISC_SCAN_DONE     = BRISC_SCAN_DONE_A;
 }
 
