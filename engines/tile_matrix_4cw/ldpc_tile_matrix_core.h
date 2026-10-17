@@ -802,14 +802,16 @@ inline float approx_min_star_scalar(float a, float b) {
 // ------------------------------------------------------------------------------
 
 inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_24, const char* vnode_bytes_ptr) {
-    auto* dst_even = reinterpret_cast<uint32_t*>(dst_face_addr);
+    typedef uint64_t v2ui __attribute__((vector_size(16)));
+
+    auto* dst_even128 = reinterpret_cast<v2ui*>(dst_face_addr);
     const uint32_t* p_h = p_hoff_24;
 
     #pragma GCC unroll 6
     for (uint32_t d = 0; d < 6; ++d) {
-        auto* dst_odd = dst_even + 8;
+        auto* dst_odd128 = dst_even128 + 2; // 2 v2ui = 32 bytes = 1 face row
 
-        // Block 0: Pairs 0 and 1 (aligned 128-bit block stores)
+        // Block 0: Pairs 0 and 1 (64-bit contiguous double-word loads for all 4 CWs -> 128-bit vector stores)
         {
             uint32_t off0 = p_h[0];
             uint32_t off1 = p_h[1];
@@ -819,18 +821,19 @@ inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_2
             uint32_t off1_e = off1 & 0xFFFF;
             uint32_t off1_o = off1 >> 16;
 
-            const auto* s0_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off0_e);
-            const auto* s0_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off0_o);
-            const auto* s1_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_e);
-            const auto* s1_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off1_o);
+            const auto* s0_e = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off0_e);
+            const auto* s0_o = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off0_o);
+            const auto* s1_e = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off1_e);
+            const auto* s1_o = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off1_o);
 
-            dst_even[0] = s0_e[0]; dst_even[1] = s0_e[1];
-            dst_even[2] = s1_e[0]; dst_even[3] = s1_e[1];
-            dst_odd[0]  = s0_o[0]; dst_odd[1]  = s0_o[1];
-            dst_odd[2]  = s1_o[0]; dst_odd[3]  = s1_o[1];
+            v2ui v_even0 = { *s0_e, *s1_e };
+            v2ui v_odd0  = { *s0_o, *s1_o };
+
+            dst_even128[0] = v_even0;
+            dst_odd128[0]  = v_odd0;
         }
 
-        // Block 1: Pairs 2 and 3 (aligned 128-bit block stores)
+        // Block 1: Pairs 2 and 3 (64-bit contiguous double-word loads for all 4 CWs -> 128-bit vector stores)
         {
             uint32_t off2 = p_h[2];
             uint32_t off3 = p_h[3];
@@ -840,51 +843,79 @@ inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_2
             uint32_t off3_e = off3 & 0xFFFF;
             uint32_t off3_o = off3 >> 16;
 
-            const auto* s2_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off2_e);
-            const auto* s2_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off2_o);
-            const auto* s3_e = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_e);
-            const auto* s3_o = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + off3_o);
+            const auto* s2_e = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off2_e);
+            const auto* s2_o = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off2_o);
+            const auto* s3_e = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off3_e);
+            const auto* s3_o = reinterpret_cast<const uint64_t*>(vnode_bytes_ptr + off3_o);
 
-            dst_even[4] = s2_e[0]; dst_even[5] = s2_e[1];
-            dst_even[6] = s3_e[0]; dst_even[7] = s3_e[1];
-            dst_odd[4]  = s2_o[0]; dst_odd[5]  = s2_o[1];
-            dst_odd[6]  = s3_o[0]; dst_odd[7]  = s3_o[1];
+            v2ui v_even1 = { *s2_e, *s3_e };
+            v2ui v_odd1  = { *s2_o, *s3_o };
+
+            dst_even128[1] = v_even1;
+            dst_odd128[1]  = v_odd1;
         }
 
-        dst_even += 16;
+        dst_even128 += 4; // 4 v2ui = 64 bytes = 2 face rows
         p_h += 4;
     }
 
     // Zero out the 4 padding rows (Rows 12..15 = 128 bytes = 8 x 128-bit aligned vector stores)
-    typedef uint32_t v4ui __attribute__((vector_size(16)));
-    auto* pad128 = reinterpret_cast<v4ui*>(dst_even);
-    v4ui zero = {0, 0, 0, 0};
+    v2ui zero = {0, 0};
     #pragma GCC unroll 8
     for (int i = 0; i < 8; ++i) {
-        pad128[i] = zero;
+        dst_even128[i] = zero;
     }
 }
 
 inline void scatter_face_24pairs_fast(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr) {
-    const auto* src_even = reinterpret_cast<const uint32_t*>(src_face_addr);
+    typedef uint64_t v2ui __attribute__((vector_size(16)));
+
+    const auto* src_even128 = reinterpret_cast<const v2ui*>(src_face_addr);
     const uint32_t* p_h = p_hoff_24;
 
     #pragma GCC unroll 6
     for (uint32_t d = 0; d < 6; ++d) {
-        const auto* src_even64 = reinterpret_cast<const uint64_t*>(src_even);
-        const auto* src_odd64  = reinterpret_cast<const uint64_t*>(src_even + 8);
+        const auto* src_odd128 = src_even128 + 2;
 
-        #pragma GCC unroll 4
-        for (uint32_t p = 0; p < 4; ++p) {
-            uint32_t off = p_h[p];
-            auto* d_e64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off & 0xFFFF));
-            auto* d_o64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off >> 16));
+        // Block 0: Pairs 0 and 1 (128-bit vector loads -> 64-bit double-word stores)
+        {
+            uint32_t off0 = p_h[0];
+            uint32_t off1 = p_h[1];
 
-            *d_e64 = src_even64[p];
-            *d_o64 = src_odd64[p];
+            auto* d0_e64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off0 & 0xFFFF));
+            auto* d0_o64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off0 >> 16));
+            auto* d1_e64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off1 & 0xFFFF));
+            auto* d1_o64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off1 >> 16));
+
+            v2ui v_even0 = src_even128[0];
+            v2ui v_odd0  = src_odd128[0];
+
+            *d0_e64 = v_even0[0];
+            *d1_e64 = v_even0[1];
+            *d0_o64 = v_odd0[0];
+            *d1_o64 = v_odd0[1];
         }
 
-        src_even += 16;
+        // Block 1: Pairs 2 and 3 (128-bit vector loads -> 64-bit double-word stores)
+        {
+            uint32_t off2 = p_h[2];
+            uint32_t off3 = p_h[3];
+
+            auto* d2_e64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off2 & 0xFFFF));
+            auto* d2_o64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off2 >> 16));
+            auto* d3_e64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off3 & 0xFFFF));
+            auto* d3_o64 = reinterpret_cast<uint64_t*>(vnode_out_ptr + (off3 >> 16));
+
+            v2ui v_even1 = src_even128[1];
+            v2ui v_odd1  = src_odd128[1];
+
+            *d2_e64 = v_even1[0];
+            *d3_e64 = v_even1[1];
+            *d2_o64 = v_odd1[0];
+            *d3_o64 = v_odd1[1];
+        }
+
+        src_even128 += 4; // 4 v2ui = 64 bytes = 2 face rows
         p_h += 4;
     }
 }
