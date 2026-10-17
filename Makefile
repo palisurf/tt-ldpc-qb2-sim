@@ -19,7 +19,7 @@ LIBS         := -ltt_metal -ltt_stl -lfmt -lspdlog -lpthread -ldl
 TARGET       := ldpc_sim
 
 HOST_TEST_TARGET := test_kernel_host
-HOST_TEST_SRCS   := tests/test_kernel_host.cpp
+HOST_TEST_SRCS   := tests/scalar_5w/test_kernel_host.cpp
 
 TTSIM_TEST_TARGET := test_kernel_ttsim
 TTSIM_TEST_SRCS   := tests/test_kernel_ttsim.cpp
