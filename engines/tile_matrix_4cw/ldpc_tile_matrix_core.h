@@ -85,43 +85,59 @@ static inline uint32_t rv32_cpop(uint32_t a) {
 #endif
 
 // ------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 // Circular Buffer (CB) Allocations in Tensix L1 SRAM (Total 1.5 MB Available)
+// Inter-Batch Ping-Pong Architecture: 10 Circular Buffers (236 KB Total, 15.73% L1)
 // ------------------------------------------------------------------------------
 namespace TileMatrixCB {
-    constexpr uint8_t CB_VNODE_A           = 0;   // 20 KB: Active evolving variable posterior LLRs (Batch k)
-    constexpr uint8_t CB_R_MSG             = 17;  // 68 KB: 7,680 check messages (34 tile-aligned circular FIFO)
+    constexpr uint8_t CB_VNODE_A           = 0;   // 20 KB: Active evolving variable posterior LLRs (Batch A: CW 0..3)
+    constexpr uint8_t CB_R_MSG_A           = 1;   // 80 KB: 40 tile check messages circular FIFO (Batch A)
     constexpr uint8_t CB_H_OFFSET          = 2;   // 16 KB: Pre-shifted byte offsets (v * 8)
-    constexpr uint8_t CB_SCRATCH_GATHER_0  = 3;   // 4 KB: Stage 1 Gather Buffer (Double-buffered, 2 KB page)
-    constexpr uint8_t CB_SCRATCH_GATHER_1  = 4;   // 4 KB: Stage 1 Gather Buffer (Pong)
-    constexpr uint8_t CB_VNODE_B           = 5;   // 20 KB: Background AWGN pre-generation (Batch k+1)
-    constexpr uint8_t CB_SCRATCH_SCATTER_0 = 16;  // 4 KB: Stage 3 Scatter Buffer (Double-buffered, 2 KB page)
-    constexpr uint8_t CB_SCRATCH_SCATTER_1 = 18;  // 4 KB: Stage 3 Scatter Buffer (Pong)
+    constexpr uint8_t CB_SCRATCH_GATHER_0  = 3;   // 4 KB: Stage 1 Gather Buffer (Batch A, Double-buffered, 2 KB page)
+    constexpr uint8_t CB_SCRATCH_GATHER_1  = 4;   // 4 KB: Stage 1 Gather Buffer (Batch B, Double-buffered, 2 KB page)
+    constexpr uint8_t CB_VNODE_B           = 5;   // 20 KB: Active evolving variable posterior LLRs (Batch B: CW 4..7)
+    constexpr uint8_t CB_SCRATCH_SCATTER_0 = 16;  // 4 KB: Stage 3 Scatter Buffer (Batch A, Double-buffered, 2 KB page)
+    constexpr uint8_t CB_R_MSG_B           = 17;  // 80 KB: 40 tile check messages circular FIFO (Batch B)
+    constexpr uint8_t CB_SCRATCH_SCATTER_1 = 18;  // 4 KB: Stage 3 Scatter Buffer (Batch B, Double-buffered, 2 KB page)
     constexpr uint8_t CB_TELEMETRY         = 24;  // 4 KB: Hardware semaphores, mailboxes, telemetry
     constexpr uint32_t TELEMETRY_L1_BASE   = 0x3DC00;
+
+    // Aliases for Inter-Batch Ping-Pong clarity
+    constexpr uint8_t CB_R_MSG             = CB_R_MSG_A;
+    constexpr uint8_t CB_SCRATCH_GATHER_A  = CB_SCRATCH_GATHER_0;
+    constexpr uint8_t CB_SCRATCH_GATHER_B  = CB_SCRATCH_GATHER_1;
+    constexpr uint8_t CB_SCRATCH_SCATTER_A = CB_SCRATCH_SCATTER_0;
+    constexpr uint8_t CB_SCRATCH_SCATTER_B = CB_SCRATCH_SCATTER_1;
 }
 
-// Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY (Slots 14..31)
+// Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY (Slots 12..31, 186..199)
 namespace SyncSlot {
-    constexpr uint32_t BRISC_GATHER_ERR_CW01 = 12; // Worker 0 (BRISC) gathered negative symbol flag for CW0 & CW1
-    constexpr uint32_t BRISC_GATHER_ERR_CW23 = 13; // Worker 0 (BRISC) gathered negative symbol flag for CW2 & CW3
+    constexpr uint32_t BRISC_GATHER_ERR_CW01_A = 12; // Worker 0 (BRISC) gathered negative symbol flag for CW0 & CW1 (Batch A)
+    constexpr uint32_t BRISC_GATHER_ERR_CW23_A = 13; // Worker 0 (BRISC) gathered negative symbol flag for CW2 & CW3 (Batch A)
     constexpr uint32_t TRISC_CYCLES        = 14; // TRISC elapsed cycles mailbox
     constexpr uint32_t BRISC_CYCLES        = 15; // BRISC elapsed cycles mailbox
     constexpr uint32_t BATCH_READY         = 16; // Incremented when channel observations are 100% ready in L1
     constexpr uint32_t HOFF_L1_ADDR        = 17; // CB_H_OFFSET L1 base address
-    constexpr uint32_t ACTIVE_MASK         = 18; // Active codeword mask [3:0] (frozen codewords masked out)
-    constexpr uint32_t BRISC_SCAN_DONE     = 19; // Worker 0 (BRISC) completed transmitted vnode scan
-    constexpr uint32_t EARLY_TERMINATION   = 20; // 1 if all 4 codewords converged early, 0 otherwise
+    constexpr uint32_t ACTIVE_MASK_A       = 18; // Active codeword mask [3:0] for Batch A
+    constexpr uint32_t ACTIVE_MASK_B       = 19; // Active codeword mask [3:0] for Batch B
+    constexpr uint32_t EARLY_TERMINATION   = 20; // 1 if both Batch A and Batch B have converged early
     constexpr uint32_t GATHER_START        = 21; // Monotonic gather start barrier (written by BRISC: step_barrier)
     constexpr uint32_t GATHER_DONE_W1      = 22; // Worker 1 (NCRISC: Face 1) gather done (step_barrier)
     constexpr uint32_t SCATTER_DONE_W0     = 23; // Worker 0 (BRISC: Face 0) scatter done (step_barrier)
     constexpr uint32_t SCATTER_START       = 24; // Monotonic scatter start barrier (written by NCRISC: step_barrier)
     constexpr uint32_t SCRATCH_GATHER_PTR  = 25; // Active gather L1 write pointer
     constexpr uint32_t SCRATCH_SCATTER_PTR = 26; // Active scatter L1 read pointer
-    constexpr uint32_t VNODE_L1_ADDR       = 27; // Active variable node L1 base address
-    constexpr uint32_t BATCH_BARRIER_BRISC  = 28; // BRISC batch rendezvous
-    constexpr uint32_t BATCH_BARRIER_NCRISC = 29; // NCRISC batch rendezvous
-    constexpr uint32_t BATCH_BARRIER_TRISC  = 30; // TRISC batch rendezvous
-    constexpr uint32_t ITER_DONE            = 31; // Iteration completion synchronization
+    constexpr uint32_t VNODE_L1_ADDR_A     = 27; // Batch A variable node L1 base address
+    constexpr uint32_t VNODE_L1_ADDR_B     = 28; // Batch B variable node L1 base address
+    constexpr uint32_t BATCH_BARRIER_BRISC  = 29; // BRISC batch rendezvous
+    constexpr uint32_t BATCH_BARRIER_NCRISC = 30; // NCRISC batch rendezvous
+    constexpr uint32_t BATCH_BARRIER_TRISC  = 31; // TRISC batch rendezvous
+
+    // Backward-compatibility aliases
+    constexpr uint32_t ACTIVE_MASK         = ACTIVE_MASK_A;
+    constexpr uint32_t VNODE_L1_ADDR       = VNODE_L1_ADDR_A;
+    constexpr uint32_t BRISC_GATHER_ERR_CW01 = BRISC_GATHER_ERR_CW01_A;
+    constexpr uint32_t BRISC_GATHER_ERR_CW23 = BRISC_GATHER_ERR_CW23_A;
 
     // 4-Worker Face Parallel Done Barriers
     constexpr uint32_t GATHER_DONE_T0      = 186; // Worker 2 (TRISC0: Face 2) gather done (step_barrier)
@@ -129,6 +145,16 @@ namespace SyncSlot {
     constexpr uint32_t SCATTER_DONE_T0     = 188; // Worker 2 (TRISC0: Face 2) scatter done (step_barrier)
     constexpr uint32_t SCATTER_DONE_T2     = 189; // Worker 3 (TRISC2: Face 3) scatter done (step_barrier)
     constexpr uint32_t GATHER_ALL_DONE     = 190; // All 4 faces gathered into scratch_in (written by BRISC: step_barrier)
+    constexpr uint32_t ITER_DONE           = 191; // Global step completion synchronization
+
+    // Dual-batch specific barriers
+    constexpr uint32_t BRISC_GATHER_ERR_CW01_B = 192;
+    constexpr uint32_t BRISC_GATHER_ERR_CW23_B = 193;
+    constexpr uint32_t BRISC_SCAN_DONE_A   = 194;
+    constexpr uint32_t BRISC_SCAN_DONE_B   = 195;
+    constexpr uint32_t ITER_DONE_A         = 196;
+    constexpr uint32_t ITER_DONE_B         = 197;
+    constexpr uint32_t BRISC_SCAN_DONE     = BRISC_SCAN_DONE_A;
 }
 
 // Telemetry Buffer Layout in CB_TELEMETRY (1024 uint32 words)
@@ -146,10 +172,7 @@ namespace TelemSlot {
     constexpr uint32_t CYCLES_ERROR_SCAN   = 9;
     constexpr uint32_t TOTAL_TILES_SIM     = 10;
     constexpr uint32_t TELEMETRY_L1_ADDR   = 11;
-    constexpr uint32_t FIRST_FAILING_BATCH = 12;
-    constexpr uint32_t FIRST_FAILING_CW    = 13;
-    constexpr uint32_t FIRST_FAILING_BE    = 14;
-    constexpr uint32_t FIRST_FAILING_MASK  = 15;
+    // Slots 12..31 are reserved for live hardware SyncSlot semaphores
 
     // NCRISC (Worker 1) Tile Breakdown (written by NCRISC at exit)
     constexpr uint32_t NC_GATHER           = 32;
@@ -177,17 +200,23 @@ namespace TelemSlot {
     constexpr uint32_t DEG_BASE            = 64;  // 64..103
 
     // Diagnostics (written by NCRISC on Batch 0 and exit)
-    constexpr uint32_t INIT_NEG_CW0        = 104; // 104..107
+    constexpr uint32_t INIT_NEG_CW0        = 104; // 104..107 (CW 0..3)
     constexpr uint32_t INIT_BF16_W01       = 108;
     constexpr uint32_t INIT_BF16_W23       = 109;
     constexpr uint32_t MU_BITS             = 110;
     constexpr uint32_t SIGMA_BITS          = 111;
-    constexpr uint32_t LAST_BATCH_BE_CW0   = 112; // 112..115
-    constexpr uint32_t LAST_BATCH_ITER_CW0 = 116; // 116..119
-    constexpr uint32_t FAILING_CW0_COUNT   = 120;
-    constexpr uint32_t FAILING_CW1_COUNT   = 121;
-    constexpr uint32_t FAILING_CW0_BASE    = 122; // 122..153 (32 max)
-    constexpr uint32_t FAILING_CW1_BASE    = 154; // 154..185 (32 max)
+    constexpr uint32_t LAST_BATCH_BE_CW0   = 112; // 112..119 (CW 0..7)
+    constexpr uint32_t LAST_BATCH_ITER_CW0 = 120; // 120..127 (CW 0..7)
+    constexpr uint32_t FAILING_CW0_COUNT   = 128;
+    constexpr uint32_t FAILING_CW1_COUNT   = 129;
+    constexpr uint32_t FAILING_CW0_BASE    = 130; // 130..157 (28 max)
+    constexpr uint32_t FAILING_CW1_BASE    = 158; // 158..185 (28 max)
+
+    // Trapped Failing Batch Diagnostics (Slots 210..213)
+    constexpr uint32_t FIRST_FAILING_BATCH = 210;
+    constexpr uint32_t FIRST_FAILING_CW    = 211;
+    constexpr uint32_t FIRST_FAILING_BE    = 212;
+    constexpr uint32_t FIRST_FAILING_MASK  = 213;
 }
 
 // ------------------------------------------------------------------------------
@@ -232,7 +261,42 @@ struct Xoshiro128Plus {
         }
         s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3;
     }
+    // Advance PRNG by 2^96 draws via long_jump() (for inter-core partitioning across 440 cores)
+    inline void long_jump() {
+        static const uint32_t LONG_JUMP[] = { 0xb523952e, 0x0b6f099f, 0xccf5a0ef, 0x1c580662 };
+        uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 4; i++) {
+            for (int b = 0; b < 32; b++) {
+                if (LONG_JUMP[i] & (1U << b)) {
+                    s0 ^= s[0]; s1 ^= s[1]; s2 ^= s[2]; s3 ^= s[3];
+                }
+                next();
+            }
+        }
+        s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3;
+    }
 };
+
+// Helper: Compute deterministic, orthogonal seed state for (core_id, batch_pair_idx, batch_sub)
+inline Xoshiro128Plus get_orthogonal_rng_state(uint32_t global_seed, uint32_t core_id, uint32_t batch_pair_idx, uint32_t batch_sub) {
+    Xoshiro128Plus rng;
+    rng.init(global_seed);
+    // Tier 1: Core offset (core_id * 2^96)
+    for (uint32_t c = 0; c < core_id; ++c) {
+        rng.long_jump();
+    }
+    // Tier 2: Inter-batch pair offset (batch_pair_idx * 2 * 2^64)
+    for (uint32_t p = 0; p < batch_pair_idx; ++p) {
+        rng.jump();
+        rng.jump();
+    }
+    // Tier 3: Intra-pair offset (Batch B is +1 jump)
+    if (batch_sub == 1) {
+        rng.jump();
+    }
+    return rng;
+}
+
 
 // ------------------------------------------------------------------------------
 // Fast Branchless SFPU-Style Transcendental Functions
@@ -853,4 +917,30 @@ inline void scatter_face_24pairs(uint32_t src_face_addr, const uint32_t* p_hoff_
     (void)active_mask; // Unused in Monte Carlo simulation mode
     scatter_face_24pairs_fast(src_face_addr, p_hoff_24, vnode_out_ptr);
 }
+
+// ------------------------------------------------------------------------------
+// Hardware 2-Face (48 Edge Pairs = 96 Edges) Fast Data Movement Engines
+// Worker 0 gathers/scatters Faces 0 & 2 (96 edges x 4 CWs = 384 elements)
+// Worker 1 gathers/scatters Faces 1 & 3 (96 edges x 4 CWs = 384 elements)
+// ------------------------------------------------------------------------------
+inline void gather_face_48pairs_w0(uint32_t dst_scratch_addr, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr) {
+    gather_face_24pairs(dst_scratch_addr + 0,    p_hoff_48 + 0,  vnode_bytes_ptr); // Face 0
+    gather_face_24pairs(dst_scratch_addr + 1024, p_hoff_48 + 24, vnode_bytes_ptr); // Face 2
+}
+
+inline void gather_face_48pairs_w1(uint32_t dst_scratch_addr, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr) {
+    gather_face_24pairs(dst_scratch_addr + 512,  p_hoff_48 + 0,  vnode_bytes_ptr); // Face 1
+    gather_face_24pairs(dst_scratch_addr + 1536, p_hoff_48 + 24, vnode_bytes_ptr); // Face 3
+}
+
+inline void scatter_face_48pairs_w0(uint32_t src_scratch_addr, const uint32_t* p_hoff_48, char* vnode_out_ptr) {
+    scatter_face_24pairs_fast(src_scratch_addr + 0,    p_hoff_48 + 0,  vnode_out_ptr); // Face 0
+    scatter_face_24pairs_fast(src_scratch_addr + 1024, p_hoff_48 + 24, vnode_out_ptr); // Face 2
+}
+
+inline void scatter_face_48pairs_w1(uint32_t src_scratch_addr, const uint32_t* p_hoff_48, char* vnode_out_ptr) {
+    scatter_face_24pairs_fast(src_scratch_addr + 512,  p_hoff_48 + 0,  vnode_out_ptr); // Face 1
+    scatter_face_24pairs_fast(src_scratch_addr + 1536, p_hoff_48 + 24, vnode_out_ptr); // Face 3
+}
+
 

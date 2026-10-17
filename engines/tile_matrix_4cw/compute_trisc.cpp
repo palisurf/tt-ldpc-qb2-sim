@@ -763,13 +763,15 @@ generate_channel_tiles(uint32_t cb_out, float mu_val, float sigma_val,
 // Main Tri-TRISC Kernel Execution
 // ==============================================================================
 void kernel_main() {
-  uint32_t num_batches = get_arg_val<uint32_t>(0);
-  uint32_t max_iter = get_arg_val<uint32_t>(1);
-  uint32_t num_tiles = get_arg_val<uint32_t>(2);
-  uint32_t mu_bits = get_arg_val<uint32_t>(3);
-  uint32_t sigma_bits = get_arg_val<uint32_t>(4);
-  uint32_t invocation_id = get_arg_val<uint32_t>(5);
-  uint32_t start_batch = get_arg_val<uint32_t>(6);
+  uint32_t num_batch_pairs = get_arg_val<uint32_t>(0); // number of 8-codeword pairs
+  uint32_t max_iter        = get_arg_val<uint32_t>(1);
+  uint32_t num_tiles       = get_arg_val<uint32_t>(2);
+  uint32_t mu_bits         = get_arg_val<uint32_t>(3);
+  uint32_t sigma_bits      = get_arg_val<uint32_t>(4);
+  uint32_t invocation_id   = get_arg_val<uint32_t>(5);
+  uint32_t start_batch     = get_arg_val<uint32_t>(6);
+  uint32_t core_id         = get_arg_val<uint32_t>(7);
+  uint32_t global_seed     = get_arg_val<uint32_t>(8);
   if (invocation_id == 0)
     invocation_id = 1;
   uint32_t epoch = invocation_id << 16;
@@ -784,15 +786,18 @@ void kernel_main() {
   float mu_val = mu_conv.f;
   float sigma_val = sigma_conv.f;
 
-  constexpr uint32_t cb_vnode = TileMatrixCB::CB_VNODE_A;
-  constexpr uint32_t cb_scratch_in = TileMatrixCB::CB_SCRATCH_GATHER_0;
-  constexpr uint32_t cb_scratch_out = TileMatrixCB::CB_SCRATCH_SCATTER_0;
-  constexpr uint32_t cb_r_msg = TileMatrixCB::CB_R_MSG;
-  constexpr uint32_t cb_h_offset = TileMatrixCB::CB_H_OFFSET;
-  constexpr uint32_t cb_telemetry = TileMatrixCB::CB_TELEMETRY;
+  constexpr uint32_t cb_vnode_a       = TileMatrixCB::CB_VNODE_A;
+  constexpr uint32_t cb_vnode_b       = TileMatrixCB::CB_VNODE_B;
+  constexpr uint32_t cb_scratch_in_a  = TileMatrixCB::CB_SCRATCH_GATHER_0;
+  constexpr uint32_t cb_scratch_in_b  = TileMatrixCB::CB_SCRATCH_GATHER_1;
+  constexpr uint32_t cb_scratch_out_a = TileMatrixCB::CB_SCRATCH_SCATTER_0;
+  constexpr uint32_t cb_scratch_out_b = TileMatrixCB::CB_SCRATCH_SCATTER_1;
+  constexpr uint32_t cb_r_msg_a       = TileMatrixCB::CB_R_MSG_A;
+  constexpr uint32_t cb_r_msg_b       = TileMatrixCB::CB_R_MSG_B;
+  constexpr uint32_t cb_telemetry     = TileMatrixCB::CB_TELEMETRY;
 
-  compute_kernel_hw_startup(cb_scratch_in, cb_scratch_out);
-  copy_init(cb_scratch_in);
+  compute_kernel_hw_startup(cb_scratch_in_a, cb_scratch_out_a);
+  copy_init(cb_scratch_in_a);
 
   uint32_t stats_l1 = ckernel::get_tile_address(cb_telemetry, 0);
   volatile uint32_t *sync_flags =
@@ -802,102 +807,92 @@ void kernel_main() {
       reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
   uint32_t t_start = *wall_clock_reg;
 
-  uint32_t global_iter = 0;
-#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
-  uint32_t step_barrier = 0;
-#endif
+  // Initialize PRNG with 4-tier seed hierarchy
+  Xoshiro128Plus rng_core;
+  rng_core.init(global_seed != 0 ? global_seed : 0x12345678U);
+  for (uint32_t c = 0; c < core_id; ++c) {
+    rng_core.long_jump();
+  }
+  for (uint32_t p = 0; p < (start_batch / 2); ++p) {
+    rng_core.jump();
+    rng_core.jump();
+  }
+
+  uint32_t max_steps = max_iter * num_tiles;
+  uint32_t total_steps = 2 * max_steps + 2;
 
   // --------------------------------------------------------------------------
-  // Main Simulation Loop
+  // Main Simulation Loop (Dual-Batch Pairs)
   // --------------------------------------------------------------------------
-  for (uint32_t batch = 0; batch < num_batches; ++batch) {
-    // Step 1: Generate Channel Observations for CB_VNODE_A on 32-Lane SFPU
-    generate_channel_tiles(cb_vnode, mu_val, sigma_val, benchmark_mode,
-                           invocation_id, start_batch + batch);
+  for (uint32_t pair = 0; pair < num_batch_pairs; ++pair) {
+    // Step 1: Generate Channel Observations for Batch A (CB_VNODE_A)
+    uint32_t seed_a = rng_core.next();
+    generate_channel_tiles(cb_vnode_a, mu_val, sigma_val, benchmark_mode,
+                           invocation_id, seed_a);
+    rng_core.jump();
 
-    // Step 2: Tri-core batch rendezvous barrier
+    // Step 2: Generate Channel Observations for Batch B (CB_VNODE_B)
+    uint32_t seed_b = rng_core.next();
+    generate_channel_tiles(cb_vnode_b, mu_val, sigma_val, benchmark_mode,
+                           invocation_id, seed_b);
+    rng_core.jump();
+
+    // Step 3: Tri-core batch rendezvous barrier
 #ifdef TRISC_PACK
-    sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + batch + 1;
+    sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + pair + 1;
 #endif
-    while (sync_flags[SyncSlot::BATCH_BARRIER_NCRISC] < epoch + batch + 1) {
+    while (sync_flags[SyncSlot::BATCH_BARRIER_NCRISC] < epoch + pair + 1) {
     }
-    while (sync_flags[SyncSlot::BATCH_BARRIER_BRISC] < epoch + batch + 1) {
+    while (sync_flags[SyncSlot::BATCH_BARRIER_BRISC] < epoch + pair + 1) {
     }
-    while (sync_flags[SyncSlot::BATCH_BARRIER_TRISC] < epoch + batch + 1) {
-    }
-
-#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
-    // Wait for channel observations / synthetic pattern to be 100% ready in L1
-    while (sync_flags[SyncSlot::BATCH_READY] < epoch + batch + 1) {
+    while (sync_flags[SyncSlot::BATCH_BARRIER_TRISC] < epoch + pair + 1) {
     }
 
-    const char *vnode_bytes_ptr =
-        reinterpret_cast<const char *>(sync_flags[SyncSlot::VNODE_L1_ADDR]);
-    char *vnode_out_ptr =
-        reinterpret_cast<char *>(sync_flags[SyncSlot::VNODE_L1_ADDR]);
-    const uint32_t *p_hoff_base =
-        reinterpret_cast<const uint32_t *>(sync_flags[SyncSlot::HOFF_L1_ADDR]);
-#endif
+    // Wait for channel observations to be 100% ready in L1
+    while (sync_flags[SyncSlot::BATCH_READY] < epoch + pair + 1) {
+    }
 
-    for (uint32_t iter = 0; iter < max_iter; ++iter) {
-      global_iter++;
-      for (uint32_t t = 0; t < num_tiles; ++t) {
-        uint16_t deg = sync_flags[64 + t];
+    // Step 4: Interleaved Dual-Batch TRISC Compute Pipeline
+    for (uint32_t k = 1; k < 2 * max_steps + 1; ++k) {
+      uint32_t b_comp = (k - 1) % 2;
+      uint32_t s_comp = (k - 1) / 2;
+      uint32_t t_comp = s_comp % num_tiles;
+      uint32_t iter_comp = s_comp / num_tiles;
 
-#if defined(TRISC_UNPACK)
-        step_barrier++;
-        while (sync_flags[SyncSlot::GATHER_START] < step_barrier) {
-        }
-        uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
-        gather_face_24pairs(scratch_in_addr + 1024, p_hoff_base + t * 96 + 24,
-                            vnode_bytes_ptr);
-        sync_flags[SyncSlot::GATHER_DONE_T0] = step_barrier;
-#elif defined(TRISC_PACK)
-        step_barrier++;
-        while (sync_flags[SyncSlot::GATHER_START] < step_barrier) {
-        }
-        uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
-        gather_face_24pairs(scratch_in_addr + 1536, p_hoff_base + t * 96 + 72,
-                            vnode_bytes_ptr);
-        sync_flags[SyncSlot::GATHER_DONE_T2] = step_barrier;
-#endif
-
-        // Execute Vector Check Node Compute (Approximate-Min* Spline)
-        if (deg == 6) {
-          compute_tile_deg6(cb_scratch_in, cb_scratch_out, cb_r_msg, iter);
+      // At start of each new iteration (t_comp == 0, iter > 0):
+      // Synchronize with NCRISC parity scan of previous iteration
+      if (t_comp == 0 && iter_comp > 0) {
+        uint32_t expected_bar = pair * total_steps + 2 * iter_comp * num_tiles + (b_comp == 0 ? 1 : 2);
+        if (b_comp == 0) {
+          while (sync_flags[SyncSlot::ITER_DONE_A] < expected_bar) { }
         } else {
-          compute_tile_deg3(cb_scratch_in, cb_scratch_out, cb_r_msg, iter);
+          while (sync_flags[SyncSlot::ITER_DONE_B] < expected_bar) { }
         }
-
-#if defined(TRISC_UNPACK)
-        while (sync_flags[SyncSlot::SCATTER_START] < step_barrier) {
-        }
-        uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
-        scatter_face_24pairs(scratch_out_addr + 1024, p_hoff_base + t * 96 + 24,
-                             vnode_out_ptr);
-        sync_flags[SyncSlot::SCATTER_DONE_T0] = step_barrier;
-#elif defined(TRISC_PACK)
-        while (sync_flags[SyncSlot::SCATTER_START] < step_barrier) {
-        }
-        uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
-        scatter_face_24pairs(scratch_out_addr + 1536, p_hoff_base + t * 96 + 72,
-                             vnode_out_ptr);
-        sync_flags[SyncSlot::SCATTER_DONE_T2] = step_barrier;
-#endif
       }
 
-      // Synchronize with NCRISC iteration check for early termination
-      while (sync_flags[SyncSlot::ITER_DONE] < epoch + global_iter) {
-      }
       if (sync_flags[SyncSlot::EARLY_TERMINATION]) {
         break;
+      }
+
+      uint32_t cb_in  = (b_comp == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
+      uint32_t cb_out = (b_comp == 0) ? cb_scratch_out_a : cb_scratch_out_b;
+      uint32_t cb_r   = (b_comp == 0) ? cb_r_msg_a       : cb_r_msg_b;
+
+      uint16_t deg = sync_flags[64 + t_comp];
+      if (deg == 6) {
+        compute_tile_deg6(cb_in, cb_out, cb_r, iter_comp);
+      } else {
+        compute_tile_deg3(cb_in, cb_out, cb_r, iter_comp);
       }
     }
 
 #ifdef TRISC_UNPACK
+    // Drain circular FIFO check messages
     for (uint32_t t = 0; t < num_tiles; ++t) {
-      cb_wait_front(cb_r_msg, 1);
-      cb_pop_front(cb_r_msg, 1);
+      cb_wait_front(cb_r_msg_a, 1);
+      cb_pop_front(cb_r_msg_a, 1);
+      cb_wait_front(cb_r_msg_b, 1);
+      cb_pop_front(cb_r_msg_b, 1);
     }
 #endif
   }
@@ -905,6 +900,6 @@ void kernel_main() {
   uint32_t t_end = *wall_clock_reg;
 #ifdef TRISC_PACK
   sync_flags[SyncSlot::TRISC_CYCLES] = t_end - t_start;
-  sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + num_batches + 1;
+  sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + num_batch_pairs + 1;
 #endif
 }
