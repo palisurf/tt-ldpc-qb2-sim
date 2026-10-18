@@ -256,7 +256,7 @@ static void partition_checks_balanced(
     }
 }
 
-std::vector<DynamicTileDescriptor> build_circulant_aware_tile_schedule(ParityCheckMatrix& pcm) {
+std::vector<DynamicTileDescriptor> build_circulant_aware_tile_schedule(ParityCheckMatrix& pcm, bool contiguous_schedule = true) {
     std::vector<uint32_t> deg6_checks;
     std::vector<uint32_t> deg3_checks;
 
@@ -355,12 +355,19 @@ std::vector<DynamicTileDescriptor> build_circulant_aware_tile_schedule(ParityChe
         schedule.push_back(desc);
     };
 
-    // Interleave 32 deg-6 tiles and 8 deg-3 tiles at a 4:1 ratio
-    for (size_t i = 0; i < 8; ++i) {
-        for (size_t j = 0; j < 4; ++j) {
-            add_tile_to_schedule(deg6_tiles[i * 4 + j], 6);
+    if (contiguous_schedule) {
+        // Section 8 Roadmap 2: Contiguous schedule sweeps all 32 deg-6 tiles first,
+        // then contiguously sweeps all 8 deg-3 accumulator tiles.
+        for (size_t t = 0; t < 32; ++t) add_tile_to_schedule(deg6_tiles[t], 6);
+        for (size_t t = 0; t < 8; ++t)  add_tile_to_schedule(deg3_tiles[t], 3);
+    } else {
+        // Legacy 4:1 interleaved schedule
+        for (size_t i = 0; i < 8; ++i) {
+            for (size_t j = 0; j < 4; ++j) {
+                add_tile_to_schedule(deg6_tiles[i * 4 + j], 6);
+            }
+            add_tile_to_schedule(deg3_tiles[i], 3);
         }
-        add_tile_to_schedule(deg3_tiles[i], 3);
     }
 
     return schedule;
@@ -982,13 +989,17 @@ void run_tile_matrix_on_hardware(
 
                                 float s_tot = (s0 * s0_swap) * (s1 * s1_swap) * (s2 * s2_swap);
 
-                                float m01 = to_bf16(approx_min_star(m0, m0_swap));
-                                float m23 = to_bf16(approx_min_star(m1, m1_swap));
-                                float m45 = to_bf16(approx_min_star(m2, m2_swap));
+                                static const float v_damping = 0.9375f;
 
-                                float r_mag_0 = approx_min_star(approx_min_star(m23, m45), m0_swap);
-                                float r_mag_1 = approx_min_star(approx_min_star(m01, m45), m1_swap);
-                                float r_mag_2 = approx_min_star(approx_min_star(m01, m23), m2_swap);
+                                // Selective FP32 Intermediate Accumulation
+                                float m01 = approx_min_star(m0, m0_swap);
+                                float m23 = approx_min_star(m1, m1_swap);
+                                float m45 = approx_min_star(m2, m2_swap);
+
+                                // Intrinsic Check Belief Damping (beta = 0.9375)
+                                float r_mag_0 = approx_min_star(approx_min_star(m23, m45), m0_swap) * v_damping;
+                                float r_mag_1 = approx_min_star(approx_min_star(m01, m45), m1_swap) * v_damping;
+                                float r_mag_2 = approx_min_star(approx_min_star(m01, m23), m2_swap) * v_damping;
 
                                 float r_out_0 = to_bf16((s_tot * s0) * r_mag_0);
                                 float r_out_1 = to_bf16((s_tot * s1) * r_mag_1);
@@ -1035,20 +1046,22 @@ void run_tile_matrix_on_hardware(
                                 float m_e0_blk1 = (lane < 16) ? m1_swap : m1;
                                 float s_e0_blk1 = (lane < 16) ? s1_swap : s1;
 
-                                // Block 0
+                                static const float v_damping = 0.9375f;
+
+                                // Block 0 (with damping beta = 0.9375)
                                 float s_tot_blk0 = (s0 * s0_swap) * s_e2_blk0;
-                                float r_mag_0    = approx_min_star(m0_swap, m_e2_blk0);
+                                float r_mag_0    = approx_min_star(m0_swap, m_e2_blk0) * v_damping;
                                 float r_out_0    = to_bf16((s_tot_blk0 * s0) * r_mag_0);
 
-                                float r_mag_e2_blk0 = approx_min_star(m0, m0_swap);
+                                float r_mag_e2_blk0 = approx_min_star(m0, m0_swap) * v_damping;
                                 float s_out_e2_blk0 = s_tot_blk0 * s_e2_blk0;
 
-                                // Block 1
+                                // Block 1 (with damping beta = 0.9375)
                                 float s_tot_blk1 = (s2 * s2_swap) * s_e0_blk1;
-                                float r_mag_2    = approx_min_star(m2_swap, m_e0_blk1);
+                                float r_mag_2    = approx_min_star(m2_swap, m_e0_blk1) * v_damping;
                                 float r_out_2    = to_bf16((s_tot_blk1 * s2) * r_mag_2);
 
-                                float r_mag_e0_blk1 = approx_min_star(m2, m2_swap);
+                                float r_mag_e0_blk1 = approx_min_star(m2, m2_swap) * v_damping;
                                 float s_out_e0_blk1 = s_tot_blk1 * s_e0_blk1;
 
                                 // Assemble p1
@@ -1750,10 +1763,15 @@ int main(int argc, char** argv) {
     uint32_t chunk_size = 50000;
     std::string csv_path = "";
 
+    bool contiguous_schedule = true;
+
     // Check for command line flags
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--waterfall") {
+        if (arg == "--schedule" && i + 1 < argc) {
+            std::string sched_arg = argv[++i];
+            contiguous_schedule = (sched_arg != "interleaved");
+        } else if (arg == "--waterfall") {
             is_waterfall = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 std::string range_str = argv[++i];
@@ -1800,6 +1818,14 @@ int main(int argc, char** argv) {
             chunk_size = std::stoul(argv[++i]);
         } else if (arg == "--csv" && i + 1 < argc) {
             csv_path = argv[++i];
+        } else if (arg == "--ebn0" && i + 1 < argc) {
+            eb_n0_db = std::stod(argv[++i]);
+        } else if (arg == "--batches" && i + 1 < argc) {
+            num_batches = std::stoul(argv[++i]);
+        } else if ((arg == "--max_iter" || arg == "--max-iter" || arg == "--iter") && i + 1 < argc) {
+            max_iterations = std::stoul(argv[++i]);
+        } else if (arg == "--single-core" || arg == "--single_core") {
+            single_core = true;
         } else if (arg == "--mesh") {
             single_core = false;
         } else if (arg[0] != '-') {
@@ -1828,6 +1854,7 @@ int main(int argc, char** argv) {
     std::cout << "-------------------------------------------------------" << std::endl;
     std::cout << " Tenstorrent QuietBox 2: Tile Matrix 4-Codeword Harness" << std::endl;
     std::cout << " Architecture: Decoupled Access-Execute (DAE)" << std::endl;
+    std::cout << " Tile Schedule: " << (contiguous_schedule ? "CONTIGUOUS (32 Deg-6 then 8 Deg-3)" : "INTERLEAVED (4:1 Ratio)") << std::endl;
 #if LDPC_TEST_PASSTHROUGH_MODE
     std::cout << " [COMPILE MODE] LDPC_TEST_PASSTHROUGH_MODE = 1 (Identity Pass-Through)" << std::endl;
     std::cout << "                Vnodes: Offset Counting Numbers (1024..3583)" << std::endl;
@@ -1846,7 +1873,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto schedule = build_circulant_aware_tile_schedule(pcm);
+    auto schedule = build_circulant_aware_tile_schedule(pcm, contiguous_schedule);
     std::cout << "[INFO] Generated " << schedule.size() << " circulant-snapped tiles with Schedule 4." << std::endl;
 
     bool audit_passed = verify_preflight_collision_audit(pcm, schedule);

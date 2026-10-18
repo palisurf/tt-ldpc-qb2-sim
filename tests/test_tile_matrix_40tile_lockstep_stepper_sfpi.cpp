@@ -193,7 +193,7 @@ static void partition_checks_balanced(
     }
 }
 
-std::vector<DynamicTileDescriptor> build_circulant_aware_tile_schedule(ParityCheckMatrix& pcm) {
+std::vector<DynamicTileDescriptor> build_circulant_aware_tile_schedule(ParityCheckMatrix& pcm, bool contiguous_schedule = true) {
     std::vector<uint32_t> deg6_checks;
     std::vector<uint32_t> deg3_checks;
 
@@ -289,12 +289,19 @@ std::vector<DynamicTileDescriptor> build_circulant_aware_tile_schedule(ParityChe
         schedule.push_back(desc);
     };
 
-    // Interleave 32 deg-6 tiles and 8 deg-3 tiles at a 4:1 ratio
-    for (size_t i = 0; i < 8; ++i) {
-        for (size_t j = 0; j < 4; ++j) {
-            add_tile_to_schedule(deg6_tiles[i * 4 + j], 6);
+    if (contiguous_schedule) {
+        // Section 8 Roadmap 2: Contiguous schedule sweeps all 32 deg-6 tiles first,
+        // then contiguously sweeps all 8 deg-3 accumulator tiles.
+        for (size_t t = 0; t < 32; ++t) add_tile_to_schedule(deg6_tiles[t], 6);
+        for (size_t t = 0; t < 8; ++t)  add_tile_to_schedule(deg3_tiles[t], 3);
+    } else {
+        // Legacy 4:1 interleaved schedule
+        for (size_t i = 0; i < 8; ++i) {
+            for (size_t j = 0; j < 4; ++j) {
+                add_tile_to_schedule(deg6_tiles[i * 4 + j], 6);
+            }
+            add_tile_to_schedule(deg3_tiles[i], 3);
         }
-        add_tile_to_schedule(deg3_tiles[i], 3);
     }
 
     return schedule;
@@ -635,29 +642,34 @@ inline void compute_tile_deg6_sfpi(uint32_t iter) {
                 sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>((s0 ^ s1) ^ s2); // s_tot in sc0
             }
 
-            // Stage 3: Pairwise AMin* within edge pairs -> stored in sc1 (M01), sc2 (M23), sc3 (M45)
+            // Stage 3: Pairwise AMin* within edge pairs (Selective FP32 Intermediate Accumulation)
+            sfpi::vFloat m01;
             {
                 sfpi::vFloat m0    = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[p0]));
                 sfpi::vFloat m0_sw = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[32 + p0]));
-                sfpi::dst_reg[sc1] = sfpi::round_bf16(sfpi::sfpi_amin_star_branchless(m0, m0_sw)); // M01
+                m01 = sfpi::sfpi_amin_star_branchless(m0, m0_sw);
             }
+            sfpi::vFloat m23;
             {
                 sfpi::vFloat m1    = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[p1]));
                 sfpi::vFloat m1_sw = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[32 + p1]));
-                sfpi::dst_reg[sc2] = sfpi::round_bf16(sfpi::sfpi_amin_star_branchless(m1, m1_sw)); // M23
+                m23 = sfpi::sfpi_amin_star_branchless(m1, m1_sw);
             }
+            sfpi::vFloat m45;
             {
                 sfpi::vFloat m2    = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[p2]));
                 sfpi::vFloat m2_sw = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[32 + p2]));
-                sfpi::dst_reg[sc3] = sfpi::round_bf16(sfpi::sfpi_amin_star_branchless(m2, m2_sw)); // M45
+                m45 = sfpi::sfpi_amin_star_branchless(m2, m2_sw);
             }
 
-            // Stage 4: Outgoing check messages with signs applied via SFPSETSGN
+            // Stage 4: Outgoing check messages with Intrinsic Damping (beta = 0.9375 = 15/16)
+            const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
+
             // Edge pair 0 (p0)
             {
-                sfpi::vFloat m_oth0 = sfpi::sfpi_amin_star_branchless(sfpi::vFloat(sfpi::dst_reg[sc2]), sfpi::vFloat(sfpi::dst_reg[sc3]));
+                sfpi::vFloat m_oth0 = sfpi::sfpi_amin_star_branchless(m23, m45);
                 sfpi::vFloat m0_sw  = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[32 + p0]));
-                sfpi::vFloat r_mag0 = sfpi::sfpi_amin_star_branchless(m_oth0, m0_sw);
+                sfpi::vFloat r_mag0 = sfpi::sfpi_amin_star_branchless(m_oth0, m0_sw) * v_damping;
                 sfpi::vInt s_edge0  = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0])) ^ sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[p0]));
                 sfpi::vFloat r_out0 = sfpi::round_bf16(sfpi::copysgn(r_mag0, s_edge0));
                 sfpi::dst_reg[32 + p0] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[p0]) + r_out0); // L_new in Tile 1
@@ -666,9 +678,9 @@ inline void compute_tile_deg6_sfpi(uint32_t iter) {
 
             // Edge pair 1 (p1)
             {
-                sfpi::vFloat m_oth1 = sfpi::sfpi_amin_star_branchless(sfpi::vFloat(sfpi::dst_reg[sc1]), sfpi::vFloat(sfpi::dst_reg[sc3]));
+                sfpi::vFloat m_oth1 = sfpi::sfpi_amin_star_branchless(m01, m45);
                 sfpi::vFloat m1_sw  = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[32 + p1]));
-                sfpi::vFloat r_mag1 = sfpi::sfpi_amin_star_branchless(m_oth1, m1_sw);
+                sfpi::vFloat r_mag1 = sfpi::sfpi_amin_star_branchless(m_oth1, m1_sw) * v_damping;
                 sfpi::vInt s_edge1  = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0])) ^ sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[p1]));
                 sfpi::vFloat r_out1 = sfpi::round_bf16(sfpi::copysgn(r_mag1, s_edge1));
                 sfpi::dst_reg[32 + p1] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[p1]) + r_out1); // L_new in Tile 1
@@ -677,9 +689,9 @@ inline void compute_tile_deg6_sfpi(uint32_t iter) {
 
             // Edge pair 2 (p2)
             {
-                sfpi::vFloat m_oth2 = sfpi::sfpi_amin_star_branchless(sfpi::vFloat(sfpi::dst_reg[sc1]), sfpi::vFloat(sfpi::dst_reg[sc2]));
+                sfpi::vFloat m_oth2 = sfpi::sfpi_amin_star_branchless(m01, m23);
                 sfpi::vFloat m2_sw  = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[32 + p2]));
-                sfpi::vFloat r_mag2 = sfpi::sfpi_amin_star_branchless(m_oth2, m2_sw);
+                sfpi::vFloat r_mag2 = sfpi::sfpi_amin_star_branchless(m_oth2, m2_sw) * v_damping;
                 sfpi::vInt s_edge2  = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0])) ^ sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[p2]));
                 sfpi::vFloat r_out2 = sfpi::round_bf16(sfpi::copysgn(r_mag2, s_edge2));
                 sfpi::dst_reg[32 + p2] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[p2]) + r_out2); // L_new in Tile 1
@@ -752,12 +764,14 @@ inline void compute_tile_deg3_sfpi(uint32_t iter) {
                 sfpi::vFloat m0_sw = sfpi::abs(q0_sw);
                 sfpi::vFloat m_e2  = sfpi::abs(q_e2);
 
-                sfpi::vFloat r_mag0 = sfpi::sfpi_amin_star_branchless(m0_sw, m_e2);
+                const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
+
+                sfpi::vFloat r_mag0 = sfpi::sfpi_amin_star_branchless(m0_sw, m_e2) * v_damping;
                 sfpi::vFloat r_out0 = sfpi::round_bf16(sfpi::copysgn(r_mag0, s_tot ^ s0));
                 sfpi::dst_reg[32 + p0] = sfpi::round_bf16(q0 + r_out0); // L_new in Tile 1
                 sfpi::dst_reg[p0]      = r_out0;                         // R_new in Tile 0
 
-                sfpi::vFloat r_mag_e2 = sfpi::sfpi_amin_star_branchless(m0, m0_sw);
+                sfpi::vFloat r_mag_e2 = sfpi::sfpi_amin_star_branchless(m0, m0_sw) * v_damping;
                 sfpi::vFloat r_out_e2 = sfpi::round_bf16(sfpi::copysgn(r_mag_e2, s_tot ^ s_e2));
                 sfpi::dst_reg[sc1] = r_out_e2;                           // Stage r_out_e2 in sc1
             }
@@ -777,12 +791,14 @@ inline void compute_tile_deg3_sfpi(uint32_t iter) {
                 sfpi::vFloat m2_sw = sfpi::abs(q2_sw);
                 sfpi::vFloat m_e0  = sfpi::abs(q_e0);
 
-                sfpi::vFloat r_mag2 = sfpi::sfpi_amin_star_branchless(m2_sw, m_e0);
+                const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
+
+                sfpi::vFloat r_mag2 = sfpi::sfpi_amin_star_branchless(m2_sw, m_e0) * v_damping;
                 sfpi::vFloat r_out2 = sfpi::round_bf16(sfpi::copysgn(r_mag2, s_tot ^ s2));
                 sfpi::dst_reg[32 + p2] = sfpi::round_bf16(q2 + r_out2); // L_new in Tile 1
                 sfpi::dst_reg[p2]      = r_out2;                         // R_new in Tile 0
 
-                sfpi::vFloat r_mag_e0 = sfpi::sfpi_amin_star_branchless(m2, m2_sw);
+                sfpi::vFloat r_mag_e0 = sfpi::sfpi_amin_star_branchless(m2, m2_sw) * v_damping;
                 sfpi::vFloat r_out_e0 = sfpi::round_bf16(sfpi::copysgn(r_mag_e0, s_tot ^ s_e0));
                 sfpi::dst_reg[sc3] = r_out_e0;                           // Stage r_out_e0 in sc3
             }
@@ -1327,8 +1343,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto schedule = build_circulant_aware_tile_schedule(pcm);
-    std::cout << "[INFO] Scheduled " << schedule.size() << " face-aligned tiles (32 Deg-6 + 8 Deg-3)." << std::endl;
+    bool contiguous_schedule = true;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--schedule" && i + 1 < argc) {
+            contiguous_schedule = (std::string(argv[i + 1]) != "interleaved");
+        } else if (std::string(argv[i]) == "--interleaved") {
+            contiguous_schedule = false;
+        }
+    }
+
+    auto schedule = build_circulant_aware_tile_schedule(pcm, contiguous_schedule);
+    std::cout << "[INFO] Scheduled " << schedule.size() << " face-aligned tiles ("
+              << (contiguous_schedule ? "CONTIGUOUS: 32 Deg-6 then 8 Deg-3" : "INTERLEAVED: 4:1") << ")." << std::endl;
 
     if (argc > 1 && std::string(argv[1]) == "--monte-carlo") {
         return run_monte_carlo_simulation(argc, argv, pcm, schedule);
