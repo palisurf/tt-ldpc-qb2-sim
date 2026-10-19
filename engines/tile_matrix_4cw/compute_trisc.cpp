@@ -848,7 +848,7 @@ void kernel_main() {
   }
 
   uint32_t max_steps = max_iter * num_tiles;
-  uint32_t total_steps = 2 * max_steps + 2;
+  uint32_t total_steps = max_steps + 2;
 
   // --------------------------------------------------------------------------
   // Main Simulation Loop (Dual-Batch Pairs)
@@ -884,13 +884,10 @@ void kernel_main() {
     while (sync_flags[SyncSlot::BATCH_READY] < epoch + pair + 1) {
     }
 
-    // Step 4: Interleaved Dual-Batch 4-Worker DAE & TRISC Compute Pipeline
-    const char* vnode_bytes_a = reinterpret_cast<const char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_A]);
-    const char* vnode_bytes_b = reinterpret_cast<const char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_B]);
-    char* vnode_out_a = reinterpret_cast<char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_A]);
-    char* vnode_out_b = reinterpret_cast<char*>(sync_flags[SyncSlot::VNODE_L1_ADDR_B]);
-    const char* vnodes_bytes[2] = {vnode_bytes_a, vnode_bytes_b};
-    char* vnodes_out[2] = {vnode_out_a, vnode_out_b};
+    // Step 4: Unified Monotonic Macro-Step Pipeline (Option B)
+    uint32_t vnode_l1 = sync_flags[SyncSlot::VNODE_L1_BASE_ADDR];
+    const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
+    char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
     const uint32_t* p_hoff_base = reinterpret_cast<const uint32_t*>(sync_flags[SyncSlot::HOFF_L1_ADDR]);
 
 #ifdef TRISC_MATH
@@ -917,8 +914,6 @@ void kernel_main() {
 
     for (uint32_t k = 0; k < total_steps; ++k) {
       uint32_t bar = pair * total_steps + k + 1;
-      uint32_t b_dae = k % 2;
-      uint32_t s_dae = k / 2;
 
       // 1. Wait for TRISC1 Macro Step Grant (Satellites: TRISC0 & TRISC2)
 #if defined(TRISC_UNPACK) || defined(TRISC_PACK)
@@ -932,68 +927,55 @@ void kernel_main() {
       }
 #endif
 
-      // 2. Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
+      // 2. Scatter Stage: Scatter previous tile (k - 2) for both Batch A and Batch B
 #if defined(TRISC_UNPACK) || defined(TRISC_PACK)
-      uint8_t active_mask = static_cast<uint8_t>(
-          (b_dae == 0) ? sync_flags[SyncSlot::ACTIVE_MASK_A] : sync_flags[SyncSlot::ACTIVE_MASK_B]
-      );
-      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
+      if (k >= 2 && (k - 2) < max_steps) {
         while (sync_flags[SyncSlot::SCATTER_START] < bar) { }
-        uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
-        uint32_t s_scat = s_dae - 1;
+        uint32_t scratch_out_addr_a = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR_A];
+        uint32_t scratch_out_addr_b = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR_B];
+        uint32_t s_scat = k - 2;
         uint32_t t_scat = s_scat % num_tiles;
-        char* vnode_out_ptr = vnodes_out[b_dae];
 #if defined(TRISC_UNPACK)
-        if (active_mask != 0) {
-          scatter_face_24pairs(scratch_out_addr + 1024, p_hoff_base + t_scat * 96 + 24, vnode_out_ptr);
-        }
+        scatter_face_128bit(scratch_out_addr_a + 1024, scratch_out_addr_b + 1024, p_hoff_base + t_scat * 96 + 24, vnode_out_ptr, 1);
         sync_flags[SyncSlot::SCATTER_DONE_T0] = bar;
 #elif defined(TRISC_PACK)
-        if (active_mask != 0) {
-          scatter_face_24pairs(scratch_out_addr + 1536, p_hoff_base + t_scat * 96 + 72, vnode_out_ptr);
-        }
+        scatter_face_128bit(scratch_out_addr_a + 1536, scratch_out_addr_b + 1536, p_hoff_base + t_scat * 96 + 72, vnode_out_ptr, 1);
         sync_flags[SyncSlot::SCATTER_DONE_T2] = bar;
 #endif
       }
 #endif
 
-      // 3. Gather Stage: Gather current tile s_dae of Batch b_dae
+      // 3. Gather Stage: Gather tile k for both Batch A and Batch B
 #if defined(TRISC_UNPACK) || defined(TRISC_PACK)
-      if (s_dae < max_steps) {
+      if (k < max_steps) {
         while (sync_flags[SyncSlot::GATHER_START] < bar) { }
-        uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
-        uint32_t t_gath = s_dae % num_tiles;
-        const char* vnode_bytes_ptr = vnodes_bytes[b_dae];
+        uint32_t scratch_in_addr_a = sync_flags[SyncSlot::SCRATCH_GATHER_PTR_A];
+        uint32_t scratch_in_addr_b = sync_flags[SyncSlot::SCRATCH_GATHER_PTR_B];
+        uint32_t s_gath = k;
+        uint32_t t_gath = s_gath % num_tiles;
 #if defined(TRISC_UNPACK)
-        if (active_mask != 0) {
-          gather_face_24pairs(scratch_in_addr + 1024, p_hoff_base + t_gath * 96 + 24, vnode_bytes_ptr);
-        }
+        gather_face_128bit(scratch_in_addr_a + 1024, scratch_in_addr_b + 1024, p_hoff_base + t_gath * 96 + 24, vnode_bytes_ptr, 1);
         sync_flags[SyncSlot::GATHER_DONE_T0] = bar;
 #elif defined(TRISC_PACK)
-        if (active_mask != 0) {
-          gather_face_24pairs(scratch_in_addr + 1536, p_hoff_base + t_gath * 96 + 72, vnode_bytes_ptr);
-        }
+        gather_face_128bit(scratch_in_addr_a + 1536, scratch_in_addr_b + 1536, p_hoff_base + t_gath * 96 + 72, vnode_bytes_ptr, 1);
         sync_flags[SyncSlot::GATHER_DONE_T2] = bar;
 #endif
       }
 #endif
 
-      // 4. Compute Stage: Compute check nodes for tile (k - 1)
-      if (k >= 1 && k <= 2 * max_steps) {
-        uint32_t b_comp = (k - 1) % 2;
-        uint32_t s_comp = (k - 1) / 2;
+      // 4. Compute Stage: Dual Compute Bursting for Tile (k - 1)
+      if (k >= 1 && (k - 1) < max_steps) {
+        uint32_t s_comp = k - 1;
         uint32_t t_comp = s_comp % num_tiles;
         uint32_t iter_comp = s_comp / num_tiles;
 
-        uint32_t cb_in  = (b_comp == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
-        uint32_t cb_out = (b_comp == 0) ? cb_scratch_out_a : cb_scratch_out_b;
-        uint32_t cb_r   = (b_comp == 0) ? cb_r_msg_a       : cb_r_msg_b;
-
         uint16_t deg = sync_flags[64 + t_comp];
         if (deg == 6) {
-          compute_tile_deg6(cb_in, cb_out, cb_r, iter_comp);
+          compute_tile_deg6(cb_scratch_in_a, cb_scratch_out_a, cb_r_msg_a, iter_comp);
+          compute_tile_deg6(cb_scratch_in_b, cb_scratch_out_b, cb_r_msg_b, iter_comp);
         } else {
-          compute_tile_deg3(cb_in, cb_out, cb_r, iter_comp);
+          compute_tile_deg3(cb_scratch_in_a, cb_scratch_out_a, cb_r_msg_a, iter_comp);
+          compute_tile_deg3(cb_scratch_in_b, cb_scratch_out_b, cb_r_msg_b, iter_comp);
         }
       }
 
@@ -1003,13 +985,13 @@ void kernel_main() {
 
 #ifdef TRISC_MATH
       // 5. TRISC1 Conductor: Poll all satellites for step k
-      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
+      if (k >= 2 && (k - 2) < max_steps) {
         while (sync_flags[SyncSlot::SCATTER_DONE_W0] < bar) { }
         while (sync_flags[SyncSlot::SCATTER_DONE_W1] < bar) { }
         while (sync_flags[SyncSlot::SCATTER_DONE_T0] < bar) { }
         while (sync_flags[SyncSlot::SCATTER_DONE_T2] < bar) { }
       }
-      if (s_dae < max_steps) {
+      if (k < max_steps) {
         while (sync_flags[SyncSlot::GATHER_DONE_W0] < bar) { }
         while (sync_flags[SyncSlot::GATHER_DONE_W1] < bar) { }
         while (sync_flags[SyncSlot::GATHER_DONE_T0] < bar) { }
@@ -1018,32 +1000,29 @@ void kernel_main() {
 
       // 6. TRISC1 Iteration Boundary & Parity Evaluation (Tile 39)
       bool early_exit = false;
-      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
-        uint32_t s_scat = s_dae - 1;
+      if (k >= 2 && (k - 2) < max_steps) {
+        uint32_t s_scat = k - 2;
         uint32_t t_scat = s_scat % num_tiles;
         if (t_scat == num_tiles - 1) {
           uint32_t iter_scat = s_scat / num_tiles;
-          uint32_t info_errs   = sync_flags[SyncSlot::PARITY_REPORT_W0];
-          uint32_t parity_errs = sync_flags[SyncSlot::PARITY_REPORT_W1];
-          uint32_t total_cw_errs = info_errs | parity_errs;
+          uint32_t info_errs_a = sync_flags[SyncSlot::PARITY_REPORT_W0];
+          uint32_t info_errs_b = sync_flags[SyncSlot::PARITY_REPORT_W1];
 
-          if (b_dae == 0) {
-            for (uint32_t c = 0; c < 4; ++c) {
-              if (((total_cw_errs & (1 << c)) == 0) && (active_mask_a & (1 << c))) {
-                active_mask_a &= ~(1 << c);
-                stats[TelemSlot::LAST_BATCH_ITER_CW0 + c] = iter_scat + 1;
-              }
+          for (uint32_t c = 0; c < 4; ++c) {
+            if (((info_errs_a & (1 << c)) == 0) && (active_mask_a & (1 << c))) {
+              active_mask_a &= ~(1 << c);
+              stats[TelemSlot::LAST_BATCH_ITER_CW0 + c] = iter_scat + 1;
             }
-            sync_flags[SyncSlot::ACTIVE_MASK_A] = active_mask_a;
-          } else {
-            for (uint32_t c = 0; c < 4; ++c) {
-              if (((total_cw_errs & (1 << c)) == 0) && (active_mask_b & (1 << c))) {
-                active_mask_b &= ~(1 << c);
-                stats[TelemSlot::LAST_BATCH_ITER_CW0 + 4 + c] = iter_scat + 1;
-              }
-            }
-            sync_flags[SyncSlot::ACTIVE_MASK_B] = active_mask_b;
           }
+          sync_flags[SyncSlot::ACTIVE_MASK_A] = active_mask_a;
+
+          for (uint32_t c = 0; c < 4; ++c) {
+            if (((info_errs_b & (1 << c)) == 0) && (active_mask_b & (1 << c))) {
+              active_mask_b &= ~(1 << c);
+              stats[TelemSlot::LAST_BATCH_ITER_CW0 + 4 + c] = iter_scat + 1;
+            }
+          }
+          sync_flags[SyncSlot::ACTIVE_MASK_B] = active_mask_b;
 
           if (active_mask_a == 0 && active_mask_b == 0) {
             sync_flags[SyncSlot::EARLY_TERMINATION] = 1;
@@ -1056,10 +1035,6 @@ void kernel_main() {
       // --------------------------------------------------------------------
       // Synchronized Dual-Drain Barrier for Early Termination
       // --------------------------------------------------------------------
-      // Maestro waits for both consumer threads to acknowledge draining:
-      // 1. Worker 2 (TRISC0) drains cb_scratch_in and check message FIFOs (DRAIN_ACK_T0).
-      // 2. Worker 1 (NCRISC) drains speculative cb_scratch_out (DRAIN_ACK_W1).
-      // This strictly prevents cross-batch circular buffer pointer drift in TT-Metal.
       if (early_exit) {
         while (sync_flags[SyncSlot::DRAIN_ACK_T0] < pair + 1) { }
         while (sync_flags[SyncSlot::DRAIN_ACK_W1] < pair + 1) { }
@@ -1081,16 +1056,12 @@ void kernel_main() {
     // ----------------------------------------------------------------------
     // Drain In-Flight Input Pages & Check Messages (Consumer: TRISC_UNPACK)
     // ----------------------------------------------------------------------
-    // Note: cb_scratch_out is consumed by NCRISC, so it is drained in writer_ncrisc.cpp.
-    // TRISC_UNPACK only drains the queues it consumes: cb_scratch_in and cb_r_msg_a/b.
     if (sync_flags[SyncSlot::TRISC1_CMD] == static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
-      uint32_t b_dae = last_completed_k % 2;
-      uint32_t s_dae = last_completed_k / 2;
-      uint32_t res_in  = (b_dae == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
-
-      if (s_dae < max_steps) {
-        cb_wait_front(res_in, 1);
-        cb_pop_front(res_in, 1);
+      if (last_completed_k < max_steps) {
+        cb_wait_front(cb_scratch_in_a, 1);
+        cb_pop_front(cb_scratch_in_a, 1);
+        cb_wait_front(cb_scratch_in_b, 1);
+        cb_pop_front(cb_scratch_in_b, 1);
       }
     }
 

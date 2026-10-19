@@ -101,6 +101,7 @@ namespace TileMatrixCB {
     constexpr uint8_t CB_SCRATCH_GATHER_0  = 3;   // 4 KB: Stage 1 Gather Buffer (Batch A, Double-buffered, 2 KB page)
     constexpr uint8_t CB_SCRATCH_GATHER_1  = 4;   // 4 KB: Stage 1 Gather Buffer (Batch B, Double-buffered, 2 KB page)
     constexpr uint8_t CB_VNODE_B           = 5;   // 20 KB: Active evolving variable posterior LLRs (Batch B: CW 4..7)
+    constexpr uint8_t CB_VNODE_UNIFIED     = 6;   // 40 KB: Unified 128-bit variable node LLRs (Batch A + B: CW 0..7)
     constexpr uint8_t CB_SCRATCH_SCATTER_0 = 16;  // 4 KB: Stage 3 Scatter Buffer (Batch A, Double-buffered, 2 KB page)
     constexpr uint8_t CB_R_MSG_B           = 17;  // 80 KB: 40 tile check messages circular FIFO (Batch B)
     constexpr uint8_t CB_SCRATCH_SCATTER_1 = 18;  // 4 KB: Stage 3 Scatter Buffer (Batch B, Double-buffered, 2 KB page)
@@ -187,15 +188,23 @@ namespace SyncSlot {
     constexpr uint32_t TRISC1_CMD          = 22; // Command enum (MaestroCmd) issued by TRISC1
     constexpr uint32_t DRAIN_ACK_T0        = 23; // TRISC0 acknowledgment of residual FIFO drain
     constexpr uint32_t GATHER_START        = 24; // Signaled by BRISC when SCRATCH_GATHER_PTR is published
-    constexpr uint32_t SCRATCH_GATHER_PTR  = 25; // Active gather L1 write pointer
-    constexpr uint32_t SCRATCH_SCATTER_PTR = 26; // Active scatter L1 read pointer
+    constexpr uint32_t SCRATCH_GATHER_PTR_A  = 25; // Active gather L1 write pointer (Batch A)
+    constexpr uint32_t SCRATCH_SCATTER_PTR_A = 26; // Active scatter L1 read pointer (Batch A)
     constexpr uint32_t VNODE_L1_ADDR_A     = 27; // Batch A variable node L1 base address
     constexpr uint32_t VNODE_L1_ADDR_B     = 28; // Batch B variable node L1 base address
+    constexpr uint32_t VNODE_L1_BASE_ADDR  = 27; // Unified Vnode L1 base address (Option B)
+    constexpr uint32_t VNODE_STRIDE_BYTES  = 28; // Stride per node (16 B for 8 CWs)
     constexpr uint32_t BATCH_BARRIER_BRISC  = 29; // BRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_NCRISC = 30; // NCRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_TRISC  = 31; // TRISC batch rendezvous
 
+    // Dual-Batch Scatter/Gather Pointer Mailboxes in CB_TELEMETRY (Slots 182..183)
+    constexpr uint32_t SCRATCH_GATHER_PTR_B  = 182; // Active gather L1 write pointer (Batch B)
+    constexpr uint32_t SCRATCH_SCATTER_PTR_B = 183; // Active scatter L1 read pointer (Batch B)
+
     // Backward-compatibility aliases
+    constexpr uint32_t SCRATCH_GATHER_PTR  = SCRATCH_GATHER_PTR_A;
+    constexpr uint32_t SCRATCH_SCATTER_PTR = SCRATCH_SCATTER_PTR_A;
     constexpr uint32_t ACTIVE_MASK         = ACTIVE_MASK_A;
     constexpr uint32_t VNODE_L1_ADDR       = VNODE_L1_ADDR_A;
     constexpr uint32_t BRISC_GATHER_ERR_CW01 = BRISC_GATHER_ERR_CW01_A;

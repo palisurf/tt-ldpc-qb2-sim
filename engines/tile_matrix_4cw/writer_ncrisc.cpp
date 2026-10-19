@@ -101,12 +101,12 @@ void kernel_main() {
     uint32_t cycles_error_scan = 0;
 
     uint32_t max_steps = max_iter * num_tiles;
-    uint32_t total_steps = 2 * max_steps + 2;
+    uint32_t total_steps = max_steps + 2;
 
+    constexpr uint32_t cb_vnode_unified = TileMatrixCB::CB_VNODE_UNIFIED;
     uint32_t vnode_l1_a = get_read_ptr(cb_vnode_a);
     uint32_t vnode_l1_b = get_read_ptr(cb_vnode_b);
-    uint32_t vnodes[2] = {vnode_l1_a, vnode_l1_b};
-    uint32_t cb_scat_out[2] = {cb_scratch_out_a, cb_scratch_out_b};
+    uint32_t vnode_l1_unified = get_write_ptr(cb_vnode_unified);
 
     // --------------------------------------------------------------------------
     // Main Simulation Loop (Dual-Batch Pairs: 8 Codewords per Pair)
@@ -121,6 +121,21 @@ void kernel_main() {
             cb_pop_front(cb_vnode_b, 1);
         }
         cycles_channel += (get_wall_clock() - t_ch0);
+
+        // Fused 128-bit Interleaving: Interleave Batch A & Batch B into Unified L1 Vnode Array
+        const auto* p_a = reinterpret_cast<const uint64_t*>(vnode_l1_a);
+        const auto* p_b = reinterpret_cast<const uint64_t*>(vnode_l1_b);
+        auto* p_u = reinterpret_cast<v2ui*>(vnode_l1_unified);
+        #pragma GCC unroll 4
+        for (uint32_t i = 0; i < 2560; ++i) {
+            p_u[i] = (v2ui){ p_a[i], p_b[i] };
+        }
+
+        if (diff_test_mode != 0 && pair == 0) {
+            uint64_t dst_noc_init = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 4096);
+            noc_async_write(vnode_l1_a, dst_noc_init, 20480);
+            noc_async_write_barrier();
+        }
 
         if (pair == 0) {
             const auto* pa = reinterpret_cast<const uint32_t*>(vnode_l1_a);
@@ -142,15 +157,16 @@ void kernel_main() {
         }
 
         // Reset early termination flag, active masks, and scan flags
-        sync_flags[SyncSlot::EARLY_TERMINATION] = 0;
-        sync_flags[SyncSlot::ACTIVE_MASK_A]     = 0x0F;
-        sync_flags[SyncSlot::ACTIVE_MASK_B]     = 0x0F;
-        sync_flags[SyncSlot::BRISC_SCAN_DONE_A] = 0;
-        sync_flags[SyncSlot::BRISC_SCAN_DONE_B] = 0;
-        sync_flags[SyncSlot::VNODE_L1_ADDR_A]   = vnode_l1_a;
-        sync_flags[SyncSlot::VNODE_L1_ADDR_B]   = vnode_l1_b;
-        sync_flags[SyncSlot::TRISC1_CMD]        = static_cast<uint32_t>(MaestroCmd::CMD_IDLE);
-        sync_flags[SyncSlot::DRAIN_ACK_W1]      = pair;
+        sync_flags[SyncSlot::EARLY_TERMINATION]  = 0;
+        sync_flags[SyncSlot::ACTIVE_MASK_A]      = 0x0F;
+        sync_flags[SyncSlot::ACTIVE_MASK_B]      = 0x0F;
+        sync_flags[SyncSlot::BRISC_SCAN_DONE_A]  = 0;
+        sync_flags[SyncSlot::BRISC_SCAN_DONE_B]  = 0;
+        sync_flags[SyncSlot::VNODE_L1_BASE_ADDR] = vnode_l1_unified;
+        sync_flags[SyncSlot::VNODE_L1_ADDR_A]    = vnode_l1_unified;
+        sync_flags[SyncSlot::VNODE_L1_ADDR_B]    = vnode_l1_unified;
+        sync_flags[SyncSlot::TRISC1_CMD]         = static_cast<uint32_t>(MaestroCmd::CMD_IDLE);
+        sync_flags[SyncSlot::DRAIN_ACK_W1]       = pair;
         for (int c = 0; c < 8; ++c) {
             stats[TelemSlot::LAST_BATCH_ITER_CW0 + c] = 0;
             stats[TelemSlot::LAST_BATCH_BE_CW0 + c]   = 0;
@@ -175,17 +191,15 @@ void kernel_main() {
         while (sync_flags[SyncSlot::TRISC1_CMD] != static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC) ||
                sync_flags[SyncSlot::TRISC1_GRANT_STEP] < pair * total_steps + 1) { }
 
+        const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1_unified);
+        char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1_unified);
+
         // ----------------------------------------------------------------------
-        // Interleaved Dual-Batch DAE Gather/Scatter Engine (Bounded Autonomy)
+        // Unified Monotonic Macro-Step Pipeline (Bounded Autonomy)
         // ----------------------------------------------------------------------
         uint32_t last_completed_k = 0;
         for (uint32_t k = 0; k < total_steps; ++k) {
             uint32_t bar = pair * total_steps + k + 1;
-            uint32_t b_dae = k % 2;
-            uint32_t s_dae = k / 2;
-            uint32_t vnode_l1 = vnodes[b_dae];
-            const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
-            char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
 
             // 1. Wait for TRISC1 Macro Step Grant
             while (sync_flags[SyncSlot::TRISC1_GRANT_STEP] < bar) {
@@ -197,87 +211,92 @@ void kernel_main() {
                 break;
             }
 
-            uint8_t active_mask = static_cast<uint8_t>(
-                (b_dae == 0) ? sync_flags[SyncSlot::ACTIVE_MASK_A] : sync_flags[SyncSlot::ACTIVE_MASK_B]
-            );
-
-            // 2. Autonomous Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
-            if (s_dae >= 1 && (s_dae - 1) < max_steps) {
+            // 2. Autonomous Scatter Stage: Scatter previous tile (k - 2) for both Batch A and Batch B
+            if (k >= 2 && (k - 2) < max_steps) {
                 uint32_t t_w0 = get_wall_clock();
-                uint32_t active_out_cb = cb_scat_out[b_dae];
-                cb_wait_front(active_out_cb, 1);
+                cb_wait_front(cb_scratch_out_a, 1);
+                cb_wait_front(cb_scratch_out_b, 1);
                 cycles_wait += (get_wall_clock() - t_w0);
 
                 uint32_t t_s0 = get_wall_clock();
-                uint32_t scratch_out_addr = get_read_ptr(active_out_cb);
-                sync_flags[SyncSlot::SCRATCH_SCATTER_PTR] = scratch_out_addr;
+                uint32_t scratch_out_addr_a = get_read_ptr(cb_scratch_out_a);
+                uint32_t scratch_out_addr_b = get_read_ptr(cb_scratch_out_b);
+                sync_flags[SyncSlot::SCRATCH_SCATTER_PTR_A] = scratch_out_addr_a;
+                sync_flags[SyncSlot::SCRATCH_SCATTER_PTR_B] = scratch_out_addr_b;
                 sync_flags[SyncSlot::SCATTER_START] = bar;
 
-                uint32_t s_scat = s_dae - 1;
+                uint32_t s_scat = k - 2;
                 uint32_t t_scat = s_scat % num_tiles;
-                const uint32_t* tile_hoff_w1 = p_hoff_base + t_scat * 96 + 48;
-
-                // Worker 1 scatters 24 pairs (Face 1) back to variable nodes with direct store
-                if (active_mask != 0) {
-                    scatter_face_24pairs(scratch_out_addr + 512, tile_hoff_w1, vnode_out_ptr);
+                if (diff_test_mode != 0 && pair == 0 && s_scat == 0) {
+                    uint64_t dst_noc_scat_out = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 45056);
+                    noc_async_write(scratch_out_addr_a, dst_noc_scat_out, 2048);
+                    noc_async_write_barrier();
                 }
+
+                const uint32_t* tile_hoff_w1 = p_hoff_base + t_scat * 96 + 48;
+                scatter_face_128bit(scratch_out_addr_a + 512, scratch_out_addr_b + 512, tile_hoff_w1, vnode_out_ptr, 1);
 
                 while (sync_flags[SyncSlot::SCATTER_DONE_W0] < bar) { }
                 while (sync_flags[SyncSlot::SCATTER_DONE_T0] < bar) { }
                 while (sync_flags[SyncSlot::SCATTER_DONE_T2] < bar) { }
-                cb_pop_front(active_out_cb, 1);
+                cb_pop_front(cb_scratch_out_a, 1);
+                cb_pop_front(cb_scratch_out_b, 1);
                 sync_flags[SyncSlot::SCATTER_DONE_W1] = bar;
                 cycles_scatter += (get_wall_clock() - t_s0);
 
-                // Autonomous Check node iteration completion scan on Parity Nodes (Tile 39)
+                // Autonomous Check node iteration completion scan on Information Nodes (Tile 39) for CW 4..7 (Batch B)
                 if (t_scat == num_tiles - 1) {
                     uint32_t t_es0 = get_wall_clock();
-                    uint32_t mask_err01 = ((active_mask & 1) ? 0x00008000 : 0) | ((active_mask & 2) ? 0x80000000 : 0);
-                    uint32_t mask_err23 = ((active_mask & 4) ? 0x00008000 : 0) | ((active_mask & 8) ? 0x80000000 : 0);
+                    uint8_t active_mask_b_cur = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK_B]);
+                    uint32_t mask_err01 = ((active_mask_b_cur & 1) ? 0x00008000 : 0) | ((active_mask_b_cur & 2) ? 0x80000000 : 0);
+                    uint32_t mask_err23 = ((active_mask_b_cur & 4) ? 0x00008000 : 0) | ((active_mask_b_cur & 8) ? 0x80000000 : 0);
 
-                    const auto* p1 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr + 8192);
+                    const auto* p_v = reinterpret_cast<const VNode128*>(vnode_bytes_ptr);
                     uint32_t ncrisc_err01 = 0;
                     uint32_t ncrisc_err23 = 0;
                     if (mask_err01 != 0 || mask_err23 != 0) {
-                        #pragma GCC unroll 2
-                        for (uint32_t i = 0; i < 2048; i += 16) {
-                            if (mask_err01) {
-                                ncrisc_err01 |= (p1[i + 0] | p1[i + 2] | p1[i + 4] | p1[i + 6] |
-                                                 p1[i + 8] | p1[i + 10] | p1[i + 12] | p1[i + 14]);
-                            }
-                            if (mask_err23) {
-                                ncrisc_err23 |= (p1[i + 1] | p1[i + 3] | p1[i + 5] | p1[i + 7] |
-                                                 p1[i + 9] | p1[i + 11] | p1[i + 13] | p1[i + 15]);
-                            }
+                        #pragma GCC unroll 4
+                        for (uint32_t i = 0; i < 1024; ++i) {
+                            uint64_t w_b = p_v[i].batch_b();
+                            uint32_t w0 = static_cast<uint32_t>(w_b);
+                            uint32_t w1 = static_cast<uint32_t>(w_b >> 32);
+                            ncrisc_err01 |= w0;
+                            ncrisc_err23 |= w1;
                             if ((rv32_andn(mask_err01, ncrisc_err01) | rv32_andn(mask_err23, ncrisc_err23)) == 0) {
                                 break;
                             }
                         }
                     }
 
-                    // Post 4-bit parity error mask to TRISC1 Maestro
+                    // Post 4-bit parity error mask for Batch B to TRISC1 Maestro
                     uint32_t parity_err_mask = 0;
-                    if ((ncrisc_err01 & 0x00008000) && (active_mask & 1)) parity_err_mask |= 1;
-                    if ((ncrisc_err01 & 0x80000000) && (active_mask & 2)) parity_err_mask |= 2;
-                    if ((ncrisc_err23 & 0x00008000) && (active_mask & 4)) parity_err_mask |= 4;
-                    if ((ncrisc_err23 & 0x80000000) && (active_mask & 8)) parity_err_mask |= 8;
+                    if ((ncrisc_err01 & 0x00008000) && (active_mask_b_cur & 1)) parity_err_mask |= 1;
+                    if ((ncrisc_err01 & 0x80000000) && (active_mask_b_cur & 2)) parity_err_mask |= 2;
+                    if ((ncrisc_err23 & 0x00008000) && (active_mask_b_cur & 4)) parity_err_mask |= 4;
+                    if ((ncrisc_err23 & 0x80000000) && (active_mask_b_cur & 8)) parity_err_mask |= 8;
                     sync_flags[SyncSlot::PARITY_REPORT_W1] = parity_err_mask;
                     cycles_error_scan += (get_wall_clock() - t_es0);
                 }
             }
 
-            // 3. Autonomous Gather Stage: Gather current tile s_dae of Batch b_dae
-            if (s_dae < max_steps) {
+            // 3. Autonomous Gather Stage: Gather tile k for both Batch A and Batch B
+            if (k < max_steps) {
                 uint32_t t_g0 = get_wall_clock();
                 while (sync_flags[SyncSlot::GATHER_START] < bar) { }
-                uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
+                uint32_t scratch_in_addr_a = sync_flags[SyncSlot::SCRATCH_GATHER_PTR_A];
+                uint32_t scratch_in_addr_b = sync_flags[SyncSlot::SCRATCH_GATHER_PTR_B];
 
-                if (active_mask != 0) {
-                    total_tiles_sim++;
-                    uint32_t t_gath = s_dae % num_tiles;
-                    const uint32_t* tile_hoff_w1 = p_hoff_base + t_gath * 96 + 48;
-                    gather_face_24pairs(scratch_in_addr + 512, tile_hoff_w1, vnode_bytes_ptr);
+                uint32_t s_gath = k;
+                uint32_t t_gath = s_gath % num_tiles;
+                if (diff_test_mode != 0 && pair == 0 && s_gath == 0) {
+                    uint64_t dst_noc_scat_in = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 47104);
+                    noc_async_write(scratch_in_addr_a, dst_noc_scat_in, 2048);
+                    noc_async_write_barrier();
                 }
+
+                total_tiles_sim += 2;
+                const uint32_t* tile_hoff_w1 = p_hoff_base + t_gath * 96 + 48;
+                gather_face_128bit(scratch_in_addr_a + 512, scratch_in_addr_b + 512, tile_hoff_w1, vnode_bytes_ptr, 1);
 
                 sync_flags[SyncSlot::GATHER_DONE_W1] = bar;
                 cycles_gather += (get_wall_clock() - t_g0);
@@ -286,22 +305,14 @@ void kernel_main() {
         }
 
         // ----------------------------------------------------------------------
-        // Drain Residual Speculative Scatter Tile upon Early Termination
+        // Drain Residual Speculative Scatter Tiles upon Early Termination
         // ----------------------------------------------------------------------
-        // TT-Metal Microarchitectural Invariant:
-        // Circular buffer read/write pointers are maintained thread-locally in hardware registers.
-        // Because Worker 1 (NCRISC) is the sole consumer of cb_scat_out (cb_scratch_out_a/b),
-        // NCRISC must execute the residual tile drain itself when an iteration terminates early.
-        // If another thread (e.g. TRISC0) attempts to pop cb_scat_out, NCRISC's thread-local read
-        // pointer fails to advance, leaving it offset by 1 page (2,048 B). In subsequent pairs,
-        // NCRISC would then scatter tile t-1 into tile t's check equations, corrupting companion
-        // codewords. Once drained, NCRISC signals DRAIN_ACK_W1 to TRISC1 Maestro.
         if (sync_flags[SyncSlot::TRISC1_CMD] == static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
-            if (last_completed_k >= 1 && last_completed_k <= 2 * max_steps) {
-                uint32_t b_prev = (last_completed_k - 1) % 2;
-                uint32_t res_out = cb_scat_out[b_prev];
-                cb_wait_front(res_out, 1);
-                cb_pop_front(res_out, 1);
+            if (last_completed_k >= 1 && last_completed_k <= max_steps) {
+                cb_wait_front(cb_scratch_out_a, 1);
+                cb_pop_front(cb_scratch_out_a, 1);
+                cb_wait_front(cb_scratch_out_b, 1);
+                cb_pop_front(cb_scratch_out_b, 1);
             }
         }
         sync_flags[SyncSlot::DRAIN_ACK_W1] = pair + 1;
@@ -316,13 +327,14 @@ void kernel_main() {
             if (it_b != 0) iter_converged_b[cw] = it_b;
         }
 
+        const auto* p_v = reinterpret_cast<const VNode128*>(vnode_l1_unified);
         if (active_mask_a != 0) {
-            const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_l1_a);
             uint32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0;
             #pragma GCC unroll 4
-            for (uint32_t i = 0; i < 2048; i += 2) {
-                uint32_t w0 = p32[i + 0];
-                uint32_t w1 = p32[i + 1];
+            for (uint32_t i = 0; i < 1024; ++i) {
+                uint64_t w_a = p_v[i].batch_a();
+                uint32_t w0 = static_cast<uint32_t>(w_a);
+                uint32_t w1 = static_cast<uint32_t>(w_a >> 32);
                 e0 += ((w0 >> 15) & 1); e1 += (w0 >> 31);
                 e2 += ((w1 >> 15) & 1); e3 += (w1 >> 31);
             }
@@ -333,12 +345,12 @@ void kernel_main() {
         }
 
         if (active_mask_b != 0) {
-            const auto* p32 = reinterpret_cast<const uint32_t*>(vnode_l1_b);
             uint32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0;
             #pragma GCC unroll 4
-            for (uint32_t i = 0; i < 2048; i += 2) {
-                uint32_t w0 = p32[i + 0];
-                uint32_t w1 = p32[i + 1];
+            for (uint32_t i = 0; i < 1024; ++i) {
+                uint64_t w_b = p_v[i].batch_b();
+                uint32_t w0 = static_cast<uint32_t>(w_b);
+                uint32_t w1 = static_cast<uint32_t>(w_b >> 32);
                 e0 += ((w0 >> 15) & 1); e1 += (w0 >> 31);
                 e2 += ((w1 >> 15) & 1); e3 += (w1 >> 31);
             }
@@ -423,5 +435,16 @@ void kernel_main() {
 
     uint64_t dst_noc_addr = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr);
     noc_async_write(stats_l1, dst_noc_addr, 4096);
+    if (diff_test_mode != 0) {
+        const auto* p_v = reinterpret_cast<const VNode128*>(vnode_l1_unified);
+        auto* p_gold = reinterpret_cast<uint64_t*>(vnode_l1_a);
+        for (uint32_t v = 0; v < 2560; ++v) {
+            p_gold[v] = p_v[v].batch_a();
+        }
+        for (uint32_t chk = 0; chk < 10; ++chk) {
+            uint64_t dst_noc_final = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 4096 + 20480 + chk * 2048);
+            noc_async_write(vnode_l1_a + chk * 2048, dst_noc_final, 2048);
+        }
+    }
     noc_async_write_barrier();
 }
