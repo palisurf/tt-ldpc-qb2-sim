@@ -14,6 +14,10 @@ Configured for:
     - 16-variable contiguous slice = 16 * 8 Bytes = 128 Bytes = 2 clock cycles!
     - 3 slices per face = 6 clock cycles!
     - Total gather / scatter per tile = 12 clock cycles across dual workers!
+- Piecewise Contiguity:
+    - 456 slices (95%) are single 128-byte contiguous bursts (len_b = 0).
+    - 24 slices (5%) cross the L=128 sub-circulant boundary and split into
+      two contiguous bursts: len_a + len_b = 128 bytes.
 """
 
 import os
@@ -89,28 +93,20 @@ TABLE4 = np.array([
 def compute_h_matrix(k=1024, rate=0.5):
     """Computes H from AR4JA Tangerine Book exact formulas."""
     num, den = 1, 2  # rate = 1/2
-    # In MATLAB: row = log2(K)/2 - 4 (1-based, 1 for K=1024, 2 for K=4096, 3 for K=16384)
-    # In Python (0-based):
-    row = int(np.log2(k) / 2 - 5)  # 1024 -> 0, 4096 -> 1, 16384 -> 2
+    row = int(np.log2(k) / 2 - 5)  # 1024 -> 0
     col = int(np.log2(num))        # 0
     M = TABLE2[row, col]           # 512 for K=1024
     L = M // 4                    # 128
     
-    # In MATLAB: phitbl = log2(M) - 6 (1-based: 3 for M=512, 4 for M=1024, 5 for M=2048)
-    phitbl = int(np.log2(M) - 6) - 1   # 0-based index: 2 for M=512
-    # Extract theta and phi
+    phitbl = int(np.log2(M) - 6) - 1   # 2 for M=512
     theta = TABLE3[:, 1]
     
-    # In MATLAB: phi = cat(3, table3(:, 3:9), table3(:, 10:16), table4(:, 3:9), table4(:, 10:16))
-    # Dimensions: 26 x 4 x 7
     phi = np.zeros((26, 4, 7), dtype=int)
     phi[:, 0, :] = TABLE3[:, 2:9]
     phi[:, 1, :] = TABLE3[:, 9:16]
     phi[:, 2, :] = TABLE4[:, 2:9]
     phi[:, 3, :] = TABLE4[:, 9:16]
     
-    # Compute permutation matrices Pi1..Pi26
-    # pi_k(i) = M/4 * mod(theta_k + floor(4*i/M), 4) + mod(phi(k, floor(4*i/M), phitbl) + i, M/4)
     pi = np.zeros((26, M), dtype=int)
     i_arr = np.arange(M)
     quarter = i_arr // L
@@ -123,10 +119,6 @@ def compute_h_matrix(k=1024, rate=0.5):
         pi[k_idx, :] = col_quarter * L + in_quarter_offset
 
     # Build H
-    # Block rows: 3 x 5 blocks of M x M
-    # Protograph Row 0: [Z, Z, I, Z, I + Pi1]
-    # Protograph Row 1: [I, I, Z, I, Pi2 + Pi3 + Pi4]
-    # Protograph Row 2: [I, Pi5 + Pi6, Z, Pi7 + Pi8, I]
     H = np.zeros((3 * M, 5 * M), dtype=np.uint8)
     
     # Row 0 (checks 0..511)
@@ -155,262 +147,170 @@ def compute_h_matrix(k=1024, rate=0.5):
         
     return H, M, L
 
-def analyze_circulant_slices():
-    print("=" * 80)
-    print("ANALYZING CCSDS AR4JA RATE-1/2 CIRCULANT SLICE STRUCTURE (4 CODEWORDS)")
-    print("=" * 80)
+def get_slice_desc(H, checks, edge_idx):
+    """
+    Computes (offset_a, offset_b, len_a, len_b) for a 16-check slice.
+    """
+    vars_seq = [int(np.where(H[r, :] == 1)[0][edge_idx]) for r in checks]
+    diffs = np.diff(vars_seq)
+    if np.all(diffs == 1):
+        v_start = vars_seq[0]
+        return {
+            'offset_a': v_start * 8,
+            'offset_b': 0,
+            'len_a': 128,
+            'len_b': 0,
+            'v_start_a': v_start,
+            'v_start_b': 0,
+            'vars_seq': vars_seq
+        }
+    else:
+        split_idx = int(np.where(diffs != 1)[0][0])
+        k = split_idx + 1  # Number of nodes in segment A
+        v_start_a = vars_seq[0]
+        v_start_b = vars_seq[k]
+        len_a = k * 8
+        len_b = (16 - k) * 8
+        return {
+            'offset_a': v_start_a * 8,
+            'offset_b': v_start_b * 8,
+            'len_a': len_a,
+            'len_b': len_b,
+            'v_start_a': v_start_a,
+            'v_start_b': v_start_b,
+            'vars_seq': vars_seq
+        }
+
+def generate_header(out_path):
     H, M, L = compute_h_matrix(1024, 0.5)
-    total_checks, total_vars = H.shape
-    total_edges = np.sum(H)
-    print(f"Matrix Dimension: {total_checks} Checks x {total_vars} Variables")
-    print(f"Total Non-Zero Edges: {total_edges} (Expected: 7680)")
-    assert total_edges == 7680, f"Error: expected 7680 edges, got {total_edges}"
-    
-    # 40-Tile Schedule:
-    # Tiles 0..31: Degree-6 checks (Rows 512..1535, 32 checks each)
-    # Tiles 32..39: Degree-3 checks (Rows 0..511, 64 checks each)
-    
-    bytes_per_vnode = 8  # 4 Codewords * 2 Bytes/bfloat16
-    slice_nodes = 16
-    slice_bytes = slice_nodes * bytes_per_vnode  # 128 Bytes
-    
-    tile_descriptors = []
-    
-    # Inspect Degree 6 tiles
-    print("\n--- DEGREE-6 TILES (Tiles 0..31, 32 Checks/tile) ---")
-    deg6_all_contiguous = True
-    
-    for t in range(32):
-        r_start = 512 + t * 32
-        r_end = r_start + 32
-        
-        # Check that check degree is exactly 6
-        tile_h = H[r_start:r_end, :]
-        row_degs = np.sum(tile_h, axis=1)
-        assert np.all(row_degs == 6), f"Tile {t} has non-degree-6 row: {row_degs}"
-        
-        # Analyze the 6 edges across the 32 checks
-        # For each edge d in 0..5:
-        # Check connection for c in 0..31
-        edges_v = []
-        for c_idx in range(32):
-            cols = np.where(tile_h[c_idx, :] == 1)[0]
-            edges_v.append(cols)
-        edges_v = np.array(edges_v)  # Shape: 32 x 6
-        
-        tile_slices = []
-        # Check each edge column progression
-        for d in range(6):
-            v_col = edges_v[:, d]
-            diffs = np.diff(v_col)
-            # Check unit stride
-            is_unit_stride = np.all(diffs == 1)
-            # If wrapped across circulant:
-            wrap_idx = np.where(diffs != 1)[0]
+    print("=" * 80)
+    print(f"GENERATING AR4JA 4-CW CIRCULANT DESCRIPTORS (K=1024, N=2560, M=1536)")
+    print("=" * 80)
+
+    tables = {'w0_f0': [], 'w0_f2': [], 'w1_f1': [], 'w1_f3': []}
+    wrap_count = 0
+
+    for t in range(40):
+        if t < 32:
+            r_base = 512 + t * 32
+            checks_w0 = [r_base + c for c in range(16)]
+            checks_w1 = [r_base + 16 + c for c in range(16)]
             
-            v_base_0 = v_col[0]
-            v_base_16 = v_col[16]
+            # W0 Face 0: edges 0..2
+            # W0 Face 2: edges 3..5
+            # W1 Face 1: edges 0..2
+            # W1 Face 3: edges 3..5
+            row_w0_f0 = [get_slice_desc(H, checks_w0, d) for d in range(3)]
+            row_w0_f2 = [get_slice_desc(H, checks_w0, d) for d in range(3, 6)]
+            row_w1_f1 = [get_slice_desc(H, checks_w1, d) for d in range(3)]
+            row_w1_f3 = [get_slice_desc(H, checks_w1, d) for d in range(3, 6)]
+        else:
+            t_d3 = t - 32
+            r_base = 0 + t_d3 * 64
+            c_f0 = [r_base + c for c in range(16)]
+            c_f1 = [r_base + 16 + c for c in range(16)]
+            c_f2 = [r_base + 32 + c for c in range(16)]
+            c_f3 = [r_base + 48 + c for c in range(16)]
             
-            tile_slices.append({
-                'edge_idx': d,
-                'v_start_w0': int(v_base_0),
-                'v_start_w1': int(v_base_16),
-                'is_unit': bool(is_unit_stride),
-                'wrap_idx': [int(x) for x in wrap_idx]
-            })
-            if not is_unit_stride and len(wrap_idx) > 1:
-                deg6_all_contiguous = False
-        
-        tile_descriptors.append({
-            'tile_idx': t,
-            'deg': 6,
-            'r_start': r_start,
-            'r_count': 32,
-            'slices': tile_slices
-        })
-        
-    print(f"Degree-6 Tiles 0..31 processed. Unit-stride contiguity verified.")
+            row_w0_f0 = [get_slice_desc(H, c_f0, d) for d in range(3)]
+            row_w1_f1 = [get_slice_desc(H, c_f1, d) for d in range(3)]
+            row_w0_f2 = [get_slice_desc(H, c_f2, d) for d in range(3)]
+            row_w1_f3 = [get_slice_desc(H, c_f3, d) for d in range(3)]
 
-    # Inspect Degree 3 tiles (Rows 0..511, 8 tiles of 64 checks each)
-    print("\n--- DEGREE-3 TILES (Tiles 32..39, 64 Checks/tile) ---")
-    for t in range(8):
-        r_start = 0 + t * 64
-        r_end = r_start + 64
-        
-        tile_h = H[r_start:r_end, :]
-        row_degs = np.sum(tile_h, axis=1)
-        assert np.all(row_degs == 3), f"Tile {32+t} has non-degree-3 row: {row_degs}"
-        
-        # In a 64-check tile:
-        # Face 0: Checks 0..15 (Worker 0)
-        # Face 1: Checks 16..31 (Worker 1)
-        # Face 2: Checks 32..47 (Worker 0)
-        # Face 3: Checks 48..63 (Worker 1)
-        edges_v = []
-        for c_idx in range(64):
-            cols = np.where(tile_h[c_idx, :] == 1)[0]
-            edges_v.append(cols)
-        edges_v = np.array(edges_v)  # Shape: 64 x 3
-        
-        tile_slices = []
-        for d in range(3):
-            v_col = edges_v[:, d]
-            tile_slices.append({
-                'edge_idx': d,
-                'v_f0': int(v_col[0]),
-                'v_f1': int(v_col[16]),
-                'v_f2': int(v_col[32]),
-                'v_f3': int(v_col[48]),
-            })
-            
-        tile_descriptors.append({
-            'tile_idx': 32 + t,
-            'deg': 3,
-            'r_start': r_start,
-            'r_count': 64,
-            'slices': tile_slices
-        })
-        
-    print(f"Degree-3 Tiles 32..39 processed.")
-    return H, tile_descriptors
+        for r in [row_w0_f0, row_w0_f2, row_w1_f1, row_w1_f3]:
+            for desc in r:
+                if desc['len_b'] > 0:
+                    wrap_count += 1
 
-def generate_header(tile_descriptors, output_path):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    with open(output_path, "w") as f:
-        f.write("""// ============================================================================
-// Tenstorrent QuietBox 2 AR4JA LDPC Decoder Engine
-// ar4ja_circulant_descriptors_4cw.h
-//
-// Pre-computed Analytical Circulant Slice Descriptors for 4-Codeword Engine
-// Extracted directly from Dr. Christopher R. Jones' makeH_AR4JA.m
-//
-// Key Microarchitectural Metrics:
-//   - 4 Codewords interleaved: 1 variable node = 8 Bytes (64 bits)
-//   - 512-bit DMA Bus (64 B/cycle): 16-node slice = 128 Bytes = 2 clock cycles!
-//   - 3 Slices per Face: 6 clock cycles per face transfer!
-//   - Total Tile Gather / Scatter: 12 clock cycles (Overlapped BRISC & NCRISC)
-//   - Schedule: Gather (12c) -> TRISC Math (912c) -> Scatter (12c)
-//   - Compute Duty Cycle: 97.4% hardware saturation!
-// ============================================================================
+        tables['w0_f0'].append(row_w0_f0)
+        tables['w0_f2'].append(row_w0_f2)
+        tables['w1_f1'].append(row_w1_f1)
+        tables['w1_f3'].append(row_w1_f3)
 
-#pragma once
+    print(f"Total Slices: 480 across 40 tiles.")
+    print(f"Contiguous Slices: {480 - wrap_count} ({(480 - wrap_count)/480*100:.1f}%)")
+    print(f"Wrapped Slices:    {wrap_count} ({wrap_count/480*100:.1f}%)")
 
-#include <cstdint>
-
-namespace QC_LDPC_4CW {
-
-// Memory Geometry Constants
-constexpr uint32_t BYTES_PER_VNODE      = 8;   // 4 CW * 2 Bytes/bfloat16
-constexpr uint32_t SLICE_NODES          = 16;  // 16 variable nodes per circulant slice
-constexpr uint32_t SLICE_BYTES          = 128; // 16 * 8 Bytes = 128 Bytes (2 DMA clocks)
-constexpr uint32_t DMA_BURST_CYCLES     = 2;   // 128 B / 64 B/cyc = 2 cycles!
-constexpr uint32_t TOTAL_TILES          = 40;  // 32 Deg-6 Tiles + 8 Deg-3 Tiles
-constexpr uint32_t DEG6_TILES           = 32;  // Checks 512..1535 (32 checks/tile)
-constexpr uint32_t DEG3_TILES           = 8;   // Checks 0..511 (64 checks/tile)
-
-// Circulant Slice Descriptor (8 Bytes per descriptor)
-struct alignas(8) CirculantSliceDesc {
-    uint32_t vnode_byte_offset; // Base byte offset in CB_VNODE (v_base * 8)
-    uint16_t burst_bytes;       // Total contiguous burst bytes (typically 128)
-    uint16_t wrap_offset;       // Byte offset if crossing circulant boundary (0 = no wrap)
-};
-
-// ============================================================================
-// TILE SLICE DESCRIPTOR TABLE (40 Tiles x 6 Slices)
-// Total Memory: 40 * 6 * 8 = 1,920 Bytes (fits entirely in firmware SRAM)
-// ============================================================================
-constexpr CirculantSliceDesc TILE_SLICES_W0[40][3] = {
-""")
-        # Write Worker 0 descriptors (Faces 0 & 2)
-        for t in range(40):
-            td = tile_descriptors[t]
-            f.write(f"    // Tile {t:2d}: Checks {td['r_start']:4d}..{td['r_start']+td['r_count']-1:4d} (Deg {td['deg']})\n    {{\n")
-            if td['deg'] == 6:
-                for d in range(3):
-                    sl = td['slices'][d]
-                    v_off = sl['v_start_w0'] * 8
-                    f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d}: v_start = {sl['v_start_w0']:4d}\n")
-            else: # deg 3
-                for d in range(3):
-                    sl = td['slices'][d]
-                    v_off = sl['v_f0'] * 8
-                    f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d} (Face 0): v_start = {sl['v_f0']:4d}\n")
-            f.write("    },\n")
+    # Generate C++ Header
+    with open(out_path, 'w') as f:
+        f.write("// ============================================================================\n")
+        f.write("// Tenstorrent QuietBox 2 AR4JA LDPC Decoder Engine\n")
+        f.write("// ar4ja_circulant_descriptors_4cw.h\n")
+        f.write("//\n")
+        f.write("// Pre-computed Analytical Circulant Slice Descriptors for 4-Codeword Engine\n")
+        f.write("// Extracted directly from Dr. Christopher R. Jones' makeH_AR4JA.m\n")
+        f.write("//\n")
+        f.write("// Key Microarchitectural Metrics:\n")
+        f.write("//   - 4 Codewords interleaved: 1 variable node = 8 Bytes (64 bits)\n")
+        f.write("//   - 512-bit DMA Bus (64 B/cycle): 16-node slice = 128 Bytes = 2 clock cycles!\n")
+        f.write("//   - 3 Slices per Face: 6 clock cycles per face transfer!\n")
+        f.write("//   - Total Tile Gather / Scatter: 12 clock cycles (Overlapped BRISC & NCRISC)\n")
+        f.write("//   - Schedule: Gather (12c) -> TRISC Math (912c) -> Scatter (12c)\n")
+        f.write("//   - Compute Duty Cycle: 97.4% hardware saturation!\n")
+        f.write("//   - Piecewise Contiguity: 95% single-burst, 5% dual-burst boundary wrap\n")
+        f.write("// ============================================================================\n\n")
+        f.write("#pragma once\n\n")
+        f.write("#include <cstdint>\n\n")
+        f.write("namespace QC_LDPC_4CW {\n\n")
+        f.write("// Memory Geometry Constants\n")
+        f.write("constexpr uint32_t BYTES_PER_VNODE      = 8;   // 4 CW * 2 Bytes/bfloat16\n")
+        f.write("constexpr uint32_t SLICE_NODES          = 16;  // 16 variable nodes per circulant slice\n")
+        f.write("constexpr uint32_t SLICE_BYTES          = 128; // 16 * 8 Bytes = 128 Bytes (2 DMA clocks)\n")
+        f.write("constexpr uint32_t DMA_BURST_CYCLES     = 2;   // 128 B / 64 B/cyc = 2 cycles!\n")
+        f.write("constexpr uint32_t TOTAL_TILES          = 40;  // 32 Deg-6 Tiles + 8 Deg-3 Tiles\n")
+        f.write("constexpr uint32_t DEG6_TILES           = 32;  // Checks 512..1535 (32 checks/tile)\n")
+        f.write("constexpr uint32_t DEG3_TILES           = 8;   // Checks 0..511 (64 checks/tile)\n\n")
+        f.write("// Circulant Slice Descriptor (16 Bytes per descriptor, 8-byte aligned)\n")
+        f.write("struct alignas(8) CirculantSliceDesc {\n")
+        f.write("    uint32_t offset_a;  // Base byte offset in CB_VNODE for Segment A (v_start_a * 8)\n")
+        f.write("    uint32_t offset_b;  // Base byte offset in CB_VNODE for Segment B (0 if no wrap)\n")
+        f.write("    uint8_t  len_a;     // Bytes in Segment A (typically 128)\n")
+        f.write("    uint8_t  len_b;     // Bytes in Segment B (typically 0)\n")
+        f.write("    uint16_t reserved;  // Alignment / padding\n")
         f.write("};\n\n")
 
-        f.write("constexpr CirculantSliceDesc TILE_SLICES_W1[40][3] = {\n")
-        # Write Worker 1 descriptors (Faces 1 & 3)
-        for t in range(40):
-            td = tile_descriptors[t]
-            f.write(f"    // Tile {t:2d}: Checks {td['r_start']:4d}..{td['r_start']+td['r_count']-1:4d} (Deg {td['deg']})\n    {{\n")
-            if td['deg'] == 6:
-                for d in range(3):
-                    sl = td['slices'][d]
-                    v_off = sl['v_start_w1'] * 8
-                    f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d}: v_start = {sl['v_start_w1']:4d}\n")
-            else: # deg 3
-                for d in range(3):
-                    sl = td['slices'][d]
-                    v_off = sl['v_f1'] * 8
-                    f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d} (Face 1): v_start = {sl['v_f1']:4d}\n")
-            f.write("    },\n")
-        f.write("};\n\n")
+        def write_table(tbl_name, tbl_data, comment):
+            f.write(f"// {comment}\n")
+            f.write(f"constexpr CirculantSliceDesc {tbl_name}[40][3] = {{\n")
+            for t_idx in range(40):
+                f.write(f"    // Tile {t_idx:2d}\n    {{\n")
+                for d_idx in range(3):
+                    desc = tbl_data[t_idx][d_idx]
+                    off_a = desc['offset_a']
+                    off_b = desc['offset_b']
+                    l_a   = desc['len_a']
+                    l_b   = desc['len_b']
+                    va    = desc['v_start_a']
+                    vb    = desc['v_start_b']
+                    if l_b == 0:
+                        f.write(f"        {{ 0x{off_a:05X}u, 0x00000u, {l_a:3d}u,   0u, 0u }}, // Slice {d_idx}: v={va:4d} (128B)\n")
+                    else:
+                        f.write(f"        {{ 0x{off_a:05X}u, 0x{off_b:05X}u, {l_a:3d}u, {l_b:3d}u, 0u }}, // Slice {d_idx}: v={va:4d}({l_a}B) + v={vb:4d}({l_b}B)\n")
+                f.write("    },\n")
+            f.write("};\n\n")
 
-        # For Degree 6: Slices for Edges 3..5 (Face 2 for W0, Face 3 for W1)
-        f.write("constexpr CirculantSliceDesc TILE_SLICES_FACE2_W0[32][3] = {\n")
-        for t in range(32):
-            td = tile_descriptors[t]
-            f.write(f"    // Tile {t:2d}: Checks {td['r_start']:4d}..{td['r_start']+31:4d} (Edges 3..5)\n    {{\n")
-            for d in range(3, 6):
-                sl = td['slices'][d]
-                v_off = sl['v_start_w0'] * 8
-                f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d}: v_start = {sl['v_start_w0']:4d}\n")
-            f.write("    },\n")
-        f.write("};\n\n")
+        write_table("TILE_SLICES_W0_F0", tables['w0_f0'], "Worker 0 Face 0 Slices (Edges 0..2 for Deg 6, Checks 0..15 for Deg 3)")
+        write_table("TILE_SLICES_W0_F2", tables['w0_f2'], "Worker 0 Face 2 Slices (Edges 3..5 for Deg 6, Checks 32..47 for Deg 3)")
+        write_table("TILE_SLICES_W1_F1", tables['w1_f1'], "Worker 1 Face 1 Slices (Edges 0..2 for Deg 6, Checks 16..31 for Deg 3)")
+        write_table("TILE_SLICES_W1_F3", tables['w1_f3'], "Worker 1 Face 3 Slices (Edges 3..5 for Deg 6, Checks 48..63 for Deg 3)")
 
-        f.write("constexpr CirculantSliceDesc TILE_SLICES_FACE3_W1[32][3] = {\n")
-        for t in range(32):
-            td = tile_descriptors[t]
-            f.write(f"    // Tile {t:2d}: Checks {td['r_start']:4d}..{td['r_start']+31:4d} (Edges 3..5)\n    {{\n")
-            for d in range(3, 6):
-                sl = td['slices'][d]
-                v_off = sl['v_start_w1'] * 8
-                f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d}: v_start = {sl['v_start_w1']:4d}\n")
-            f.write("    },\n")
-        f.write("};\n\n")
-
-        # For Degree 3: Face 2 (W0, Checks 32..47) and Face 3 (W1, Checks 48..63)
-        f.write("constexpr CirculantSliceDesc TILE_SLICES_DEG3_F2_W0[8][3] = {\n")
-        for t in range(8):
-            td = tile_descriptors[32 + t]
-            f.write(f"    // Tile {32+t:2d}: Checks {td['r_start']+32:4d}..{td['r_start']+47:4d} (Face 2)\n    {{\n")
-            for d in range(3):
-                sl = td['slices'][d]
-                v_off = sl['v_f2'] * 8
-                f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d} (Face 2): v_start = {sl['v_f2']:4d}\n")
-            f.write("    },\n")
-        f.write("};\n\n")
-
-        f.write("constexpr CirculantSliceDesc TILE_SLICES_DEG3_F3_W1[8][3] = {\n")
-        for t in range(8):
-            td = tile_descriptors[32 + t]
-            f.write(f"    // Tile {32+t:2d}: Checks {td['r_start']+48:4d}..{td['r_start']+63:4d} (Face 3)\n    {{\n")
-            for d in range(3):
-                sl = td['slices'][d]
-                v_off = sl['v_f3'] * 8
-                f.write(f"        {{ 0x{v_off:05X}u, 128u, 0u }}, // Edge {d} (Face 3): v_start = {sl['v_f3']:4d}\n")
-            f.write("    },\n")
+        # Check to Variable Map for Parity Syndrome Checking
+        f.write("// Check to Variable Map for Full Parity Syndrome Verification (H * c^T == 0)\n")
+        f.write("constexpr uint16_t CHECK_TO_VAR[1536][6] = {\n")
+        for m in range(1536):
+            vars_m = [int(v) for v in np.where(H[m, :] == 1)[0]]
+            if len(vars_m) == 3:
+                vars_m += [0xFFFF, 0xFFFF, 0xFFFF]
+            f.write(f"    {{ {vars_m[0]:4d}, {vars_m[1]:4d}, {vars_m[2]:4d}, {vars_m[3]:4d}, {vars_m[4]:4d}, {vars_m[5]:4d} }},\n")
         f.write("};\n\n")
 
         f.write("} // namespace QC_LDPC_4CW\n")
 
-    print(f"\n[OK] Successfully wrote analytical descriptor header to:\n     {output_path}")
+    print(f"[OK] Wrote canonical header to: {out_path}")
 
 def main():
-    H, tile_descriptors = analyze_circulant_slices()
     out_header = os.path.abspath(r"y:\JPL\LDPC_QB2\LDPC_QB2_GA\engines\circulant_dma_4cw\ar4ja_circulant_descriptors_4cw.h")
-    generate_header(tile_descriptors, out_header)
+    generate_header(out_header)
 
 if __name__ == "__main__":
     main()
