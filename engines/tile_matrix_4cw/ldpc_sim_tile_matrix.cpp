@@ -629,7 +629,6 @@ void run_tile_matrix_on_hardware(
             CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_B, 2 * 1024));
             CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
             CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(40 * 1024, {{TileMatrixCB::CB_VNODE_UNIFIED, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_VNODE_UNIFIED, 40 * 1024));
 
             auto reader = CreateKernel(program, reader_path, core_range, reader_config);
             auto writer = CreateKernel(program, writer_path, core_range, writer_config);
@@ -1460,7 +1459,6 @@ void run_waterfall_sweep(
             CreateCircularBuffer(program, core_range, CircularBufferConfig(std::max<uint32_t>(34, schedule.size() + 1) * 2 * 1024, {{TileMatrixCB::CB_R_MSG_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_B, 2 * 1024));
             CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
             CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(40 * 1024, {{TileMatrixCB::CB_VNODE_UNIFIED, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_VNODE_UNIFIED, 40 * 1024));
 
             auto reader = CreateKernel(program, reader_path, core_range, reader_config);
             auto writer = CreateKernel(program, writer_path, core_range, writer_config);

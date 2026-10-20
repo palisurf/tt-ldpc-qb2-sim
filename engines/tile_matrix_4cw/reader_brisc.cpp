@@ -84,7 +84,9 @@ void kernel_main() {
     uint32_t cycles_scatter = 0;
     uint32_t cycles_brisc_wait = 0;
     uint32_t max_steps = max_iter * num_tiles;
-    uint32_t total_steps = max_steps + 2;
+    uint32_t total_steps = 2 * max_steps + 2;
+
+    uint32_t cb_scat_in[2] = {cb_scratch_in_a, cb_scratch_in_b};
 
     // --------------------------------------------------------------------------
     // Step 2: Main Simulation Loop (Dual-Batch Pairs)
@@ -102,15 +104,20 @@ void kernel_main() {
         while (sync_flags[SyncSlot::TRISC1_CMD] != static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC) ||
                sync_flags[SyncSlot::TRISC1_GRANT_STEP] < pair * total_steps + 1) { }
 
-        uint32_t vnode_l1 = sync_flags[SyncSlot::VNODE_L1_BASE_ADDR];
-        const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
-        char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
+        uint32_t vnode_l1_a = sync_flags[SyncSlot::VNODE_L1_ADDR_A];
+        uint32_t vnode_l1_b = sync_flags[SyncSlot::VNODE_L1_ADDR_B];
+        uint32_t vnodes[2] = {vnode_l1_a, vnode_l1_b};
 
         // ----------------------------------------------------------------------
-        // Unified Monotonic Macro-Step Pipeline (Bounded Autonomy)
+        // Interleaved Dual-Batch DAE Gather/Scatter Engine (Bounded Autonomy)
         // ----------------------------------------------------------------------
         for (uint32_t k = 0; k < total_steps; ++k) {
             uint32_t bar = pair * total_steps + k + 1;
+            uint32_t b_dae = k % 2;
+            uint32_t s_dae = k / 2;
+            uint32_t vnode_l1 = vnodes[b_dae];
+            const char* vnode_bytes_ptr = reinterpret_cast<const char*>(vnode_l1);
+            char* vnode_out_ptr = reinterpret_cast<char*>(vnode_l1);
 
             // 1. Wait for TRISC1 Macro Step Grant
             while (sync_flags[SyncSlot::TRISC1_GRANT_STEP] < bar) {
@@ -122,78 +129,83 @@ void kernel_main() {
                 break;
             }
 
-            // 2. Autonomous Scatter Stage: Scatter previous tile (k - 2) for both Batch A and Batch B
-            if (k >= 2 && (k - 2) < max_steps) {
+            uint8_t active_mask = static_cast<uint8_t>(
+                (b_dae == 0) ? sync_flags[SyncSlot::ACTIVE_MASK_A] : sync_flags[SyncSlot::ACTIVE_MASK_B]
+            );
+
+            // 2. Autonomous Scatter Stage: Scatter previous tile (s_dae - 1) of Batch b_dae
+            if (s_dae >= 1 && (s_dae - 1) < max_steps) {
                 uint32_t t_w0 = get_wall_clock();
                 while (sync_flags[SyncSlot::SCATTER_START] < bar) { }
                 cycles_brisc_wait += (get_wall_clock() - t_w0);
 
                 uint32_t t_s0 = get_wall_clock();
-                uint32_t scratch_out_addr_a = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR_A];
-                uint32_t scratch_out_addr_b = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR_B];
+                uint32_t scratch_out_addr = sync_flags[SyncSlot::SCRATCH_SCATTER_PTR];
 
-                uint32_t s_scat = k - 2;
+                uint32_t s_scat = s_dae - 1;
                 uint32_t t_scat = s_scat % num_tiles;
                 const uint32_t* tile_hoff_w0 = p_hoff_base + t_scat * 96;
 
-                // Worker 0 scatters Face 0 (lanes 0..15, rows 0..15) back to variable nodes with 128-bit vector stores
-                scatter_face_128bit(scratch_out_addr_a + 0, scratch_out_addr_b + 0, tile_hoff_w0 + 0, vnode_out_ptr, 1);
+                // Worker 0 scatters 24 pairs (Face 0) back to variable nodes with direct store
+                if (active_mask != 0) {
+                    scatter_face_24pairs(scratch_out_addr + 0, tile_hoff_w0 + 0, vnode_out_ptr);
+                }
                 sync_flags[SyncSlot::SCATTER_DONE_W0] = bar;
                 cycles_scatter += (get_wall_clock() - t_s0);
 
-                // Autonomous Check node iteration completion scan on Information Nodes (Tile 39) for CW 0..3 (Batch A)
+                // Autonomous Check node iteration completion scan on Information Nodes (Tile 39)
                 if (t_scat == num_tiles - 1) {
-                    uint8_t active_mask_a = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK_A]);
-                    uint32_t mask_err01 = ((active_mask_a & 1) ? 0x00008000 : 0) | ((active_mask_a & 2) ? 0x80000000 : 0);
-                    uint32_t mask_err23 = ((active_mask_a & 4) ? 0x00008000 : 0) | ((active_mask_a & 8) ? 0x80000000 : 0);
+                    uint32_t mask_err01 = ((active_mask & 1) ? 0x00008000 : 0) | ((active_mask & 2) ? 0x80000000 : 0);
+                    uint32_t mask_err23 = ((active_mask & 4) ? 0x00008000 : 0) | ((active_mask & 8) ? 0x80000000 : 0);
 
-                    const auto* p_v = reinterpret_cast<const VNode128*>(vnode_bytes_ptr);
+                    const auto* p0 = reinterpret_cast<const uint32_t*>(vnode_bytes_ptr);
                     uint32_t brisc_err01 = 0;
                     uint32_t brisc_err23 = 0;
                     if (mask_err01 != 0 || mask_err23 != 0) {
-                        #pragma GCC unroll 4
-                        for (uint32_t i = 0; i < 1024; ++i) {
-                            uint64_t w_a = p_v[i].batch_a();
-                            uint32_t w0 = static_cast<uint32_t>(w_a);
-                            uint32_t w1 = static_cast<uint32_t>(w_a >> 32);
-                            brisc_err01 |= w0;
-                            brisc_err23 |= w1;
+                        #pragma GCC unroll 2
+                        for (uint32_t i = 0; i < 2048; i += 16) {
+                            if (mask_err01) {
+                                brisc_err01 |= (p0[i + 0] | p0[i + 2] | p0[i + 4] | p0[i + 6] |
+                                                p0[i + 8] | p0[i + 10] | p0[i + 12] | p0[i + 14]);
+                            }
+                            if (mask_err23) {
+                                brisc_err23 |= (p0[i + 1] | p0[i + 3] | p0[i + 5] | p0[i + 7] |
+                                                p0[i + 9] | p0[i + 11] | p0[i + 13] | p0[i + 15]);
+                            }
                             if ((rv32_andn(mask_err01, brisc_err01) | rv32_andn(mask_err23, brisc_err23)) == 0) {
                                 break;
                             }
                         }
                     }
                     uint32_t info_err_mask = 0;
-                    if ((brisc_err01 & 0x00008000) && (active_mask_a & 1)) info_err_mask |= 1;
-                    if ((brisc_err01 & 0x80000000) && (active_mask_a & 2)) info_err_mask |= 2;
-                    if ((brisc_err23 & 0x00008000) && (active_mask_a & 4)) info_err_mask |= 4;
-                    if ((brisc_err23 & 0x80000000) && (active_mask_a & 8)) info_err_mask |= 8;
+                    if ((brisc_err01 & 0x00008000) && (active_mask & 1)) info_err_mask |= 1;
+                    if ((brisc_err01 & 0x80000000) && (active_mask & 2)) info_err_mask |= 2;
+                    if ((brisc_err23 & 0x00008000) && (active_mask & 4)) info_err_mask |= 4;
+                    if ((brisc_err23 & 0x80000000) && (active_mask & 8)) info_err_mask |= 8;
                     sync_flags[SyncSlot::PARITY_REPORT_W0] = info_err_mask;
                 }
             }
 
-            // 3. Autonomous Gather Stage: Gather tile k for both Batch A and Batch B
-            if (k < max_steps) {
+            // 3. Autonomous Gather Stage: Gather current tile s_dae of Batch b_dae
+            if (s_dae < max_steps) {
                 uint32_t t_g0 = get_wall_clock();
-                cb_reserve_back(cb_scratch_in_a, 1);
-                cb_reserve_back(cb_scratch_in_b, 1);
-                uint32_t scratch_in_addr_a = get_write_ptr(cb_scratch_in_a);
-                uint32_t scratch_in_addr_b = get_write_ptr(cb_scratch_in_b);
+                uint32_t active_in_cb = cb_scat_in[b_dae];
+                cb_reserve_back(active_in_cb, 1);
+                uint32_t scratch_in_addr = get_write_ptr(active_in_cb);
 
-                sync_flags[SyncSlot::SCRATCH_GATHER_PTR_A] = scratch_in_addr_a;
-                sync_flags[SyncSlot::SCRATCH_GATHER_PTR_B] = scratch_in_addr_b;
+                sync_flags[SyncSlot::SCRATCH_GATHER_PTR] = scratch_in_addr;
                 sync_flags[SyncSlot::GATHER_START] = bar;
 
-                uint32_t s_gath = k;
-                uint32_t t_gath = s_gath % num_tiles;
-                const uint32_t* tile_hoff_w0 = p_hoff_base + t_gath * 96;
-                gather_face_128bit(scratch_in_addr_a + 0, scratch_in_addr_b + 0, tile_hoff_w0 + 0, vnode_bytes_ptr, 1);
+                if (active_mask != 0) {
+                    uint32_t t_gath = s_dae % num_tiles;
+                    const uint32_t* tile_hoff_w0 = p_hoff_base + t_gath * 96;
+                    gather_face_24pairs(scratch_in_addr + 0, tile_hoff_w0 + 0, vnode_bytes_ptr);
+                }
 
                 while (sync_flags[SyncSlot::GATHER_DONE_W1] < bar) { }
                 while (sync_flags[SyncSlot::GATHER_DONE_T0] < bar) { }
                 while (sync_flags[SyncSlot::GATHER_DONE_T2] < bar) { }
-                cb_push_back(cb_scratch_in_a, 1);
-                cb_push_back(cb_scratch_in_b, 1);
+                cb_push_back(active_in_cb, 1);
                 sync_flags[SyncSlot::GATHER_DONE_W0] = bar;
                 cycles_gather += (get_wall_clock() - t_g0);
             }

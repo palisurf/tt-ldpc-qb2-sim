@@ -101,7 +101,6 @@ namespace TileMatrixCB {
     constexpr uint8_t CB_SCRATCH_GATHER_0  = 3;   // 4 KB: Stage 1 Gather Buffer (Batch A, Double-buffered, 2 KB page)
     constexpr uint8_t CB_SCRATCH_GATHER_1  = 4;   // 4 KB: Stage 1 Gather Buffer (Batch B, Double-buffered, 2 KB page)
     constexpr uint8_t CB_VNODE_B           = 5;   // 20 KB: Active evolving variable posterior LLRs (Batch B: CW 4..7)
-    constexpr uint8_t CB_VNODE_UNIFIED     = 6;   // 40 KB: Unified 128-bit variable node LLRs (Batch A + B: CW 0..7)
     constexpr uint8_t CB_SCRATCH_SCATTER_0 = 16;  // 4 KB: Stage 3 Scatter Buffer (Batch A, Double-buffered, 2 KB page)
     constexpr uint8_t CB_R_MSG_B           = 17;  // 80 KB: 40 tile check messages circular FIFO (Batch B)
     constexpr uint8_t CB_SCRATCH_SCATTER_1 = 18;  // 4 KB: Stage 3 Scatter Buffer (Batch B, Double-buffered, 2 KB page)
@@ -118,60 +117,12 @@ namespace TileMatrixCB {
 
 // Maestro Command Enum issued by Centralized TRISC1 Orchestrator (Slot 22)
 enum class MaestroCmd : uint32_t {
-    CMD_IDLE           = 0, // Initial reset state
-    CMD_STEP_EXEC      = 1, // Execute Step k: Scatter(k-1), Compute(k), Gather(k+1)
-    CMD_DRAIN_RESIDUAL = 2, // Early termination: T0 symmetrically drain residual tiles
-    CMD_BATCH_DONE     = 3, // Batch epoch complete: rendezvous for next epoch
-    CMD_HALT           = 4, // Simulation finished: halt all cores
-    CMD_EVAL_PARITY    = 5  // Optional parity evaluation command
+    CMD_IDLE           = 0, // Initial idle state
+    CMD_STEP_EXEC      = 1, // Execute Step k (Scatter k-2, Gather k)
+    CMD_DRAIN_RESIDUAL = 2, // Early termination: pop in-flight residual tile
+    CMD_BATCH_DONE     = 3, // Batch pair complete: rendezvous for next batch
+    CMD_HALT           = 4  // Simulation finished: halt all cores
 };
-
-// ==============================================================================
-// Standardized Polymorphic Code Parameters Descriptor (Host-to-Core Parameterization)
-// ==============================================================================
-struct CodeParameters {
-    uint16_t num_vnodes;         // N (1408 to 40960)
-    uint16_t num_checks;         // M (384 to 24576)
-    uint16_t num_info_bits;      // K (1024, 4096, 16384)
-    uint16_t num_punctured;      // P (128 to 8192)
-    uint16_t num_tiles;          // Total circulant tiles per iteration (16 to 640)
-    uint8_t  num_batches;        // Active batches: 4 (16 CWs), 2 (8 CWs), 1 (4 CWs)
-    uint8_t  max_check_degree;   // Max degree: 6 (R=1/2), 8 (R=2/3), 11 (R=4/5)
-    uint32_t vnode_l1_addr;      // L1 SRAM base address for Vnode LLRs
-    uint32_t rmsg_l1_addr;       // L1 SRAM base address for Rmsg circulant tiles
-    uint32_t hoff_l1_addr;       // L1 SRAM base address for H-offset schedule table
-    uint16_t vnode_stride_bytes; // Stride per variable node: 32 bytes (16 CWs), 16 bytes (8 CWs), 8 bytes (4 CWs)
-    uint16_t reserved;
-};
-
-// ==============================================================================
-// Unified 128-Bit Vector Memory Layout (Option B)
-// ==============================================================================
-typedef uint64_t v2ui __attribute__((vector_size(16)));
-
-// Refactored unified 128-bit variable node layout holding 8 bfloat16 LLRs
-// [ CW0, CW1, CW2, CW3 (Batch A) | CW4, CW5, CW6, CW7 (Batch B) ]
-struct alignas(16) VNode128 {
-    v2ui data;
-    
-    inline uint64_t batch_a() const { return data[0]; }
-    inline uint64_t batch_b() const { return data[1]; }
-    inline void set(uint64_t a, uint64_t b) { data = (v2ui){a, b}; }
-    inline void set_batch_a(uint64_t a) { data[0] = a; }
-    inline void set_batch_b(uint64_t b) { data[1] = b; }
-};
-
-// Unified 256-bit variable node layout holding 16 bfloat16 LLRs (2 x 128-bit vectors)
-struct alignas(16) VNode256 {
-    v2ui w0; // [ CW0..3 | CW4..7 ]
-    v2ui w1; // [ CW8..11 | CW12..15 ]
-};
-
-// Aliases for unified 128-bit channel LLR representations
-typedef v2ui ChannelLLRs128;
-typedef v2ui channel_llrs_128bit;
-typedef v2ui channel_llrs_pair;
-
 
 // Hardware Semaphore and Inter-Worker Barrier Slots in CB_TELEMETRY (Slots 12..31, 184..199)
 namespace SyncSlot {
@@ -188,23 +139,15 @@ namespace SyncSlot {
     constexpr uint32_t TRISC1_CMD          = 22; // Command enum (MaestroCmd) issued by TRISC1
     constexpr uint32_t DRAIN_ACK_T0        = 23; // TRISC0 acknowledgment of residual FIFO drain
     constexpr uint32_t GATHER_START        = 24; // Signaled by BRISC when SCRATCH_GATHER_PTR is published
-    constexpr uint32_t SCRATCH_GATHER_PTR_A  = 25; // Active gather L1 write pointer (Batch A)
-    constexpr uint32_t SCRATCH_SCATTER_PTR_A = 26; // Active scatter L1 read pointer (Batch A)
+    constexpr uint32_t SCRATCH_GATHER_PTR  = 25; // Active gather L1 write pointer
+    constexpr uint32_t SCRATCH_SCATTER_PTR = 26; // Active scatter L1 read pointer
     constexpr uint32_t VNODE_L1_ADDR_A     = 27; // Batch A variable node L1 base address
     constexpr uint32_t VNODE_L1_ADDR_B     = 28; // Batch B variable node L1 base address
-    constexpr uint32_t VNODE_L1_BASE_ADDR  = 27; // Unified Vnode L1 base address (Option B)
-    constexpr uint32_t VNODE_STRIDE_BYTES  = 28; // Stride per node (16 B for 8 CWs)
     constexpr uint32_t BATCH_BARRIER_BRISC  = 29; // BRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_NCRISC = 30; // NCRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_TRISC  = 31; // TRISC batch rendezvous
 
-    // Dual-Batch Scatter/Gather Pointer Mailboxes in CB_TELEMETRY (Slots 182..183)
-    constexpr uint32_t SCRATCH_GATHER_PTR_B  = 182; // Active gather L1 write pointer (Batch B)
-    constexpr uint32_t SCRATCH_SCATTER_PTR_B = 183; // Active scatter L1 read pointer (Batch B)
-
     // Backward-compatibility aliases
-    constexpr uint32_t SCRATCH_GATHER_PTR  = SCRATCH_GATHER_PTR_A;
-    constexpr uint32_t SCRATCH_SCATTER_PTR = SCRATCH_SCATTER_PTR_A;
     constexpr uint32_t ACTIVE_MASK         = ACTIVE_MASK_A;
     constexpr uint32_t VNODE_L1_ADDR       = VNODE_L1_ADDR_A;
     constexpr uint32_t BRISC_GATHER_ERR_CW01 = BRISC_GATHER_ERR_CW01_A;
@@ -858,7 +801,7 @@ inline float approx_min_star_scalar(float a, float b) {
 // Optimized for Zero-Stack-Spill RV32 Execution on Blackhole RISC-V Workers
 // ------------------------------------------------------------------------------
 
-inline void gather_face_24pairs(uintptr_t dst_face_addr, const uint32_t* p_hoff_24, const char* vnode_bytes_ptr) {
+inline void gather_face_24pairs(uint32_t dst_face_addr, const uint32_t* p_hoff_24, const char* vnode_bytes_ptr) {
     typedef uint64_t v2ui __attribute__((vector_size(16)));
 
     auto* dst_even128 = reinterpret_cast<v2ui*>(dst_face_addr);
@@ -924,7 +867,7 @@ inline void gather_face_24pairs(uintptr_t dst_face_addr, const uint32_t* p_hoff_
     }
 }
 
-inline void scatter_face_24pairs_fast(uintptr_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr) {
+inline void scatter_face_24pairs_fast(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr) {
     typedef uint64_t v2ui __attribute__((vector_size(16)));
 
     const auto* src_even128 = reinterpret_cast<const v2ui*>(src_face_addr);
@@ -977,7 +920,7 @@ inline void scatter_face_24pairs_fast(uintptr_t src_face_addr, const uint32_t* p
     }
 }
 
-inline void scatter_face_24pairs_masked(uintptr_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr, uint8_t active_mask) {
+inline void scatter_face_24pairs_masked(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr, uint8_t active_mask) {
     uint32_t mask_low  = ((active_mask & 1) ? 0x0000FFFF : 0) | ((active_mask & 2) ? 0xFFFF0000 : 0);
     uint32_t mask_high = ((active_mask & 4) ? 0x0000FFFF : 0) | ((active_mask & 8) ? 0xFFFF0000 : 0);
     bool inv_low   = (mask_low  != 0xFFFFFFFF);
@@ -1021,7 +964,7 @@ inline void scatter_face_24pairs_masked(uintptr_t src_face_addr, const uint32_t*
 // Therefore, we execute scatter_face_24pairs_fast 100% of the time, completely eliminating the Read-Modify-Write
 // (RMW) overhead, random L1 loads, and ALU dependency stalls of scatter_face_24pairs_masked.
 // ------------------------------------------------------------------------------
-inline void scatter_face_24pairs(uintptr_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr, uint8_t active_mask = 0x0F) {
+inline void scatter_face_24pairs(uint32_t src_face_addr, const uint32_t* p_hoff_24, char* vnode_out_ptr, uint8_t active_mask = 0x0F) {
     (void)active_mask; // Unused in Monte Carlo simulation mode
     scatter_face_24pairs_fast(src_face_addr, p_hoff_24, vnode_out_ptr);
 }
@@ -1031,220 +974,24 @@ inline void scatter_face_24pairs(uintptr_t src_face_addr, const uint32_t* p_hoff
 // Worker 0 gathers/scatters Faces 0 & 2 (96 edges x 4 CWs = 384 elements)
 // Worker 1 gathers/scatters Faces 1 & 3 (96 edges x 4 CWs = 384 elements)
 // ------------------------------------------------------------------------------
-inline void gather_face_48pairs_w0(uintptr_t dst_scratch_addr, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr) {
+inline void gather_face_48pairs_w0(uint32_t dst_scratch_addr, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr) {
     gather_face_24pairs(dst_scratch_addr + 0,    p_hoff_48 + 0,  vnode_bytes_ptr); // Face 0
     gather_face_24pairs(dst_scratch_addr + 1024, p_hoff_48 + 24, vnode_bytes_ptr); // Face 2
 }
 
-inline void gather_face_48pairs_w1(uintptr_t dst_scratch_addr, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr) {
+inline void gather_face_48pairs_w1(uint32_t dst_scratch_addr, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr) {
     gather_face_24pairs(dst_scratch_addr + 512,  p_hoff_48 + 0,  vnode_bytes_ptr); // Face 1
     gather_face_24pairs(dst_scratch_addr + 1536, p_hoff_48 + 24, vnode_bytes_ptr); // Face 3
 }
 
-inline void scatter_face_48pairs_w0(uintptr_t src_scratch_addr, const uint32_t* p_hoff_48, char* vnode_out_ptr) {
+inline void scatter_face_48pairs_w0(uint32_t src_scratch_addr, const uint32_t* p_hoff_48, char* vnode_out_ptr) {
     scatter_face_24pairs_fast(src_scratch_addr + 0,    p_hoff_48 + 0,  vnode_out_ptr); // Face 0
     scatter_face_24pairs_fast(src_scratch_addr + 1024, p_hoff_48 + 24, vnode_out_ptr); // Face 2
 }
 
-inline void scatter_face_48pairs_w1(uintptr_t src_scratch_addr, const uint32_t* p_hoff_48, char* vnode_out_ptr) {
+inline void scatter_face_48pairs_w1(uint32_t src_scratch_addr, const uint32_t* p_hoff_48, char* vnode_out_ptr) {
     scatter_face_24pairs_fast(src_scratch_addr + 512,  p_hoff_48 + 0,  vnode_out_ptr); // Face 1
     scatter_face_24pairs_fast(src_scratch_addr + 1536, p_hoff_48 + 24, vnode_out_ptr); // Face 3
 }
-
-// ==============================================================================
-// Option B: 128-Bit Fused Vector Data Movement Engines (8 Codewords / 2 Batches)
-// ==============================================================================
-
-// Fused 128-Bit Vector Gather for 8 Codewords (Batch A + Batch B)
-// Uses native 128-bit loads (v2ui) to fetch 8 codewords in a single transaction per edge
-inline void gather_face_128bit(
-    uintptr_t dst_face_addr_a,
-    uintptr_t dst_face_addr_b,
-    const uint32_t* p_hoff_24,
-    const char* vnode_bytes_ptr,
-    uint32_t offset_shift = 1
-) {
-    auto* dst_even128_a = reinterpret_cast<v2ui*>(dst_face_addr_a);
-    auto* dst_even128_b = reinterpret_cast<v2ui*>(dst_face_addr_b);
-    const uint32_t* p_h = p_hoff_24;
-
-    #pragma GCC unroll 6
-    for (uint32_t d = 0; d < 6; ++d) {
-        auto* dst_odd128_a = dst_even128_a + 2;
-        auto* dst_odd128_b = dst_even128_b + 2;
-
-        // Block 0: Pairs 0 and 1
-        {
-            uint32_t off0 = p_h[0];
-            uint32_t off1 = p_h[1];
-
-            uint32_t off0_e = (off0 & 0xFFFF) << offset_shift;
-            uint32_t off0_o = (off0 >> 16) << offset_shift;
-            uint32_t off1_e = (off1 & 0xFFFF) << offset_shift;
-            uint32_t off1_o = (off1 >> 16) << offset_shift;
-
-            const auto* s0_e = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off0_e);
-            const auto* s0_o = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off0_o);
-            const auto* s1_e = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off1_e);
-            const auto* s1_o = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off1_o);
-
-            v2ui cw0_7_e0 = *s0_e;
-            v2ui cw0_7_o0 = *s0_o;
-            v2ui cw0_7_e1 = *s1_e;
-            v2ui cw0_7_o1 = *s1_o;
-
-            v2ui v_even0_a = { cw0_7_e0[0], cw0_7_e1[0] };
-            v2ui v_odd0_a  = { cw0_7_o0[0], cw0_7_o1[0] };
-            v2ui v_even0_b = { cw0_7_e0[1], cw0_7_e1[1] };
-            v2ui v_odd0_b  = { cw0_7_o0[1], cw0_7_o1[1] };
-
-            dst_even128_a[0] = v_even0_a;
-            dst_odd128_a[0]  = v_odd0_a;
-            dst_even128_b[0] = v_even0_b;
-            dst_odd128_b[0]  = v_odd0_b;
-        }
-
-        // Block 1: Pairs 2 and 3
-        {
-            uint32_t off2 = p_h[2];
-            uint32_t off3 = p_h[3];
-
-            uint32_t off2_e = (off2 & 0xFFFF) << offset_shift;
-            uint32_t off2_o = (off2 >> 16) << offset_shift;
-            uint32_t off3_e = (off3 & 0xFFFF) << offset_shift;
-            uint32_t off3_o = (off3 >> 16) << offset_shift;
-
-            const auto* s2_e = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off2_e);
-            const auto* s2_o = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off2_o);
-            const auto* s3_e = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off3_e);
-            const auto* s3_o = reinterpret_cast<const v2ui*>(vnode_bytes_ptr + off3_o);
-
-            v2ui cw0_7_e2 = *s2_e;
-            v2ui cw0_7_o2 = *s2_o;
-            v2ui cw0_7_e3 = *s3_e;
-            v2ui cw0_7_o3 = *s3_o;
-
-            v2ui v_even1_a = { cw0_7_e2[0], cw0_7_e3[0] };
-            v2ui v_odd1_a  = { cw0_7_o2[0], cw0_7_o3[0] };
-            v2ui v_even1_b = { cw0_7_e2[1], cw0_7_e3[1] };
-            v2ui v_odd1_b  = { cw0_7_o2[1], cw0_7_o3[1] };
-
-            dst_even128_a[1] = v_even1_a;
-            dst_odd128_a[1]  = v_odd1_a;
-            dst_even128_b[1] = v_even1_b;
-            dst_odd128_b[1]  = v_odd1_b;
-        }
-
-        dst_even128_a += 4;
-        dst_even128_b += 4;
-        p_h += 4;
-    }
-
-    // Zero out padding rows (Rows 12..15 = 128 bytes = 8 x 128-bit vector stores)
-    v2ui zero = {0, 0};
-    #pragma GCC unroll 8
-    for (int i = 0; i < 8; ++i) {
-        dst_even128_a[i] = zero;
-        dst_even128_b[i] = zero;
-    }
-}
-
-// Fused 128-Bit Vector Scatter for 8 Codewords (Batch A + Batch B)
-// Uses native 128-bit stores (v2ui) to write 8 codewords in a single transaction per edge
-inline void scatter_face_128bit(
-    uintptr_t src_face_addr_a,
-    uintptr_t src_face_addr_b,
-    const uint32_t* p_hoff_24,
-    char* vnode_out_ptr,
-    uint32_t offset_shift = 1
-) {
-    const auto* src_even128_a = reinterpret_cast<const v2ui*>(src_face_addr_a);
-    const auto* src_even128_b = reinterpret_cast<const v2ui*>(src_face_addr_b);
-    const uint32_t* p_h = p_hoff_24;
-
-    #pragma GCC unroll 6
-    for (uint32_t d = 0; d < 6; ++d) {
-        const auto* src_odd128_a = src_even128_a + 2;
-        const auto* src_odd128_b = src_even128_b + 2;
-
-        // Block 0: Pairs 0 and 1
-        {
-            uint32_t off0 = p_h[0];
-            uint32_t off1 = p_h[1];
-
-            uint32_t off0_e = (off0 & 0xFFFF) << offset_shift;
-            uint32_t off0_o = (off0 >> 16) << offset_shift;
-            uint32_t off1_e = (off1 & 0xFFFF) << offset_shift;
-            uint32_t off1_o = (off1 >> 16) << offset_shift;
-
-            v2ui v_even0_a = src_even128_a[0];
-            v2ui v_odd0_a  = src_odd128_a[0];
-            v2ui v_even0_b = src_even128_b[0];
-            v2ui v_odd0_b  = src_odd128_b[0];
-
-            v2ui cw0_7_e0 = { v_even0_a[0], v_even0_b[0] };
-            v2ui cw0_7_o0 = { v_odd0_a[0],  v_odd0_b[0]  };
-            v2ui cw0_7_e1 = { v_even0_a[1], v_even0_b[1] };
-            v2ui cw0_7_o1 = { v_odd0_a[1],  v_odd0_b[1]  };
-
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off0_e) = cw0_7_e0;
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off0_o) = cw0_7_o0;
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off1_e) = cw0_7_e1;
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off1_o) = cw0_7_o1;
-        }
-
-        // Block 1: Pairs 2 and 3
-        {
-            uint32_t off2 = p_h[2];
-            uint32_t off3 = p_h[3];
-
-            uint32_t off2_e = (off2 & 0xFFFF) << offset_shift;
-            uint32_t off2_o = (off2 >> 16) << offset_shift;
-            uint32_t off3_e = (off3 & 0xFFFF) << offset_shift;
-            uint32_t off3_o = (off3 >> 16) << offset_shift;
-
-            v2ui v_even1_a = src_even128_a[1];
-            v2ui v_odd1_a  = src_odd128_a[1];
-            v2ui v_even1_b = src_even128_b[1];
-            v2ui v_odd1_b  = src_odd128_b[1];
-
-            v2ui cw0_7_e2 = { v_even1_a[0], v_even1_b[0] };
-            v2ui cw0_7_o2 = { v_odd1_a[0],  v_odd1_b[0]  };
-            v2ui cw0_7_e3 = { v_even1_a[1], v_even1_b[1] };
-            v2ui cw0_7_o3 = { v_odd1_a[1],  v_odd1_b[1]  };
-
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off2_e) = cw0_7_e2;
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off2_o) = cw0_7_o2;
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off3_e) = cw0_7_e3;
-            *reinterpret_cast<v2ui*>(vnode_out_ptr + off3_o) = cw0_7_o3;
-        }
-
-        src_even128_a += 4;
-        src_even128_b += 4;
-        p_h += 4;
-    }
-}
-
-// 2-Face Helper Functions for Worker 0 (Faces 0 & 2) and Worker 1 (Faces 1 & 3)
-inline void gather_face_48pairs_w0_128bit(uintptr_t dst_scratch_addr_a, uintptr_t dst_scratch_addr_b, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr, uint32_t offset_shift = 1) {
-    gather_face_128bit(dst_scratch_addr_a + 0,    dst_scratch_addr_b + 0,    p_hoff_48 + 0,  vnode_bytes_ptr, offset_shift); // Face 0
-    gather_face_128bit(dst_scratch_addr_a + 1024, dst_scratch_addr_b + 1024, p_hoff_48 + 24, vnode_bytes_ptr, offset_shift); // Face 2
-}
-
-inline void gather_face_48pairs_w1_128bit(uintptr_t dst_scratch_addr_a, uintptr_t dst_scratch_addr_b, const uint32_t* p_hoff_48, const char* vnode_bytes_ptr, uint32_t offset_shift = 1) {
-    gather_face_128bit(dst_scratch_addr_a + 512,  dst_scratch_addr_b + 512,  p_hoff_48 + 0,  vnode_bytes_ptr, offset_shift); // Face 1
-    gather_face_128bit(dst_scratch_addr_a + 1536, dst_scratch_addr_b + 1536, p_hoff_48 + 24, vnode_bytes_ptr, offset_shift); // Face 3
-}
-
-inline void scatter_face_48pairs_w0_128bit(uintptr_t src_scratch_addr_a, uintptr_t src_scratch_addr_b, const uint32_t* p_hoff_48, char* vnode_out_ptr, uint32_t offset_shift = 1) {
-    scatter_face_128bit(src_scratch_addr_a + 0,    src_scratch_addr_b + 0,    p_hoff_48 + 0,  vnode_out_ptr, offset_shift); // Face 0
-    scatter_face_128bit(src_scratch_addr_a + 1024, src_scratch_addr_b + 1024, p_hoff_48 + 24, vnode_out_ptr, offset_shift); // Face 2
-}
-
-inline void scatter_face_48pairs_w1_128bit(uintptr_t src_scratch_addr_a, uintptr_t src_scratch_addr_b, const uint32_t* p_hoff_48, char* vnode_out_ptr, uint32_t offset_shift = 1) {
-    scatter_face_128bit(src_scratch_addr_a + 512,  src_scratch_addr_b + 512,  p_hoff_48 + 0,  vnode_out_ptr, offset_shift); // Face 1
-    scatter_face_128bit(src_scratch_addr_a + 1536, src_scratch_addr_b + 1536, p_hoff_48 + 24, vnode_out_ptr, offset_shift); // Face 3
-}
-
 
 
