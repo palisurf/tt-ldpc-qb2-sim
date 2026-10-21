@@ -817,6 +817,115 @@ void run_monte_carlo(double ebn0_db, uint64_t max_blocks, uint64_t target_fe, ui
     std::cout << "================================================================================" << std::endl;
 }
 
+// ------------------------------------------------------------------------------
+// Step Loaded Channel Noise Dump from Core (0,0) Hardware Execution
+// ------------------------------------------------------------------------------
+bool run_stepper_on_dump(const std::string& dump_path, uint32_t max_iter, bool use_sfpu, float damping_factor = 1.0f) {
+    std::cout << "================================================================================" << std::endl;
+    std::cout << "STEPPING 4-CODEWORD CIRCULANT DMA ENGINE ON LOADED NOISE DUMP" << std::endl;
+    std::cout << "  Input File:     " << dump_path << std::endl;
+    std::cout << "  Engine Mode:    " << (use_sfpu ? "SFPU VECTOR (Zero-Transpose)" : "SCALAR") << std::endl;
+    std::cout << "  Max Iterations: " << max_iter << std::endl;
+    std::cout << "  Damping Factor: " << damping_factor << std::endl;
+    std::cout << "================================================================================" << std::endl;
+
+    std::ifstream fin(dump_path, std::ios::binary);
+    if (!fin.is_open()) {
+        std::cerr << "[ERROR] Cannot open noise dump file: " << dump_path << std::endl;
+        return false;
+    }
+
+    alignas(64) std::vector<Packed4CW_BF16> vnodes(2560);
+    fin.read(reinterpret_cast<char*>(vnodes.data()), 2560 * sizeof(Packed4CW_BF16));
+    fin.close();
+
+    // Check Initial State
+    uint32_t init_info_neg[4] = {0, 0, 0, 0};
+    uint32_t init_tx_neg[4]   = {0, 0, 0, 0};
+    for (uint32_t v = 0; v < 2048; ++v) {
+        for (uint32_t cw = 0; cw < 4; ++cw) {
+            float val = bf16_to_fp32(vnodes[v].cw[cw]);
+            if (val < 0.0f) {
+                init_tx_neg[cw]++;
+                if (v < 1024) init_info_neg[cw]++;
+            }
+        }
+    }
+    std::cout << "[INITIAL CHANNEL STATE]" << std::endl;
+    for (uint32_t cw = 0; cw < 4; ++cw) {
+        std::cout << "  Codeword " << cw << ": " << init_info_neg[cw] << " info bit errors, "
+                  << init_tx_neg[cw] << " total negative symbols (of 2048)" << std::endl;
+    }
+
+    alignas(64) std::vector<Packed4CW_BF16> r_msg_scalar(TOTAL_TILES * 192);
+    alignas(64) std::vector<uint16_t> r_msg_sfpu(TOTAL_TILES * 1024, 0);
+    TileScratchpad scratch;
+
+    uint32_t active_mask = 0xF;
+    uint32_t cw_conv_iter[4] = {0, 0, 0, 0};
+
+    for (uint32_t iter = 0; iter < max_iter; ++iter) {
+        bool is_iter0 = (iter == 0);
+
+        for (uint32_t t = 0; t < TOTAL_TILES; ++t) {
+            if (use_sfpu) {
+                step_tile_circulant_dma_sfpu(t, vnodes.data(), &r_msg_sfpu[t * 1024], is_iter0, scratch, active_mask, false, damping_factor);
+            } else {
+                step_tile_circulant_dma_scalar(t, vnodes.data(), &r_msg_scalar[t * 192], is_iter0, scratch, active_mask, false);
+            }
+        }
+
+        std::cout << "[Iter " << std::setw(2) << iter + 1 << "] Active Mask: 0x" << std::hex << active_mask << std::dec << " | ";
+        for (uint32_t cw = 0; cw < 4; ++cw) {
+            if (!(active_mask & (1 << cw))) {
+                std::cout << "CW" << cw << ": CONV(" << cw_conv_iter[cw] << ") ";
+                continue;
+            }
+
+            uint32_t unsat_checks = 0;
+            for (uint32_t m = 0; m < 1536; ++m) {
+                int syn = 0;
+                uint32_t deg = (m < 512) ? 3 : 6;
+                for (uint32_t d = 0; d < deg; ++d) {
+                    uint32_t v = CHECK_TO_VAR[m][d];
+                    if (bf16_to_fp32(vnodes[v].cw[cw]) < 0.0f) syn ^= 1;
+                }
+                if (syn != 0) unsat_checks++;
+            }
+
+            uint32_t info_be = 0;
+            for (uint32_t k = 0; k < 1024; ++k) {
+                if (bf16_to_fp32(vnodes[k].cw[cw]) < 0.0f) info_be++;
+            }
+
+            std::cout << "CW" << cw << ": Unsat=" << unsat_checks << ", BE=" << info_be << " ";
+
+            if (unsat_checks == 0) {
+                cw_conv_iter[cw] = iter + 1;
+                active_mask &= ~(1 << cw);
+            }
+        }
+        std::cout << std::endl;
+
+        if (active_mask == 0) {
+            std::cout << "\n>>> [SUCCESS] All 4 codewords converged cleanly by iteration " << iter + 1 << "! <<<" << std::endl;
+            return true;
+        }
+    }
+
+    std::cout << "\n>>> [FAILURE] Residual Frame Errors Detected (Active Mask: 0x" << std::hex << active_mask << std::dec << ")! <<<" << std::endl;
+    for (uint32_t cw = 0; cw < 4; ++cw) {
+        if (active_mask & (1 << cw)) {
+            uint32_t be = 0;
+            for (uint32_t k = 0; k < 1024; ++k) {
+                if (bf16_to_fp32(vnodes[k].cw[cw]) < 0.0f) be++;
+            }
+            std::cout << "  Codeword " << cw << " failed with " << be << " bit errors." << std::endl;
+        }
+    }
+    return false;
+}
+
 int main(int argc, char** argv) {
     bool use_sfpu = false;
     for (int i = 1; i < argc; ++i) {
@@ -836,6 +945,14 @@ int main(int argc, char** argv) {
         return pass ? 0 : 1;
     }
 
+    if (argc > 1 && (std::string(argv[1]) == "--load-init" || (argc > 2 && std::string(argv[2]) == "--load-init"))) {
+        int base_idx = (std::string(argv[1]) == "--load-init") ? 1 : 2;
+        std::string dump_path = (argc > base_idx + 1) ? argv[base_idx + 1] : "tensix_initial_vnodes.bin";
+        uint32_t max_iter = (argc > base_idx + 2) ? std::stoul(argv[base_idx + 2]) : 16;
+        bool pass = run_stepper_on_dump(dump_path, max_iter, use_sfpu);
+        return pass ? 0 : 1;
+    }
+
     if (argc > 1 && (std::string(argv[1]) == "--monte-carlo" || (argc > 2 && std::string(argv[2]) == "--monte-carlo"))) {
         int base_idx = (std::string(argv[1]) == "--monte-carlo") ? 1 : 2;
         double ebn0 = (argc > base_idx + 1) ? std::stod(argv[base_idx + 1]) : 2.0;
@@ -850,6 +967,7 @@ int main(int argc, char** argv) {
     std::cout << "Usage:" << std::endl;
     std::cout << "  " << argv[0] << " [--sfpi] --passthrough" << std::endl;
     std::cout << "  " << argv[0] << " --compare" << std::endl;
+    std::cout << "  " << argv[0] << " [--sfpi] --load-init [tensix_initial_vnodes.bin] [max_iter]" << std::endl;
     std::cout << "  " << argv[0] << " [--sfpi] --monte-carlo [ebn0] [max_blocks] [target_fe] [max_iter] [threads]" << std::endl;
     return 0;
 }

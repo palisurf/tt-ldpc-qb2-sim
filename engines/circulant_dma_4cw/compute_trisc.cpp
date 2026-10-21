@@ -111,11 +111,182 @@ sfpi_inline sfpi::vFloat round_bf16_rne(sfpi::vFloat val) {
 #define round_bf16(v) round_bf16_rne(v)
 
 sfpi_inline sfpi::vFloat round_bf16_fast(sfpi::vFloat val) {
-  sfpi::vUInt u = sfpi::as<sfpi::vUInt>(val);
-  sfpi::vUInt lsb = (u >> 16) & 1U;
-  sfpi::vUInt bias = lsb + 0x7FFFU;
-  u += bias;
-  return sfpi::as<sfpi::vFloat>(u);
+  return round_bf16_rne(val);
+}
+
+
+// ------------------------------------------------------------------------------
+// Vector xoshiro128+ PRNG Generator on SFPU (32 Lanes in Parallel)
+// ------------------------------------------------------------------------------
+sfpi_inline sfpi::vUInt arx_hash(sfpi::vUInt x, uint32_t c) {
+  x += c;
+  x ^= (x >> 16);
+  x += (x << 11);
+  x ^= (x >> 7);
+  x += (x << 5);
+  x ^= (x >> 13);
+  x += (x << 17);
+  x ^= (x >> 11);
+  return x;
+}
+
+struct VectorXoshiro128Plus {
+  sfpi::vUInt s0;
+  sfpi::vUInt s1;
+  sfpi::vUInt s2;
+  sfpi::vUInt s3;
+
+  sfpi_inline void init(sfpi::vUInt seed_val) {
+    s0 = arx_hash(seed_val, 0x9E3779B9U);
+    s1 = arx_hash(seed_val, 0x85EBCA6BU);
+    s2 = arx_hash(seed_val, 0xC2B2AE35U);
+    s3 = arx_hash(seed_val, 0x27D4EB2FU);
+    v_if((s0 | s1 | s2 | s3) == 0) { s0 = 0x13579BDFU; }
+    v_endif;
+  }
+
+  sfpi_inline sfpi::vUInt next() {
+    sfpi::vUInt res = s0 + s3;
+    sfpi::vUInt t = s1 << 9;
+    s2 ^= s0;
+    s3 ^= s1;
+    s1 ^= s2;
+    s0 ^= s3;
+    s2 ^= t;
+    s3 = (s3 << 11) | (s3 >> 21);
+    return res;
+  }
+};
+
+#ifndef LDPC_ENABLE_CH_CLAMP
+#define LDPC_ENABLE_CH_CLAMP 0
+#endif
+
+#ifndef LDPC_L_CH_MAX
+#define LDPC_L_CH_MAX 7.0f
+#endif
+
+// ------------------------------------------------------------------------------
+// 32-Lane Vector SFPU Channel Observation Generator
+// Generates 10 tiles (8 AWGN / Benchmark tiles + 2 Punctured zero tiles)
+// Directly streams into CB_VNODE in native Tensix face quadrant tile format
+// ------------------------------------------------------------------------------
+void __attribute__((noinline))
+generate_channel_tiles(uint32_t cb_out, float mu_val, float sigma_val,
+                       bool benchmark_mode, uint32_t invocation_id,
+                       uint32_t batch) {
+  pack_init(cb_out);
+
+  for (uint32_t t = 0; t < 10; ++t) {
+    tile_regs_acquire();
+
+#ifdef TRISC_MATH
+    _llk_math_eltwise_sfpu_start_(0);
+
+    // Generate 8 AWGN Transmitted Tiles (8 x 256 = 2,048 Transmitted Variable Nodes)
+    if (t < 8) {
+      if (benchmark_mode) {
+        sfpi::vFloat v_mu = mu_val;
+        for (int r = 0; r < 32; ++r) {
+          sfpi::dst_reg[r] = v_mu;
+        }
+      } else {
+        // Phase 1: Vector xoshiro128+ Uniform Draws staged directly into DEST
+        {
+          VectorXoshiro128Plus rng;
+          uint32_t seed_base = 0x12345678U + (invocation_id * 1013904223U) +
+                               batch * 31337U + t * 7919U;
+          sfpi::vUInt lane_seed = static_cast<uint32_t>(seed_base) +
+                                  sfpi::as<sfpi::vUInt>(sfpi::vConstTileId);
+          rng.init(lane_seed);
+
+          for (int r = 0; r < 32; ++r) {
+            sfpi::vUInt raw = rng.next();
+            sfpi::vUInt u_bits = ((raw >> 9) & 0x007FFFFF) | 0x3F800000;
+            sfpi::vFloat u = sfpi::as<sfpi::vFloat>(u_bits) - 1.0f;
+            sfpi::dst_reg[r] = sfpi::max(u, 1e-7f);
+          }
+        }
+
+        // Phase 2: Transcendental Box-Muller Transformation (PRNG is dead, 0 LReg pressure)
+        sfpi::vFloat v_mu = mu_val;
+        sfpi::vFloat v_sigma = sigma_val;
+        for (int p = 0; p < 16; ++p) {
+          sfpi::vFloat u1 = sfpi::vFloat(sfpi::dst_reg[2 * p + 0]);
+          sfpi::vFloat ln_u1 = sfpu_fast_ln(u1);
+          sfpi::vFloat r = sfpu_fast_sqrt(ln_u1 * -2.0f);
+
+          sfpi::vFloat u2 = sfpi::vFloat(sfpi::dst_reg[2 * p + 1]);
+          sfpi::vFloat theta = u2 * 6.2831853f - 3.14159265f;
+          sfpi::vFloat s_th = theta * theta;
+
+#ifdef LDPC_USE_LEGACY_TAYLOR_TRIG
+          sfpi::vFloat cos_val = sfpi::vFloat(sfpi::sFloat16b(0.0000248f));
+          cos_val = cos_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.0013889f));
+          cos_val = cos_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0416667f));
+          cos_val = cos_val * s_th - 0.5f;
+          cos_val = cos_val * s_th + 1.0f;
+
+          sfpi::vFloat sin_val = sfpi::vFloat(sfpi::sFloat16b(0.00000276f));
+          sin_val = sin_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.0001984f));
+          sin_val = sin_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0083333f));
+          sin_val = sin_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.1666667f));
+          sin_val = sin_val * s_th + 1.0f;
+#else
+          // Default: Remez Minimax Polynomial Evaluation (212x lower truncation error over [-pi, pi])
+          sfpi::vFloat cos_val = sfpi::vFloat(sfpi::sFloat16b(0.00001907f));
+          cos_val = cos_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.0013441f));
+          cos_val = cos_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0415223f));
+          cos_val = cos_val * s_th - 0.5f;
+          cos_val = cos_val * s_th + 1.0f;
+
+          sfpi::vFloat sin_val = sfpi::vFloat(sfpi::sFloat16b(0.000002225f));
+          sin_val = sin_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.00019424f));
+          sin_val = sin_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0083198f));
+          sin_val = sin_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.166667f));
+          sin_val = sin_val * s_th + 1.0f;
+#endif
+          sfpi::vFloat llr0 = v_mu + v_sigma * (r * cos_val);
+#if LDPC_ENABLE_CH_CLAMP
+          llr0 = sfpi::min(sfpi::max(llr0, -LDPC_L_CH_MAX), LDPC_L_CH_MAX);
+#endif
+
+          sfpi::vFloat llr1 = v_mu + v_sigma * (r * (sin_val * theta));
+#if LDPC_ENABLE_CH_CLAMP
+          llr1 = sfpi::min(sfpi::max(llr1, -LDPC_L_CH_MAX), LDPC_L_CH_MAX);
+#endif
+
+          // 50/50 Codeword Interleaving: Even p assigns (llr0, llr1); Odd p
+          // assigns (llr1, llr0). Guarantees all 4 codewords receive an
+          // identical 50/50 blend of sine & cosine variates.
+          if ((p % 2) == 1) {
+            sfpi::dst_reg[2 * p + 0] = llr1;
+            sfpi::dst_reg[2 * p + 1] = llr0;
+          } else {
+            sfpi::dst_reg[2 * p + 0] = llr0;
+            sfpi::dst_reg[2 * p + 1] = llr1;
+          }
+        }
+      }
+    } else {
+      // Stage 2: Generate 2 Punctured Zero Tiles (2 x 256 = 512 Zeros)
+      for (int r = 0; r < 32; ++r) {
+        sfpi::dst_reg[r] = 0.0f;
+      }
+    }
+
+    _llk_math_eltwise_sfpu_done_();
+#endif
+
+    tile_regs_commit();
+    tile_regs_wait();
+
+    cb_reserve_back(cb_out, 1);
+    pack_tile(0, cb_out, 0);
+    cb_push_back(cb_out, 1);
+
+    tile_regs_release();
+  }
 }
 
 // ------------------------------------------------------------------------------
@@ -124,7 +295,10 @@ sfpi_inline sfpi::vFloat round_bf16_fast(sfpi::vFloat val) {
 uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
                                                      uint32_t cb_out,
                                                      uint32_t cb_r_msg,
-                                                     uint32_t iter) {
+                                                     uint32_t iter,
+                                                     volatile uint32_t* sync_flags) {
+  volatile uint32_t *const wall_clock_reg = reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
+
   if (iter == 0) {
     cb_wait_front(cb_in, 1);
     tile_regs_acquire();
@@ -140,8 +314,12 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
     cb_pop_front(cb_r_msg, 1);
   }
 
+#ifdef TRISC_UNPACK
+  sync_flags[SyncSlot::T2_UNPACK_DONE] = *wall_clock_reg;
+  asm volatile("fence rw, rw" ::: "memory");
+#endif
+
 #ifdef TRISC_MATH
-  volatile uint32_t *const wall_clock_reg = reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
   uint32_t t_m0 = *wall_clock_reg;
   _llk_math_eltwise_sfpu_start_(0);
 
@@ -189,104 +367,90 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::dst_reg[r5] = round_bf16_fast(sfpi::vFloat(sfpi::dst_reg[r5]) - sfpi::vFloat(sfpi::dst_reg[32 + r5]));
       }
 
-      // Stage 1: 1-Cycle Native Integer XOR sign parity -> stored in dst_reg[sc0]
+      // Stage 1: Native 1-Cycle Integer XOR Sign Parity -> stored in dst_reg[sc0]
       {
-        sfpi::vInt s03 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r0])) ^
-                         sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r3]));
-        sfpi::vInt s14 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r1])) ^
-                         sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r4]));
-        sfpi::vInt s25 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r2])) ^
-                         sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r5]));
-        sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>((s03 ^ s14) ^ s25);
+        sfpi::vInt s0 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r0]));
+        sfpi::vInt s3 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r3]));
+        sfpi::vInt s1 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r1]));
+        sfpi::vInt s4 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r4]));
+        sfpi::vInt s2 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r2]));
+        sfpi::vInt s5 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r5]));
+        sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>(((s0 ^ s3) ^ (s1 ^ s4)) ^ (s2 ^ s5));
       }
 
-      // Stage 2: Dr. Christopher Jones' Approximate-Min* Formulation (MILCOM 2003)
-      // Step 2a: Find minimum magnitude and its edge index (0..5) across 32 lanes
+      // Stage 2: Pairwise Tree Approximate-Min* stored in DEST scratch
       {
-        sfpi::vFloat min_mag = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]));
-        sfpi::vInt min_idx = 0;
-
-        const int r_all[6] = {r0, r1, r2, r3, r4, r5};
-        #pragma GCC unroll 5
-        for (int i = 1; i < 6; ++i) {
-          sfpi::vFloat m = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r_all[i]]));
-          v_if (m < min_mag) {
-            min_mag = m;
-            min_idx = i;
-          } v_endif;
-        }
-        sfpi::dst_reg[sc1] = sfpi::as<sfpi::vFloat>(min_idx); // min_idx in sc1
-        sfpi::dst_reg[sc2] = min_mag;                         // min_mag in sc2
-      }
-
-      // Step 2b: Form M_others by accumulating all edges k != d_min (Neutral element: 1000.0f)
-      // Level 1: Pairwise accumulation of 3 edge pairs with neutral element substitution
-      {
-        sfpi::vInt min_idx = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc1]));
         sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]));
-        v_if (min_idx == 0) { m0 = 1000.0f; } v_endif;
         sfpi::vFloat m3 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r3]));
-        v_if (min_idx == 3) { m3 = 1000.0f; } v_endif;
-        sfpi::dst_reg[32 + sc1] = sfpi_amin_star_branchless(m0, m3); // Pair (0, 3)
+        sfpi::dst_reg[sc1] = sfpi_amin_star_branchless(m0, m3); // m03 in sc1
       }
       {
-        sfpi::vInt min_idx = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc1]));
         sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
-        v_if (min_idx == 1) { m1 = 1000.0f; } v_endif;
         sfpi::vFloat m4 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r4]));
-        v_if (min_idx == 4) { m4 = 1000.0f; } v_endif;
-        sfpi::dst_reg[32 + sc2] = sfpi_amin_star_branchless(m1, m4); // Pair (1, 4)
+        sfpi::dst_reg[sc2] = sfpi_amin_star_branchless(m1, m4); // m14 in sc2
       }
       {
-        sfpi::vInt min_idx = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc1]));
         sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
-        v_if (min_idx == 2) { m2 = 1000.0f; } v_endif;
         sfpi::vFloat m5 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r5]));
-        v_if (min_idx == 5) { m5 = 1000.0f; } v_endif;
-        sfpi::dst_reg[32 + sc3] = sfpi_amin_star_branchless(m2, m5); // Pair (2, 5)
+        sfpi::dst_reg[sc3] = sfpi_amin_star_branchless(m2, m5); // m25 in sc3
       }
 
-      // Level 2: Combine Pair (0,3) and Pair (1,4)
+      // Stage 3: Outgoing check messages with Zero LReg pressure
+      // Edge pair (0, 3)
       {
-        sfpi::vFloat p03 = sfpi::dst_reg[32 + sc1];
-        sfpi::vFloat p14 = sfpi::dst_reg[32 + sc2];
-        sfpi::dst_reg[sc3] = sfpi_amin_star_branchless(p03, p14);
+        sfpi::vFloat m_oth0 = sfpi_amin_star_branchless(sfpi::dst_reg[sc2], sfpi::dst_reg[sc3]);
+
+        sfpi::vFloat q3 = sfpi::dst_reg[r3];
+        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q3));
+        sfpi::vFloat q0 = sfpi::dst_reg[r0];
+        sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+        sfpi::vFloat r_out0 = round_bf16(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
+        sfpi::dst_reg[32 + r0] = round_bf16_fast(q0 + r_out0);
+
+        sfpi::vFloat r_mag3 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q0));
+        sfpi::vFloat r_out3 = round_bf16(sfpi::copysgn(r_mag3, s_tot ^ sfpi::as<sfpi::vInt>(q3)));
+        sfpi::dst_reg[32 + r3] = round_bf16_fast(q3 + r_out3);
+
+        sfpi::dst_reg[r0] = r_out0;
+        sfpi::dst_reg[r3] = r_out3;
       }
 
-      // Level 3: Combine with Pair (2,5) to complete M_others
+      // Edge pair (1, 4)
       {
-        sfpi::vFloat p0134 = sfpi::dst_reg[sc3];
-        sfpi::vFloat p25   = sfpi::dst_reg[32 + sc3];
-        sfpi::dst_reg[sc3] = sfpi_amin_star_branchless(p0134, p25); // M_others in sc3
+        sfpi::vFloat m_oth1 = sfpi_amin_star_branchless(sfpi::dst_reg[sc1], sfpi::dst_reg[sc3]);
+
+        sfpi::vFloat q4 = sfpi::dst_reg[r4];
+        sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q4));
+        sfpi::vFloat q1 = sfpi::dst_reg[r1];
+        sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+        sfpi::vFloat r_out1 = round_bf16(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
+        sfpi::dst_reg[32 + r1] = round_bf16_fast(q1 + r_out1);
+
+        sfpi::vFloat r_mag4 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q1));
+        sfpi::vFloat r_out4 = round_bf16(sfpi::copysgn(r_mag4, s_tot ^ sfpi::as<sfpi::vInt>(q4)));
+        sfpi::dst_reg[32 + r4] = round_bf16_fast(q4 + r_out4);
+
+        sfpi::dst_reg[r1] = r_out1;
+        sfpi::dst_reg[r4] = r_out4;
       }
 
-      // Step 2c: Final single binary AMin* to form M_all = AMin*(M_others, min_mag)
+      // Edge pair (2, 5)
       {
-        sfpi::vFloat m_others = sfpi::dst_reg[sc3];
-        sfpi::vFloat min_mag  = sfpi::dst_reg[sc2];
-        sfpi::dst_reg[32 + sc1] = sfpi_amin_star_branchless(m_others, min_mag); // M_all in 32+sc1
-      }
+        sfpi::vFloat m_oth2 = sfpi_amin_star_branchless(sfpi::dst_reg[sc1], sfpi::dst_reg[sc2]);
 
-      // Stage 3: Outgoing check messages with Intrinsic Damping (beta = 0.9375 = 15/16)
-      const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
-      sfpi::vInt s_tot             = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
-      sfpi::vInt min_idx_saved     = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc1]));
-      sfpi::vFloat m_others_damped = sfpi::vFloat(sfpi::dst_reg[sc3]) * v_damping;
-      sfpi::vFloat m_all_damped    = sfpi::vFloat(sfpi::dst_reg[32 + sc1]) * v_damping;
+        sfpi::vFloat q5 = sfpi::dst_reg[r5];
+        sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q5));
+        sfpi::vFloat q2 = sfpi::dst_reg[r2];
+        sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+        sfpi::vFloat r_out2 = round_bf16(sfpi::copysgn(r_mag2, s_tot ^ sfpi::as<sfpi::vInt>(q2)));
+        sfpi::dst_reg[32 + r2] = round_bf16_fast(q2 + r_out2);
 
-      const int r_all[6] = {r0, r1, r2, r3, r4, r5};
-      #pragma GCC unroll 6
-      for (int i = 0; i < 6; ++i) {
-        int r = r_all[i];
-        sfpi::vFloat q = sfpi::dst_reg[r];
-        sfpi::vFloat m_out = m_all_damped;
-        v_if (min_idx_saved == i) {
-          m_out = m_others_damped;
-        } v_endif;
+        sfpi::vFloat r_mag5 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q2));
+        sfpi::vFloat r_out5 = round_bf16(sfpi::copysgn(r_mag5, s_tot ^ sfpi::as<sfpi::vInt>(q5)));
+        sfpi::dst_reg[32 + r5] = round_bf16_fast(q5 + r_out5);
 
-        sfpi::vFloat r_out = round_bf16(sfpi::copysgn(m_out, s_tot ^ sfpi::as<sfpi::vInt>(q)));
-        sfpi::dst_reg[32 + r] = round_bf16_fast(q + r_out); // L_new in Tile 1
-        sfpi::dst_reg[r]      = r_out;                     // R_new in Tile 0
+        sfpi::dst_reg[r2] = r_out2;
+        sfpi::dst_reg[r5] = r_out5;
       }
     }
 
@@ -307,6 +471,12 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
 #endif
 
   tile_regs_commit();
+
+#ifdef TRISC_MATH
+  sync_flags[SyncSlot::T3_MATH_DONE] = *wall_clock_reg;
+  asm volatile("fence rw, rw" ::: "memory");
+#endif
+
   tile_regs_wait();
 
   // Pack R_new (Dst reg 0) to cb_r_msg
@@ -326,6 +496,12 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
   cb_push_back(cb_out, 1);
 
   tile_regs_release();
+
+#ifdef TRISC_PACK
+  sync_flags[SyncSlot::T4_PACK_DONE] = *wall_clock_reg;
+  asm volatile("fence rw, rw" ::: "memory");
+#endif
+
 #ifdef TRISC_MATH
   return math_cyc;
 #else
@@ -339,7 +515,10 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
 uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
                                                      uint32_t cb_out,
                                                      uint32_t cb_r_msg,
-                                                     uint32_t iter) {
+                                                     uint32_t iter,
+                                                     volatile uint32_t* sync_flags) {
+  volatile uint32_t *const wall_clock_reg = reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
+
   if (iter == 0) {
     cb_wait_front(cb_in, 1);
     tile_regs_acquire();
@@ -355,8 +534,12 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
     cb_pop_front(cb_r_msg, 1);
   }
 
+#ifdef TRISC_UNPACK
+  sync_flags[SyncSlot::T2_UNPACK_DONE] = *wall_clock_reg;
+  asm volatile("fence rw, rw" ::: "memory");
+#endif
+
 #ifdef TRISC_MATH
-  volatile uint32_t *const wall_clock_reg = reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
   uint32_t t_m0 = *wall_clock_reg;
   _llk_math_eltwise_sfpu_start_(0);
 
@@ -396,13 +579,11 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>((s0 ^ s1) ^ s2);
       }
 
-      const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
-
       // Edge 0
       {
         sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
         sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m1, m2) * v_damping;
+        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m1, m2);
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q0     = sfpi::dst_reg[r0];
@@ -415,7 +596,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
       {
         sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]));
         sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m0, m2) * v_damping;
+        sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m0, m2);
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q1     = sfpi::dst_reg[r1];
@@ -428,7 +609,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
       {
         sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]));
         sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
-        sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m0, m1) * v_damping;
+        sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m0, m1);
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q2     = sfpi::dst_reg[r2];
@@ -450,6 +631,12 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
 #endif
 
   tile_regs_commit();
+
+#ifdef TRISC_MATH
+  sync_flags[SyncSlot::T3_MATH_DONE] = *wall_clock_reg;
+  asm volatile("fence rw, rw" ::: "memory");
+#endif
+
   tile_regs_wait();
 
   // Pack R_new to cb_r_msg
@@ -469,6 +656,12 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
   cb_push_back(cb_out, 1);
 
   tile_regs_release();
+
+#ifdef TRISC_PACK
+  sync_flags[SyncSlot::T4_PACK_DONE] = *wall_clock_reg;
+  asm volatile("fence rw, rw" ::: "memory");
+#endif
+
 #ifdef TRISC_MATH
   return math_cyc;
 #else
@@ -477,159 +670,16 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
 }
 
 // ------------------------------------------------------------------------------
-// Vector PRNG for Box-Muller AWGN Channel Noise Generation
-// ------------------------------------------------------------------------------
-sfpi_inline sfpi::vUInt arx_hash(sfpi::vUInt x, uint32_t c) {
-  x += c;
-  x ^= (x >> 16);
-  x += (x << 11);
-  x ^= (x >> 7);
-  x += (x << 5);
-  x ^= (x >> 13);
-  x += (x << 17);
-  x ^= (x >> 11);
-  return x;
-}
-
-struct VectorXoshiro128Plus {
-  sfpi::vUInt s0;
-  sfpi::vUInt s1;
-  sfpi::vUInt s2;
-  sfpi::vUInt s3;
-
-  sfpi_inline void init(sfpi::vUInt seed_val) {
-    s0 = arx_hash(seed_val, 0x9E3779B9U);
-    s1 = arx_hash(seed_val, 0x85EBCA6BU);
-    s2 = arx_hash(seed_val, 0xC2B2AE35U);
-    s3 = arx_hash(seed_val, 0x27D4EB2FU);
-    v_if((s0 | s1 | s2 | s3) == 0) { s0 = 0x13579BDFU; }
-    v_endif;
-  }
-
-  sfpi_inline sfpi::vUInt next() {
-    sfpi::vUInt res = s0 + s3;
-    sfpi::vUInt t = s1 << 9;
-    s2 ^= s0;
-    s3 ^= s1;
-    s1 ^= s2;
-    s0 ^= s3;
-    s2 ^= t;
-    s3 = (s3 << 11) | (s3 >> 21);
-    return res;
-  }
-};
-
-void __attribute__((noinline))
-generate_channel_tiles(uint32_t cb_out, float mu_val, float sigma_val,
-                       bool benchmark_mode, uint32_t invocation_id,
-                       uint32_t batch, uint32_t core_id) {
-  pack_init(cb_out);
-
-  for (uint32_t t = 0; t < 10; ++t) {
-    tile_regs_acquire();
-
-#ifdef TRISC_MATH
-    _llk_math_eltwise_sfpu_start_(0);
-
-#if LDPC_TEST_PASSTHROUGH_MODE
-    for (int r = 0; r < 32; ++r) {
-      sfpi::dst_reg[r] = 0.0f;
-    }
-#else
-    if (t < 8) {
-      if (benchmark_mode) {
-        sfpi::vFloat v_mu = mu_val;
-        for (int r = 0; r < 32; ++r) {
-          sfpi::dst_reg[r] = v_mu;
-        }
-      } else {
-        // Phase 1: Vector xoshiro128+ Uniform Draws staged directly into DEST
-        {
-          VectorXoshiro128Plus rng;
-          uint32_t seed_base = 0x12345678U + (invocation_id * 1013904223U) +
-                               (core_id * 1000003U) +
-                               batch * 31337U + t * 7919U;
-          sfpi::vUInt lane_seed = static_cast<uint32_t>(seed_base) +
-                                  sfpi::as<sfpi::vUInt>(sfpi::vConstTileId);
-          rng.init(lane_seed);
-
-          for (int r = 0; r < 32; ++r) {
-            sfpi::vUInt raw = rng.next();
-            sfpi::vUInt u_bits = ((raw >> 9) & 0x007FFFFF) | 0x3F800000;
-            sfpi::vFloat u = sfpi::as<sfpi::vFloat>(u_bits) - 1.0f;
-            sfpi::dst_reg[r] = sfpi::max(u, 1e-7f);
-          }
-        }
-
-        // Phase 2: Transcendental Box-Muller Transformation (PRNG is dead, 0 LReg pressure)
-        sfpi::vFloat v_mu = mu_val;
-        sfpi::vFloat v_sigma = sigma_val;
-        for (int p = 0; p < 16; ++p) {
-          sfpi::vFloat u1 = sfpi::vFloat(sfpi::dst_reg[2 * p + 0]);
-          sfpi::vFloat ln_u1 = sfpu_fast_ln(u1);
-          sfpi::vFloat r = sfpu_fast_sqrt(ln_u1 * -2.0f);
-
-          sfpi::vFloat u2 = sfpi::vFloat(sfpi::dst_reg[2 * p + 1]);
-          sfpi::vFloat theta = u2 * 6.2831853f - 3.14159265f;
-          sfpi::vFloat s_th = theta * theta;
-
-          // Remez Minimax Polynomial Evaluation (212x lower truncation error over [-pi, pi])
-          sfpi::vFloat cos_val = sfpi::vFloat(sfpi::sFloat16b(0.00001907f));
-          cos_val = cos_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.0013441f));
-          cos_val = cos_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0415223f));
-          cos_val = cos_val * s_th - 0.5f;
-          cos_val = cos_val * s_th + 1.0f;
-
-          sfpi::vFloat sin_val = sfpi::vFloat(sfpi::sFloat16b(0.000002225f));
-          sin_val = sin_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.00019424f));
-          sin_val = sin_val * s_th + sfpi::vFloat(sfpi::sFloat16b(0.0083198f));
-          sin_val = sin_val * s_th - sfpi::vFloat(sfpi::sFloat16b(0.166667f));
-          sin_val = sin_val * s_th + 1.0f;
-
-          sfpi::vFloat llr0 = v_mu + v_sigma * (r * cos_val);
-          sfpi::vFloat llr1 = v_mu + v_sigma * (r * (sin_val * theta));
-
-          // 50/50 Codeword Interleaving: Even p assigns (llr0, llr1); Odd p assigns (llr1, llr0).
-          // Guarantees all 4 codewords receive an identical 50/50 blend of sine & cosine variates.
-          if ((p % 2) == 1) {
-            sfpi::dst_reg[2 * p + 0] = round_bf16(llr1);
-            sfpi::dst_reg[2 * p + 1] = round_bf16(llr0);
-          } else {
-            sfpi::dst_reg[2 * p + 0] = round_bf16(llr0);
-            sfpi::dst_reg[2 * p + 1] = round_bf16(llr1);
-          }
-        }
-      }
-    } else {
-      // Punctured variable nodes: neutral zero LLR
-      for (int r = 0; r < 32; ++r) {
-        sfpi::dst_reg[r] = 0.0f;
-      }
-    }
-#endif
-    _llk_math_eltwise_sfpu_done_();
-#endif
-
-    tile_regs_commit();
-    tile_regs_wait();
-
-    cb_reserve_back(cb_out, 1);
-    pack_tile(0, cb_out, 0);
-    cb_push_back(cb_out, 1);
-
-    tile_regs_release();
-  }
-}
-
-// ------------------------------------------------------------------------------
 // Main Kernel Entry Point
 // ------------------------------------------------------------------------------
 void kernel_main() {
-  uint32_t num_batch_pairs = get_arg_val<uint32_t>(0);
+  uint32_t num_batches     = get_arg_val<uint32_t>(0);
   uint32_t max_iter        = get_arg_val<uint32_t>(1);
   uint32_t num_tiles       = get_arg_val<uint32_t>(2);
   uint32_t mu_bits         = get_arg_val<uint32_t>(3);
+  (void)mu_bits;
   uint32_t sigma_bits      = get_arg_val<uint32_t>(4);
+  (void)sigma_bits;
   uint32_t invocation_id   = get_arg_val<uint32_t>(5);
   uint32_t diff_test_mode  = get_arg_val<uint32_t>(6);
   (void)diff_test_mode;
@@ -641,47 +691,88 @@ void kernel_main() {
   if (invocation_id == 0) invocation_id = 1;
   uint32_t epoch = invocation_id << 16;
 
-  float mu_val    = uint_as_float(mu_bits);
-  float sigma_val = uint_as_float(sigma_bits);
-  bool benchmark_mode = (sigma_val <= 0.0f);
+  constexpr uint32_t cb_vnode_a     = TileMatrixCB::CB_VNODE_A;
+  constexpr uint32_t cb_vnode_b     = TileMatrixCB::CB_VNODE_B;
+  constexpr uint32_t cb_vnode       = TileMatrixCB::CB_VNODE;
+  constexpr uint32_t cb_scratch_in  = TileMatrixCB::CB_SCRATCH_GATHER;
+  constexpr uint32_t cb_scratch_out = TileMatrixCB::CB_SCRATCH_SCATTER;
+  constexpr uint32_t cb_r_msg       = TileMatrixCB::CB_R_MSG;
+  constexpr uint32_t cb_telem       = TileMatrixCB::CB_TELEMETRY;
 
-  constexpr uint32_t cb_vnode_a       = TileMatrixCB::CB_VNODE_A;
-  constexpr uint32_t cb_vnode_b       = TileMatrixCB::CB_VNODE_B;
-  constexpr uint32_t cb_scratch_in_a  = TileMatrixCB::CB_SCRATCH_GATHER_0;
-  constexpr uint32_t cb_scratch_in_b  = TileMatrixCB::CB_SCRATCH_GATHER_1;
-  constexpr uint32_t cb_scratch_out_a = TileMatrixCB::CB_SCRATCH_SCATTER_0;
-  constexpr uint32_t cb_scratch_out_b = TileMatrixCB::CB_SCRATCH_SCATTER_1;
-  constexpr uint32_t cb_r_msg_a       = TileMatrixCB::CB_R_MSG_A;
-  constexpr uint32_t cb_r_msg_b       = TileMatrixCB::CB_R_MSG_B;
-  constexpr uint32_t cb_telem         = TileMatrixCB::CB_TELEMETRY;
-
-  compute_kernel_hw_startup(cb_scratch_in_a, cb_scratch_out_a);
-  copy_init(cb_scratch_in_a);
+  compute_kernel_hw_startup(cb_scratch_in, cb_scratch_out);
+  copy_init(cb_scratch_in);
 
   uint32_t telem_l1 = ckernel::get_tile_address(cb_telem, 0);
   volatile uint32_t* sync_flags = reinterpret_cast<volatile uint32_t*>(telem_l1);
-  volatile uint32_t* stats = sync_flags;
+
+  // Initial startup handshake with NCRISC and BRISC
+#ifdef TRISC_UNPACK
+  WAYPOINT("U_01");
+#endif
+#ifdef TRISC_MATH
+  WAYPOINT("M_01");
+#endif
+#ifdef TRISC_PACK
+  WAYPOINT("P_01");
+#endif
+
+  while (sync_flags[SyncSlot::NCRISC_READY] < epoch) {
+    asm volatile("" ::: "memory");
+  }
+  while (sync_flags[SyncSlot::BRISC_READY] < epoch) {
+    asm volatile("" ::: "memory");
+  }
+
+#ifdef TRISC_PACK
+  sync_flags[SyncSlot::TRISC_READY] = epoch;
+  asm volatile("fence rw, rw" ::: "memory");
+  WAYPOINT("P_02");
+#endif
+
+  while (sync_flags[SyncSlot::TRISC_READY] < epoch) {
+    asm volatile("" ::: "memory");
+  }
+
+#ifdef TRISC_UNPACK
+  WAYPOINT("U_02");
+#endif
+#ifdef TRISC_MATH
+  WAYPOINT("M_02");
+#endif
 
   uint32_t max_steps = max_iter * num_tiles;
-  uint32_t total_steps = 2 * max_steps + 2;
 
   volatile uint32_t *const wall_clock_reg = reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
   uint32_t cycles_compute = 0;
   uint32_t cycles_math_pure = 0;
 
-  for (uint32_t pair = 0; pair < num_batch_pairs; ++pair) {
-    // Generate Box-Muller AWGN channel observations for Batch A & Batch B
-#ifdef TRISC_MATH
-    WAYPOINT("M_CH");
+  bool benchmark_mode = (sigma_bits == 0);
+  float mu_val = uint_as_float(mu_bits);
+  float sigma_val = uint_as_float(sigma_bits);
+
+  Xoshiro128Plus rng_core;
+  uint32_t seed_master = 0x12345678U + (invocation_id * 1013904223U);
+  rng_core.init(seed_master);
+  for (uint32_t c = 0; c < core_id; ++c) {
+    rng_core.long_jump();
+  }
+  for (uint32_t b = 0; b < start_batch; ++b) {
+    rng_core.jump();
+  }
+
+  for (uint32_t batch = 0; batch < num_batches; ++batch) {
+    uint32_t active_cb_vnode = cb_vnode_a;
+#if !LDPC_TEST_PASSTHROUGH_MODE
+    uint32_t seed_batch = rng_core.next();
+    generate_channel_tiles(active_cb_vnode, mu_val, sigma_val, benchmark_mode, invocation_id, seed_batch);
+    rng_core.jump();
 #endif
-    generate_channel_tiles(cb_vnode_a, mu_val, sigma_val, benchmark_mode, invocation_id, 2 * pair + 0, core_id);
-    generate_channel_tiles(cb_vnode_b, mu_val, sigma_val, benchmark_mode, invocation_id, 2 * pair + 1, core_id);
 
     // Tri-core batch rendezvous barrier
 #ifdef TRISC_PACK
-    sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + pair + 1;
+    sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + batch + 1;
     asm volatile("fence rw, rw" ::: "memory");
-    WAYPOINT("P_02");
+    WAYPOINT("P_03");
 #endif
 #ifdef TRISC_UNPACK
     WAYPOINT("U_03");
@@ -689,7 +780,7 @@ void kernel_main() {
 #ifdef TRISC_MATH
     WAYPOINT("M_03");
 #endif
-    while (sync_flags[SyncSlot::BATCH_BARRIER_NCRISC] < epoch + pair + 1) {
+    while (sync_flags[SyncSlot::BATCH_BARRIER_NCRISC] < epoch + batch + 1) {
       asm volatile("" ::: "memory");
     }
 #ifdef TRISC_UNPACK
@@ -701,7 +792,7 @@ void kernel_main() {
 #ifdef TRISC_PACK
     WAYPOINT("P_04");
 #endif
-    while (sync_flags[SyncSlot::BATCH_BARRIER_BRISC] < epoch + pair + 1) {
+    while (sync_flags[SyncSlot::BATCH_BARRIER_BRISC] < epoch + batch + 1) {
       asm volatile("" ::: "memory");
     }
 #ifdef TRISC_UNPACK
@@ -710,11 +801,16 @@ void kernel_main() {
 #ifdef TRISC_MATH
     WAYPOINT("M_05");
 #endif
-    while (sync_flags[SyncSlot::BATCH_BARRIER_TRISC] < epoch + pair + 1) {
+#ifdef TRISC_PACK
+    WAYPOINT("P_05");
+#endif
+#ifndef TRISC_PACK
+    while (sync_flags[SyncSlot::BATCH_BARRIER_TRISC] < epoch + batch + 1) {
       asm volatile("" ::: "memory");
     }
+#endif
 
-    // Wait for channel observations to be 100% ready in L1
+    // Wait for channel observations / patterned data to be ready in L1
 #ifdef TRISC_UNPACK
     WAYPOINT("U_06");
 #endif
@@ -724,266 +820,82 @@ void kernel_main() {
 #ifdef TRISC_PACK
     WAYPOINT("P_06");
 #endif
-    while (sync_flags[SyncSlot::BATCH_READY] < epoch + pair + 1) {
+    while (sync_flags[SyncSlot::BATCH_READY] < epoch + batch + 1) {
       asm volatile("" ::: "memory");
     }
 
-#ifdef TRISC_MATH
-    uint8_t active_mask_a = 0x0F;
-    uint8_t active_mask_b = 0x0F;
-    sync_flags[SyncSlot::ACTIVE_MASK_A]     = 0x0F;
-    sync_flags[SyncSlot::ACTIVE_MASK_B]     = 0x0F;
-    sync_flags[SyncSlot::PARITY_REPORT_W0]  = 0x0F;
-    sync_flags[SyncSlot::PARITY_REPORT_W1]  = 0x0F;
-    sync_flags[SyncSlot::EARLY_TERMINATION] = 0;
-    sync_flags[SyncSlot::DRAIN_ACK_T0]      = pair;
-    sync_flags[SyncSlot::DRAIN_ACK_W1]      = pair;
-    sync_flags[SyncSlot::TRISC1_GRANT_STEP] = pair * total_steps + 1; // Grant Step 0
-    sync_flags[SyncSlot::TRISC1_CMD]        = static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC);
-    asm volatile("fence rw, rw" ::: "memory");
-    WAYPOINT("M_07");
-#endif
-
-#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
-    // Satellite Pre-Step Gate: Wait for TRISC1 Maestro to launch Step 0
-#ifdef TRISC_UNPACK
-    WAYPOINT("U_08");
-#endif
-#ifdef TRISC_PACK
-    WAYPOINT("P_08");
-#endif
-    while (sync_flags[SyncSlot::TRISC1_CMD] != static_cast<uint32_t>(MaestroCmd::CMD_STEP_EXEC) ||
-           sync_flags[SyncSlot::TRISC1_GRANT_STEP] < pair * total_steps + 1) {
-      asm volatile("" ::: "memory");
-    }
-#endif
-
-    uint32_t last_completed_k = 0;
-    (void)last_completed_k;
-
-    for (uint32_t k = 0; k < total_steps; ++k) {
-      uint32_t bar = pair * total_steps + k + 1;
-      uint32_t b_dae = k & 1;
-      uint32_t s_dae = k >> 1;
+    for (uint32_t step = 0; step < max_steps; ++step) {
+      uint32_t bar = batch * max_steps + step + 1;
+      uint32_t t_step = step % num_tiles;
+      uint32_t iter = step / num_tiles;
 
 #ifdef TRISC_UNPACK
-      sync_flags[SyncSlot::DEBUG_TRISC0_STEP] = (k << 8) | 1; // Wait grant
+      sync_flags[SyncSlot::DEBUG_TRISC0_STEP] = (step << 8) | 1;
+      WAYPOINT("U_CP");
 #endif
 #ifdef TRISC_PACK
-      sync_flags[SyncSlot::DEBUG_TRISC2_STEP] = (k << 8) | 1; // Wait grant
+      sync_flags[SyncSlot::DEBUG_TRISC2_STEP] = (step << 8) | 1;
+      WAYPOINT("P_CP");
 #endif
 #ifdef TRISC_MATH
-      sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (k << 8) | 1; // Start step
+      sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (step << 8) | 1;
+      WAYPOINT("M_CP");
 #endif
 
-#if defined(TRISC_UNPACK) || defined(TRISC_PACK)
-#ifdef TRISC_UNPACK
-      WAYPOINT("U_WT");
-#endif
-#ifdef TRISC_PACK
-      WAYPOINT("P_WT");
-#endif
-      while (sync_flags[SyncSlot::TRISC1_GRANT_STEP] < bar) {
-        asm volatile("" ::: "memory");
-        if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
-          break;
-        }
+      uint32_t t_c0 = *wall_clock_reg;
+      uint32_t m_cyc = 0;
+      bool is_deg6 = (t_step < QC_LDPC_4CW::DEG6_TILES);
+      if (is_deg6) {
+        m_cyc = compute_tile_deg6(cb_scratch_in, cb_scratch_out, cb_r_msg, iter, sync_flags);
+      } else {
+        m_cyc = compute_tile_deg3(cb_scratch_in, cb_scratch_out, cb_r_msg, iter, sync_flags);
       }
-      if (sync_flags[SyncSlot::TRISC1_CMD] >= static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
-#ifdef TRISC_UNPACK
-        sync_flags[SyncSlot::DEBUG_TRISC0_STEP] = (k << 8) | 0xEE;
-        WAYPOINT("U_DR");
-#endif
-#ifdef TRISC_PACK
-        sync_flags[SyncSlot::DEBUG_TRISC2_STEP] = (k << 8) | 0xEE;
-        WAYPOINT("P_DR");
-#endif
-        break;
-      }
-#ifdef TRISC_UNPACK
-      sync_flags[SyncSlot::DEBUG_TRISC0_STEP] = (k << 8) | 2; // Grant passed
-      WAYPOINT("U_GR");
-#endif
-#ifdef TRISC_PACK
-      sync_flags[SyncSlot::DEBUG_TRISC2_STEP] = (k << 8) | 2; // Grant passed
-      WAYPOINT("P_GR");
-#endif
-#endif
-
-      // Compute Stage: Compute check nodes for tile (k - 1)
-      if (k >= 1 && k <= 2 * max_steps) {
-        uint32_t b_comp = (k - 1) % 2;
-        uint32_t s_comp = (k - 1) / 2;
-        uint32_t t_comp = s_comp % num_tiles;
-        uint32_t iter_comp = s_comp / num_tiles;
-
-        uint32_t cb_in  = (b_comp == 0) ? cb_scratch_in_a  : cb_scratch_in_b;
-        uint32_t cb_out = (b_comp == 0) ? cb_scratch_out_a : cb_scratch_out_b;
-        uint32_t cb_r   = (b_comp == 0) ? cb_r_msg_a       : cb_r_msg_b;
-
-#ifdef TRISC_UNPACK
-        sync_flags[SyncSlot::DEBUG_TRISC0_STEP] = (k << 8) | 3; // In compute
-        WAYPOINT("U_CP");
-#endif
 #ifdef TRISC_MATH
-        sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (k << 8) | 2; // In compute
-        WAYPOINT("M_CP");
+      cycles_math_pure += m_cyc;
+#else
+      (void)m_cyc;
 #endif
 #ifdef TRISC_PACK
-        sync_flags[SyncSlot::DEBUG_TRISC2_STEP] = (k << 8) | 3; // In compute
-        WAYPOINT("P_CP");
+      cycles_compute += (*wall_clock_reg - t_c0);
 #endif
-
-        uint32_t t_c0 = *wall_clock_reg;
-        uint32_t m_cyc = 0;
-        bool is_deg6 = (t_comp < QC_LDPC_4CW::DEG6_TILES);
-        if (is_deg6) {
-          m_cyc = compute_tile_deg6(cb_in, cb_out, cb_r, iter_comp);
-        } else {
-          m_cyc = compute_tile_deg3(cb_in, cb_out, cb_r, iter_comp);
-        }
-#ifdef TRISC_MATH
-        cycles_math_pure += m_cyc;
-#endif
-#ifdef TRISC_PACK
-        cycles_compute += (*wall_clock_reg - t_c0);
-#endif
-      }
 
 #ifdef TRISC_UNPACK
-      sync_flags[SyncSlot::DEBUG_TRISC0_STEP] = (k << 8) | 9; // Step done
       WAYPOINT("U_DN");
-      last_completed_k = k;
 #endif
 #ifdef TRISC_PACK
-      sync_flags[SyncSlot::DEBUG_TRISC2_STEP] = (k << 8) | 9; // Step done
       WAYPOINT("P_DN");
 #endif
-
 #ifdef TRISC_MATH
-      // Poll satellites for step k
-      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
-        sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (k << 8) | 3; // Wait SCATTER_DONE
-        WAYPOINT("M_WS");
-        while (sync_flags[SyncSlot::SCATTER_DONE_W0] < bar) {
-          asm volatile("" ::: "memory");
-        }
+      WAYPOINT("M_DN");
+#endif
+
+      // Iteration boundary early termination check (Tile 39)
+      if (t_step == num_tiles - 1) {
         while (sync_flags[SyncSlot::SCATTER_DONE_W1] < bar) {
           asm volatile("" ::: "memory");
         }
-      }
-      if (s_dae < max_steps) {
-        sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (k << 8) | 4; // Wait GATHER_DONE
-        WAYPOINT("M_WG");
-        while (sync_flags[SyncSlot::GATHER_DONE_W0] < bar) {
-          asm volatile("" ::: "memory");
-        }
-        while (sync_flags[SyncSlot::GATHER_DONE_W1] < bar) {
-          asm volatile("" ::: "memory");
+        if (sync_flags[SyncSlot::EARLY_TERMINATION] != 0) {
+          break;
         }
       }
-
-      // Check Iteration Boundary & Parity Evaluation (Tile 39)
-      bool early_exit = false;
-      if (s_dae >= 1 && (s_dae - 1) < max_steps) {
-        uint32_t s_scat = s_dae - 1;
-        uint32_t t_scat = s_scat % num_tiles;
-        if (t_scat == num_tiles - 1) {
-          uint32_t iter_scat = s_scat / num_tiles;
-          uint32_t info_errs   = sync_flags[SyncSlot::PARITY_REPORT_W0];
-          uint32_t parity_errs = sync_flags[SyncSlot::PARITY_REPORT_W1];
-          uint32_t total_cw_errs = info_errs | parity_errs;
-
-          // Mandatory Invariant: Immediately re-arm mailboxes to non-converged fail-safe values
-          sync_flags[SyncSlot::PARITY_REPORT_W0] = 0x0F;
-          sync_flags[SyncSlot::PARITY_REPORT_W1] = 0x0F;
-          asm volatile("fence rw, rw" ::: "memory");
-
-          if (b_dae == 0) {
-            for (uint32_t c = 0; c < 4; ++c) {
-              if (((total_cw_errs & (1 << c)) == 0) && (active_mask_a & (1 << c))) {
-                active_mask_a &= ~(1 << c);
-                stats[TelemSlot::LAST_BATCH_ITER_CW0 + c] = iter_scat + 1;
-              }
-            }
-            sync_flags[SyncSlot::ACTIVE_MASK_A] = active_mask_a;
-          } else {
-            for (uint32_t c = 0; c < 4; ++c) {
-              if (((total_cw_errs & (1 << c)) == 0) && (active_mask_b & (1 << c))) {
-                active_mask_b &= ~(1 << c);
-                stats[TelemSlot::LAST_BATCH_ITER_CW0 + 4 + c] = iter_scat + 1;
-              }
-            }
-            sync_flags[SyncSlot::ACTIVE_MASK_B] = active_mask_b;
-          }
-          asm volatile("fence rw, rw" ::: "memory");
-
-          if (active_mask_a == 0 && active_mask_b == 0) {
-            sync_flags[SyncSlot::EARLY_TERMINATION] = 1;
-            sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL);
-            asm volatile("fence rw, rw" ::: "memory");
-            early_exit = true;
-          }
-        }
-      }
-      if (early_exit) {
-        sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (k << 8) | 0xEE; // Drain exit
-        WAYPOINT("M_DR");
-        while (sync_flags[SyncSlot::DRAIN_ACK_T0] < pair + 1) {
-          asm volatile("" ::: "memory");
-        }
-        while (sync_flags[SyncSlot::DRAIN_ACK_W1] < pair + 1) {
-          asm volatile("" ::: "memory");
-        }
-        sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_BATCH_DONE);
-        asm volatile("fence rw, rw" ::: "memory");
-        break;
-      }
-
-      sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (k << 8) | 5; // Granting next step
-      if (k + 1 < total_steps) {
-        sync_flags[SyncSlot::TRISC1_GRANT_STEP] = pair * total_steps + (k + 1) + 1;
-        asm volatile("fence rw, rw" ::: "memory");
-        WAYPOINT("M_GN");
-      } else {
-        // Normal schedule complete: broadcast CMD_BATCH_DONE first so satellites break out of step loop
-        sync_flags[SyncSlot::TRISC1_CMD] = static_cast<uint32_t>(MaestroCmd::CMD_BATCH_DONE);
-        asm volatile("fence rw, rw" ::: "memory");
-        while (sync_flags[SyncSlot::DRAIN_ACK_T0] < pair + 1) {
-          asm volatile("" ::: "memory");
-        }
-        while (sync_flags[SyncSlot::DRAIN_ACK_W1] < pair + 1) {
-          asm volatile("" ::: "memory");
-        }
-      }
-      sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (k << 8) | 9; // Step done
-#endif
     }
 
-    // End of Dual-Batch Pair: Drain In-Flight FIFOs and Synchronize
 #ifdef TRISC_UNPACK
-    // Drain speculative residual input tile if early termination interrupted pipeline
-    if (sync_flags[SyncSlot::TRISC1_CMD] == static_cast<uint32_t>(MaestroCmd::CMD_DRAIN_RESIDUAL)) {
-      if (last_completed_k >= 0 && last_completed_k < 2 * max_steps) {
-        uint32_t b_res = last_completed_k % 2;
-        uint32_t res_in = (b_res == 0) ? cb_scratch_in_a : cb_scratch_in_b;
-        cb_wait_front(res_in, 1);
-        cb_pop_front(res_in, 1);
-      }
-    }
-    // Always drain circular FIFO check messages so queues are clean for next batch
+    // Drain circular FIFO check messages for next batch
     for (uint32_t t = 0; t < num_tiles; ++t) {
-      cb_wait_front(cb_r_msg_a, 1);
-      cb_pop_front(cb_r_msg_a, 1);
-      cb_wait_front(cb_r_msg_b, 1);
-      cb_pop_front(cb_r_msg_b, 1);
+      cb_wait_front(cb_r_msg, 1);
+      cb_pop_front(cb_r_msg, 1);
     }
-    sync_flags[SyncSlot::DRAIN_ACK_T0] = pair + 1;
+    sync_flags[SyncSlot::DRAIN_ACK_T0] = epoch + batch + 1;
     asm volatile("fence rw, rw" ::: "memory");
 #endif
-
 #ifdef TRISC_PACK
-    while (sync_flags[SyncSlot::TRISC1_CMD] < static_cast<uint32_t>(MaestroCmd::CMD_BATCH_DONE)) {
+    while (sync_flags[SyncSlot::DRAIN_ACK_T0] < epoch + batch + 1) {
+      asm volatile("" ::: "memory");
+    }
+#endif
+#ifdef TRISC_MATH
+    while (sync_flags[SyncSlot::DRAIN_ACK_T0] < epoch + batch + 1) {
       asm volatile("" ::: "memory");
     }
 #endif
@@ -994,6 +906,6 @@ void kernel_main() {
 #endif
 #ifdef TRISC_PACK
   sync_flags[SyncSlot::TRISC_CYCLES] = cycles_compute;
-  sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + num_batch_pairs + 1;
+  sync_flags[SyncSlot::BATCH_BARRIER_TRISC] = epoch + num_batches + 1;
 #endif
 }

@@ -13,7 +13,6 @@
 #pragma once
 
 #include <stdint.h>
-#include <cmath>
 #include <cstring>
 
 #include "ar4ja_circulant_descriptors_4cw.h"
@@ -51,6 +50,126 @@ inline uint32_t float_as_uint(float f) {
     converter.f = f;
     return converter.u;
 }
+
+inline uint16_t fp32_to_bf16(float f) {
+    uint32_t u = float_as_uint(f);
+    uint32_t lsb = (u >> 16) & 1;
+    uint32_t bias = 0x7FFF + lsb;
+    return static_cast<uint16_t>((u + bias) >> 16);
+}
+
+inline float bf16_to_fp32(uint16_t b) {
+    return uint_as_float(static_cast<uint32_t>(b) << 16);
+}
+
+// Fast natural logarithm ln(s) using IEEE-754 bit extraction and a 6th-degree minimax polynomial.
+// Max absolute error < 6.1e-6 across the full range (0.0001, 1.0).
+inline float fast_ln(float s) {
+    uint32_t u = float_as_uint(s);
+    int32_t exp = static_cast<int32_t>((u >> 23) & 0xFF) - 127;
+    u = (u & 0x007FFFFF) | 0x3F800000; // Normalized float in [1.0f, 2.0f)
+    float m = uint_as_float(u) - 1.0f; // Mantissa fraction in [0.0f, 1.0f)
+
+    float p = -0.02397957f;
+    p = p * m + 0.10150005f;
+    p = p * m - 0.21029369f;
+    p = p * m + 0.32529514f;
+    p = p * m - 0.49937260f;
+    p = p * m + 0.99999183f;
+    p = p * m;
+
+    return static_cast<float>(exp) * 0.69314718056f + p;
+}
+
+// Fast reciprocal square root 1/sqrt(x) using bit-level initial approximation + 2 Newton-Raphson iterations.
+inline float fast_rsqrt(float x) {
+    uint32_t u = float_as_uint(x);
+    u = 0x5F3759DF - (u >> 1);
+    float y = uint_as_float(u);
+    float xhalf = 0.5f * x;
+    y = y * (1.5f - xhalf * y * y);
+    y = y * (1.5f - xhalf * y * y);
+    return y;
+}
+
+// Fast square root sqrt(x) = x * rsqrt(x)
+inline float fast_sqrt(float x) {
+    return x * fast_rsqrt(x);
+}
+
+// ------------------------------------------------------------------------------
+// Tensix Face Quadrant Tile Packing Offset for Variable Node v (0..2047)
+// Maps variable node v to its exact 64-bit (8-byte) word in packed tile layout
+// ------------------------------------------------------------------------------
+inline uint32_t get_tile_vnode_byte_offset(uint32_t v) {
+    uint32_t t = v / 256;
+    uint32_t v_loc = v % 256;
+    uint32_t row = v_loc / 8;
+    uint32_t k = v_loc % 8;
+    
+    uint32_t face = (row < 16) ? ((k < 4) ? 0 : 1) : ((k < 4) ? 2 : 3);
+    uint32_t col_grp = (k < 4) ? k : (k - 4);
+    
+    return t * 2048 + (face * 512) + ((row & 15) << 5) + (col_grp << 3);
+}
+
+// ------------------------------------------------------------------------------
+// Hardware PRNG for Channel AWGN Generation (Xoshiro128Plus)
+// ------------------------------------------------------------------------------
+struct Xoshiro128Plus {
+    uint32_t s[4];
+    void init(uint32_t seed) {
+        uint32_t z = seed;
+        for (int i = 0; i < 4; ++i) {
+            z += 0x9e3779b9;
+            z = (z ^ (z >> 16)) * 0x85ebca6b;
+            z = (z ^ (z >> 13)) * 0xc2b2ae35;
+            s[i] = z ^ (z >> 16);
+            if (s[i] == 0) s[i] = 1;
+        }
+    }
+    inline uint32_t next() {
+        const uint32_t result = s[0] + s[3];
+        const uint32_t t = s[1] << 9;
+        s[2] ^= s[0]; s[3] ^= s[1]; s[1] ^= s[2]; s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = (s[3] << 11) | (s[3] >> 21);
+        return result;
+    }
+    inline float next_uniform() {
+        uint32_t v = next();
+        if (v == 0) v = 1;
+        return static_cast<float>(v) * 2.3283064365386963e-10f;
+    }
+    // Advance PRNG by 2^64 draws via jump()
+    inline void jump() {
+        static const uint32_t JUMP[] = { 0x8764000b, 0xf542d2d3, 0x6fa035c3, 0x77f2db5b };
+        uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 4; i++) {
+            for (int b = 0; b < 32; b++) {
+                if (JUMP[i] & (1U << b)) {
+                    s0 ^= s[0]; s1 ^= s[1]; s2 ^= s[2]; s3 ^= s[3];
+                }
+                next();
+            }
+        }
+        s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3;
+    }
+    // Advance PRNG by 2^96 draws via long_jump() (for inter-core partitioning across 440 cores)
+    inline void long_jump() {
+        static const uint32_t LONG_JUMP[] = { 0xb523952e, 0x0b6f099f, 0xccf5a0ef, 0x1c580662 };
+        uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 4; i++) {
+            for (int b = 0; b < 32; b++) {
+                if (LONG_JUMP[i] & (1U << b)) {
+                    s0 ^= s[0]; s1 ^= s[1]; s2 ^= s[2]; s3 ^= s[3];
+                }
+                next();
+            }
+        }
+        s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3;
+    }
+};
 
 // ------------------------------------------------------------------------------
 // RV32 "Zbb" Native Hardware Bit Manipulation Instructions
@@ -105,23 +224,19 @@ static inline uint32_t rv32_cpop(uint32_t a) {
 // Inter-Batch Ping-Pong Architecture: 9 Circular Buffers (220 KB Total, 14.3% L1)
 // ------------------------------------------------------------------------------
 namespace TileMatrixCB {
-    constexpr uint8_t CB_VNODE_A           = 0;   // 20 KB: Active evolving variable posterior LLRs (Batch A: CW 0..3)
-    constexpr uint8_t CB_R_MSG_A           = 1;   // 80 KB: 40 tile check messages circular FIFO (Batch A)
-    constexpr uint8_t CB_SCRATCH_GATHER_0  = 3;   // 4 KB: Stage 1 Gather Buffer (Batch A, Double-buffered, 2 KB page)
-    constexpr uint8_t CB_SCRATCH_GATHER_1  = 4;   // 4 KB: Stage 1 Gather Buffer (Batch B, Double-buffered, 2 KB page)
-    constexpr uint8_t CB_VNODE_B           = 5;   // 20 KB: Active evolving variable posterior LLRs (Batch B: CW 4..7)
-    constexpr uint8_t CB_SCRATCH_SCATTER_0 = 16;  // 4 KB: Stage 3 Scatter Buffer (Batch A, Double-buffered, 2 KB page)
-    constexpr uint8_t CB_R_MSG_B           = 17;  // 80 KB: 40 tile check messages circular FIFO (Batch B)
-    constexpr uint8_t CB_SCRATCH_SCATTER_1 = 18;  // 4 KB: Stage 3 Scatter Buffer (Batch B, Double-buffered, 2 KB page)
-    constexpr uint8_t CB_TELEMETRY         = 24;  // 4 KB: Hardware semaphores, mailboxes, telemetry
-    constexpr uint32_t TELEMETRY_L1_BASE   = 0x39C00;
+    constexpr uint8_t CB_VNODE_A         = 0;   // 20 KB: Active evolving variable posterior LLRs (Batch A: 4 CWs)
+    constexpr uint8_t CB_R_MSG           = 1;   // 80 KB: 40 tile check messages circular FIFO (4 CWs)
+    constexpr uint8_t CB_SCRATCH_GATHER  = 2;   // 4 KB: Stage 1 Gather Buffer (Double-buffered, 2 KB page)
+    constexpr uint8_t CB_SCRATCH_SCATTER = 3;   // 4 KB: Stage 3 Scatter Buffer (Double-buffered, 2 KB page)
+    constexpr uint8_t CB_VNODE_B         = 4;   // 20 KB: Active evolving variable posterior LLRs (Batch B: 4 CWs)
+    constexpr uint8_t CB_TELEMETRY       = 24;  // 4 KB: Hardware semaphores, mailboxes, telemetry
+    constexpr uint32_t TELEMETRY_L1_BASE = 0x39C00;
 
-    // Aliases for Inter-Batch Ping-Pong clarity
-    constexpr uint8_t CB_R_MSG             = CB_R_MSG_A;
-    constexpr uint8_t CB_SCRATCH_GATHER_A  = CB_SCRATCH_GATHER_0;
-    constexpr uint8_t CB_SCRATCH_GATHER_B  = CB_SCRATCH_GATHER_1;
-    constexpr uint8_t CB_SCRATCH_SCATTER_A = CB_SCRATCH_SCATTER_0;
-    constexpr uint8_t CB_SCRATCH_SCATTER_B = CB_SCRATCH_SCATTER_1;
+    // Aliases
+    constexpr uint8_t CB_VNODE             = CB_VNODE_A;
+    constexpr uint8_t CB_R_MSG_A           = CB_R_MSG;
+    constexpr uint8_t CB_SCRATCH_GATHER_0  = CB_SCRATCH_GATHER;
+    constexpr uint8_t CB_SCRATCH_SCATTER_0 = CB_SCRATCH_SCATTER;
 }
 
 // Maestro Command Enum issued by Centralized TRISC1 Orchestrator (Slot 22)
@@ -155,6 +270,17 @@ namespace SyncSlot {
     constexpr uint32_t BATCH_BARRIER_BRISC  = 29; // BRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_NCRISC = 30; // NCRISC batch rendezvous
     constexpr uint32_t BATCH_BARRIER_TRISC  = 31; // TRISC batch rendezvous
+    constexpr uint32_t BRISC_READY          = 0;  // Worker 0 startup ready flag
+    constexpr uint32_t TRISC_READY          = 62; // TRISC startup ready flag
+    constexpr uint32_t NCRISC_READY         = 63; // NCRISC startup ready flag
+
+    // Unified Cross-Worker Gapless Timestamps for Current Tile
+    constexpr uint32_t T0_GATHER_START      = 32; // Sampled by BRISC/NCRISC at start of 512-bit DMA Gather
+    constexpr uint32_t T1_GATHER_DONE       = 33; // Sampled when W0 & W1 finish DMA Gather & push cb_scratch_in
+    constexpr uint32_t T2_UNPACK_DONE       = 34; // Sampled by TRISC0 when copy_tile() completes into dst_reg
+    constexpr uint32_t T3_MATH_DONE         = 35; // Sampled by TRISC1 when Pairwise Tree AMin* + XOR commit
+    constexpr uint32_t T4_PACK_DONE         = 36; // Sampled by TRISC2 when pack_tile() pushes cb_scratch_out
+    constexpr uint32_t T5_SCATTER_DONE      = 37; // Sampled when W0 & W1 finish DMA Scatter & pop cb_scratch_out
 
     // Aliases
     constexpr uint32_t ACTIVE_MASK         = ACTIVE_MASK_A;
@@ -203,6 +329,14 @@ namespace TelemSlot {
     constexpr uint32_t NC_GATHER           = 32;
     constexpr uint32_t NC_WAIT             = 33;
     constexpr uint32_t NC_SCATTER          = 34;
+
+    // Gapless Pipeline Stage Cumulative Cycle Accumulators (Sum of T_{i} - T_{i-1} across all tiles)
+    constexpr uint32_t STAGE_GATHER_CYCLES  = 40; // Stage 1: Sum of (T1 - T0)
+    constexpr uint32_t STAGE_UNPACK_CYCLES  = 41; // Stage 2: Sum of (T2 - T1)
+    constexpr uint32_t STAGE_MATH_CYCLES    = 42; // Stage 3: Sum of (T3 - T2)
+    constexpr uint32_t STAGE_PACK_CYCLES    = 43; // Stage 4: Sum of (T4 - T3)
+    constexpr uint32_t STAGE_SCATTER_CYCLES = 44; // Stage 5: Sum of (T5 - T4)
+    constexpr uint32_t STAGE_TOTAL_CYCLES   = 45; // Exact Total Turnaround: Sum of (T5 - T0)
 
     // BRISC Tile Breakdown
     constexpr uint32_t BR_GATHER           = 48;

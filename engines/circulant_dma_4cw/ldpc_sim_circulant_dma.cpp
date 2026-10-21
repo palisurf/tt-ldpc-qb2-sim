@@ -121,8 +121,8 @@ int run_circulant_dma_simulation(
     std::memcpy(&mu_u32, &mu_llr, sizeof(float));
     std::memcpy(&sigma_bits, &sigma_llr, sizeof(float));
 
-    // DRAM Buffer Allocation for Telemetry
-    uint32_t stats_per_core_bytes = 4 * 1024;
+    // DRAM Buffer Allocation for Telemetry + Initial Noise Dump (32 KB/core)
+    uint32_t stats_per_core_bytes = 32 * 1024;
     uint32_t stats_cb_bytes = single_core ? stats_per_core_bytes : (cores_per_chip * stats_per_core_bytes);
 
     distributed::DeviceLocalBufferConfig stats_dram_config{
@@ -172,15 +172,12 @@ int run_circulant_dma_simulation(
             uint32_t chip_idx = chip_row * (single_core ? 1 : mesh_device->num_cols()) + chip_col;
             Program program = CreateProgram();
 
-            // Circular Buffers in L1 SRAM (No CB_H_OFFSET needed!)
+            // Circular Buffers in L1 SRAM (Ping-Pong Double Buffering: 132 KB Total)
             CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_A, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(num_tiles * 2 * 1024, {{TileMatrixCB::CB_R_MSG_A, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_A, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_0, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER_1, 2 * 1024));
             CreateCircularBuffer(program, core_range, CircularBufferConfig(20 * 1024, {{TileMatrixCB::CB_VNODE_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_VNODE_B, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_0, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_0, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(num_tiles * 2 * 1024, {{TileMatrixCB::CB_R_MSG_B, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG_B, 2 * 1024));
-            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER_1, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER_1, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(num_tiles * 2 * 1024, {{TileMatrixCB::CB_R_MSG, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_R_MSG, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_GATHER, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_GATHER, 2 * 1024));
+            CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_SCRATCH_SCATTER, tt::DataFormat::Float16_b}}).set_page_size(TileMatrixCB::CB_SCRATCH_SCATTER, 2 * 1024));
             CreateCircularBuffer(program, core_range, CircularBufferConfig(4 * 1024, {{TileMatrixCB::CB_TELEMETRY, tt::DataFormat::RawUInt32}}).set_page_size(TileMatrixCB::CB_TELEMETRY, 4 * 1024));
 
             auto reader  = CreateKernel(program, reader_path, core_range, reader_config);
@@ -193,12 +190,12 @@ int run_circulant_dma_simulation(
                 uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + local_core * stats_per_core_bytes;
 
                 std::vector<uint32_t> r_args = {
-                    chunk_pairs, max_iterations, num_tiles, invocation_id, global_core_id
+                    num_batches, max_iterations, num_tiles, invocation_id, global_core_id
                 };
                 SetRuntimeArgs(program, reader, c, r_args);
 
                 std::vector<uint32_t> w_args = {
-                    chunk_pairs, max_iterations, num_tiles,
+                    num_batches, max_iterations, num_tiles,
                     core_stats_addr, 0, stats_cb_bytes,
                     mu_u32, sigma_bits, 0x12345678U, invocation_id,
                     0u, 0u, global_core_id
@@ -206,7 +203,7 @@ int run_circulant_dma_simulation(
                 SetRuntimeArgs(program, writer, c, w_args);
 
                 std::vector<uint32_t> c_args = {
-                    chunk_pairs, max_iterations, num_tiles,
+                    num_batches, max_iterations, num_tiles,
                     mu_u32, sigma_bits, invocation_id,
                     0u, 0u, global_core_id
                 };
@@ -275,6 +272,32 @@ int run_circulant_dma_simulation(
               << (total_cws / total_sec) << " blocks/sec)" << std::endl;
     std::cout << "  Info Throughput:  " << std::setprecision(2) << mbps_info << " Mbps ("
               << (mbps_info / 1000.0) << " Gbps)" << std::endl;
+
+    uint32_t trapped_batch = core0_stats[TelemSlot::FIRST_FAILING_BATCH];
+    uint32_t trapped_cw    = core0_stats[TelemSlot::FIRST_FAILING_CW];
+    uint32_t trapped_be    = core0_stats[TelemSlot::FIRST_FAILING_BE];
+    uint32_t trapped_mask  = core0_stats[TelemSlot::FIRST_FAILING_MASK];
+
+    if (trapped_batch != 0xFFFFFFFF) {
+        std::cout << "-------------------------------------------------------" << std::endl;
+        std::cout << " >>> [FIRST BLOCK ERROR TRAPPED ON CORE (0,0)] <<<" << std::endl;
+        std::cout << "  Failing Batch:     " << trapped_batch << std::endl;
+        std::cout << "  Failing Codeword:  " << trapped_cw << std::endl;
+        std::cout << "  Bit Errors:        " << trapped_be << std::endl;
+        std::cout << "  Active Mask:       0x" << std::hex << trapped_mask << std::dec << std::endl;
+
+        const char* vnode_dump_ptr = reinterpret_cast<const char*>(core0_stats.data()) + 4096;
+        std::string dump_path = "tensix_initial_vnodes.bin";
+        std::ofstream fout(dump_path, std::ios::binary);
+        if (fout.is_open()) {
+            fout.write(vnode_dump_ptr, 20480);
+            fout.close();
+            std::cout << "  [SUCCESS] Saved Initial Noise Dump: " << dump_path << " (20,480 Bytes)" << std::endl;
+        } else {
+            std::cerr << "  [ERROR] Failed to write " << dump_path << std::endl;
+        }
+    }
+
     std::cout << "-------------------------------------------------------" << std::endl;
     uint32_t tiles_sim = core0_stats[TelemSlot::TOTAL_TILES_SIM];
     double tiles_d = (tiles_sim > 0) ? static_cast<double>(tiles_sim) : 1.0;
@@ -291,35 +314,54 @@ int run_circulant_dma_simulation(
     double trisc_math_pt       = core0_stats[TelemSlot::TRISC_MATH_CYCLES] / tiles_d;
     double total_pt            = core0_stats[TelemSlot::ELAPSED_CYCLES] / tiles_d;
 
+    double cyc_stage_gather  = core0_stats[TelemSlot::STAGE_GATHER_CYCLES]  / tiles_d;
+    double cyc_stage_unpack  = core0_stats[TelemSlot::STAGE_UNPACK_CYCLES]  / tiles_d;
+    double cyc_stage_math    = core0_stats[TelemSlot::STAGE_MATH_CYCLES]    / tiles_d;
+    double cyc_stage_pack    = core0_stats[TelemSlot::STAGE_PACK_CYCLES]    / tiles_d;
+    double cyc_stage_scatter = core0_stats[TelemSlot::STAGE_SCATTER_CYCLES] / tiles_d;
+    double cyc_stage_total   = core0_stats[TelemSlot::STAGE_TOTAL_CYCLES]   / tiles_d;
+
     std::cout << "-------------------------------------------------------" << std::endl;
     std::cout << " HARDWARE CYCLE TELEMETRY (Core 0,0 Timers)" << std::endl;
     std::cout << "  Total Elapsed Cycles:  " << core0_stats[TelemSlot::ELAPSED_CYCLES] << std::endl;
     std::cout << "  Cycles Per Batch:      " << core0_stats[TelemSlot::CYCLES_PER_BATCH] << std::endl;
-    std::cout << "  NCRISC (Worker 1):     Gather=" << core0_stats[TelemSlot::NC_GATHER]
-              << " | Wait=" << core0_stats[TelemSlot::NC_WAIT]
-              << " | Scatter=" << core0_stats[TelemSlot::NC_SCATTER] << std::endl;
-    std::cout << "  BRISC (Worker 0):      Gather=" << core0_stats[TelemSlot::BR_GATHER]
-              << " | Wait=" << core0_stats[TelemSlot::BR_WAIT]
-              << " | Scatter=" << core0_stats[TelemSlot::BR_SCATTER] << std::endl;
-    std::cout << "  TRISC1 Math Cycles:    " << core0_stats[TelemSlot::TRISC_MATH_CYCLES] << std::endl;
-    std::cout << "  TRISC2 Pack Turnaround:" << core0_stats[TelemSlot::TRISC_CYCLES] << std::endl;
     std::cout << "  Channel Gen Cycles:    " << core0_stats[TelemSlot::CYCLES_CHANNEL] << std::endl;
     std::cout << "  Error Scan Cycles:     " << core0_stats[TelemSlot::CYCLES_ERROR_SCAN] << std::endl;
     std::cout << "-------------------------------------------------------" << std::endl;
-    std::cout << " PER-TILE CYCLE BREAKDOWN (Tensix Silicon Timers)" << std::endl;
+    std::cout << " TILE 0 RAW TIMESTAMPS: T0=" << core0_stats[100] << " T1=" << core0_stats[101]
+              << " T2=" << core0_stats[102] << " T3=" << core0_stats[103]
+              << " T4=" << core0_stats[104] << " T5=" << core0_stats[105] << std::endl;
+    std::cout << " GAPLESS SEQUENTIAL PER-TILE BREAKDOWN (T0 -> T5)" << std::endl;
     std::cout << "  Total Simulated Tiles: " << tiles_sim << std::endl;
-    std::cout << "  Gather (Worker 0 / BRISC) : " << std::fixed << std::setprecision(1) << br_gather_pt << " cyc/tile" << std::endl;
-    std::cout << "  Gather (Worker 1 / NCRISC): " << std::fixed << std::setprecision(1) << nc_gather_pt << " cyc/tile" << std::endl;
-    std::cout << "  TRISC1 Pure SFPU Math     : " << std::fixed << std::setprecision(1) << trisc_math_pt << " cyc/tile" << std::endl;
-    std::cout << "  TRISC2 Turnaround (Math+Pk): " << std::fixed << std::setprecision(1) << trisc_turnaround_pt << " cyc/tile" << std::endl;
-    std::cout << "  Scatter (Worker 0 / BRISC) : " << std::fixed << std::setprecision(1) << br_scatter_pt << " cyc/tile" << std::endl;
-    std::cout << "  Scatter (Worker 1 / NCRISC): " << std::fixed << std::setprecision(1) << nc_scatter_pt << " cyc/tile" << std::endl;
-    std::cout << "  Wait for Compute (NCRISC) : " << std::fixed << std::setprecision(1) << nc_wait_pt << " cyc/tile" << std::endl;
-    std::cout << "  Wait for Compute (BRISC)  : " << std::fixed << std::setprecision(1) << br_wait_pt << " cyc/tile" << std::endl;
-    std::cout << "  Overall Turnaround / Tile : " << std::fixed << std::setprecision(1) << total_pt << " cyc/tile" << std::endl;
+    std::cout << "  Stage 1: Gather  (W0+W1 512-bit DMA) : " << std::fixed << std::setprecision(1) << cyc_stage_gather  << " cyc/tile  (T1 - T0)" << std::endl;
+    std::cout << "  Stage 2: Unpack  (TRISC0 CB -> DEST) : " << std::fixed << std::setprecision(1) << cyc_stage_unpack  << " cyc/tile  (T2 - T1)" << std::endl;
+    std::cout << "  Stage 3: Math    (TRISC1 Pure SFPU)  : " << std::fixed << std::setprecision(1) << cyc_stage_math    << " cyc/tile  (T3 - T2)" << std::endl;
+    std::cout << "  Stage 4: Pack    (TRISC2 DEST -> CB) : " << std::fixed << std::setprecision(1) << cyc_stage_pack    << " cyc/tile  (T4 - T3)" << std::endl;
+    std::cout << "  Stage 5: Scatter (W0+W1 512-bit DMA) : " << std::fixed << std::setprecision(1) << cyc_stage_scatter << " cyc/tile  (T5 - T4)" << std::endl;
+    std::cout << " ------------------------------------------------------" << std::endl;
+    std::cout << "  Exact Tile Turnaround (Sum of 1..5)  : " << std::fixed << std::setprecision(1) << cyc_stage_total   << " cyc/tile  (T5 - T0)" << std::endl;
     std::cout << "=======================================================" << std::endl;
 
+    if (passthrough_mode) {
+        std::cout << "\n=======================================================" << std::endl;
+        std::cout << " PASSTHROUGH MEMORY GATHER/SCATTER VERIFICATION" << std::endl;
+        std::cout << "=======================================================" << std::endl;
+        std::cout << "  Total Simulated Tiles: " << core0_stats[TelemSlot::TOTAL_TILES_SIM] << std::endl;
+        std::cout << "  Total Word Mismatches: " << total_be << std::endl;
+        std::cout << "  Failing Batches:       " << total_fe << " / " << num_batches << std::endl;
+        if (total_be == 0) {
+            std::cout << "  [SUCCESS] 100% BIT-EXACT MATCH! 0 mismatches across all variable nodes." << std::endl;
+            std::cout << "  Circulant 512-bit DMA transfers and gather/scatter symmetry CONFIRMED!" << std::endl;
+        } else {
+            std::cout << "  [FAILURE] " << total_be << " mismatches detected in vnode LLRs!" << std::endl;
+        }
+        std::cout << "=======================================================\n" << std::endl;
+    }
+
     mesh_device->close();
+    if (passthrough_mode) {
+        return (total_be == 0) ? 0 : 1;
+    }
     return (total_fe <= min_fe) ? 0 : 1;
 }
 
