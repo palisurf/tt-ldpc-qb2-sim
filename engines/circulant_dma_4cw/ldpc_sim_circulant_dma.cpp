@@ -72,29 +72,19 @@ static uint32_t get_unique_invocation_id() {
 // ------------------------------------------------------------------------------
 int run_circulant_dma_simulation(
     double eb_n0_db,
-    uint32_t num_batches,
+    uint64_t max_blocks,
     uint32_t max_iterations,
     bool single_core,
     bool benchmark_mode = false,
     bool passthrough_mode = false,
     uint32_t invocation_id = 1,
-    uint32_t min_fe = 25
+    uint64_t min_fe = 25,
+    uint32_t chunk_batches_per_core = 2500,
+    const std::string& csv_filename = ""
 ) {
     if (invocation_id <= 1) {
         invocation_id = get_unique_invocation_id();
     }
-
-    std::cout << "\n=======================================================" << std::endl;
-    std::cout << " RUNNING 4-CODEWORD CIRCULANT DMA ENGINE ON QUIETBOX 2" << std::endl;
-    std::cout << " Target: " << (single_core ? "Single Tensix Core (0, 0)" : "2x2 Blackhole Mesh") << std::endl;
-    std::cout << " Batches: " << num_batches << " (4 CWs/batch = " << num_batches * 4 << " CWs)" << std::endl;
-    std::cout << " Eb/N0: " << eb_n0_db << " dB | Max Iterations: " << max_iterations 
-              << " | Target FE: " << min_fe << std::endl;
-    std::cout << " Invocation ID: " << invocation_id << " (Epoch: 0x" 
-              << std::hex << (invocation_id << 16) << std::dec << ")" << std::endl;
-    if (benchmark_mode)  std::cout << " Mode: SILICON THROUGHPUT BENCHMARK (sigma=0)" << std::endl;
-    if (passthrough_mode) std::cout << " Mode: PASSTHROUGH MEMORY GATHER/SCATTER VERIFICATION" << std::endl;
-    std::cout << "=======================================================" << std::endl;
 
     auto mesh_device = single_core 
         ? distributed::MeshDevice::create_unit_mesh(0)
@@ -105,6 +95,18 @@ int run_circulant_dma_simulation(
     uint32_t cores_per_chip = single_core ? 1 : (grid_size.x * grid_size.y);
     uint32_t num_chips = single_core ? 1 : (mesh_device->num_rows() * mesh_device->num_cols());
     uint32_t total_mesh_cores = cores_per_chip * num_chips;
+
+    std::cout << "\n=======================================================" << std::endl;
+    std::cout << " RUNNING 4-CODEWORD CIRCULANT DMA ENGINE ON QUIETBOX 2" << std::endl;
+    std::cout << " Target: " << (single_core ? "Single Tensix Core (0, 0)" : "2x2 Blackhole Mesh (440 Cores)") << std::endl;
+    std::cout << " Target Max Blocks: " << max_blocks << " CWs" << std::endl;
+    std::cout << " Eb/N0: " << eb_n0_db << " dB | Max Iterations: " << max_iterations 
+              << " | Target FE: " << min_fe << std::endl;
+    std::cout << " Invocation ID: " << invocation_id << " (Epoch: 0x" 
+              << std::hex << (invocation_id << 16) << std::dec << ")" << std::endl;
+    if (benchmark_mode)  std::cout << " Mode: SILICON THROUGHPUT BENCHMARK (sigma=0)" << std::endl;
+    if (passthrough_mode) std::cout << " Mode: PASSTHROUGH MEMORY GATHER/SCATTER VERIFICATION" << std::endl;
+    std::cout << "=======================================================" << std::endl;
 
     CoreCoord core = {0, 0};
     CoreRange core_range = single_core 
@@ -145,7 +147,6 @@ int run_circulant_dma_simulation(
     compute_config.defines["LDPC_USE_SFPU_LUT"] = "1";
 #endif
 
-
     if (passthrough_mode) {
         reader_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
         writer_config.defines["LDPC_TEST_PASSTHROUGH_MODE"] = "1";
@@ -153,9 +154,6 @@ int run_circulant_dma_simulation(
     }
 
     uint32_t num_tiles = QC_LDPC_4CW::TOTAL_TILES;
-    uint32_t num_pairs = (num_batches + 1) / 2;
-    uint32_t chunk_pairs = num_pairs;
-    if (chunk_pairs == 0) chunk_pairs = 1;
 
     distributed::MeshWorkload workload;
 
@@ -190,12 +188,12 @@ int run_circulant_dma_simulation(
                 uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + local_core * stats_per_core_bytes;
 
                 std::vector<uint32_t> r_args = {
-                    num_batches, max_iterations, num_tiles, invocation_id, global_core_id
+                    chunk_batches_per_core, max_iterations, num_tiles, invocation_id, global_core_id
                 };
                 SetRuntimeArgs(program, reader, c, r_args);
 
                 std::vector<uint32_t> w_args = {
-                    num_batches, max_iterations, num_tiles,
+                    chunk_batches_per_core, max_iterations, num_tiles,
                     core_stats_addr, 0, stats_cb_bytes,
                     mu_u32, sigma_bits, 0x12345678U, invocation_id,
                     0u, 0u, global_core_id
@@ -203,7 +201,7 @@ int run_circulant_dma_simulation(
                 SetRuntimeArgs(program, writer, c, w_args);
 
                 std::vector<uint32_t> c_args = {
-                    num_batches, max_iterations, num_tiles,
+                    chunk_batches_per_core, max_iterations, num_tiles,
                     mu_u32, sigma_bits, invocation_id,
                     0u, 0u, global_core_id
                 };
@@ -219,35 +217,154 @@ int run_circulant_dma_simulation(
         }
     }
 
-    std::cout << "[WORKLOAD] Enqueueing circulant DMA workload on device..." << std::endl;
-    auto t_start = std::chrono::high_resolution_clock::now();
-
-    distributed::EnqueueMeshWorkload(cq, workload, false);
-    cq.finish();
-    auto t_end = std::chrono::high_resolution_clock::now();
-    double total_sec = std::chrono::duration<double>(t_end - t_start).count();
-
-    // Read back telemetry from all active chips and cores
-    uint32_t total_be = 0;
-    uint32_t total_fe = 0;
-    uint32_t total_iters = 0;
-    uint32_t total_cws = 0;
+    uint64_t total_cws = 0;
+    uint64_t total_fe = 0;
+    uint64_t total_be = 0;
+    uint64_t total_iters = 0;
+    double total_sec = 0.0;
     std::vector<uint32_t> core0_stats(stats_per_core_bytes / sizeof(uint32_t), 0);
 
-    for (uint32_t r = 0; r < (single_core ? 1 : mesh_device->num_rows()); ++r) {
-        for (uint32_t c = 0; c < (single_core ? 1 : mesh_device->num_cols()); ++c) {
-            std::vector<uint32_t> chip_stats(stats_cb_bytes / sizeof(uint32_t), 0);
-            distributed::ReadShard(cq, chip_stats, stats_dram, distributed::MeshCoordinate(r, c), true);
-            if (r == 0 && c == 0) {
-                std::copy(chip_stats.begin(), chip_stats.begin() + core0_stats.size(), core0_stats.begin());
+    // Setup CSV output if specified or default
+    std::string out_csv = csv_filename;
+    if (out_csv.empty() && !passthrough_mode && !benchmark_mode) {
+        fs::create_directories("Results");
+        char buf[256];
+        if (max_blocks >= 1000000000ULL) {
+            std::snprintf(buf, sizeof(buf), "Results/results_circulant_dma_4cw_ar4ja_r12_ebn0_%.2f_%lluB.csv",
+                          eb_n0_db, static_cast<unsigned long long>(max_blocks / 1000000000ULL));
+        } else if (max_blocks >= 1000000ULL) {
+            std::snprintf(buf, sizeof(buf), "Results/results_circulant_dma_4cw_ar4ja_r12_ebn0_%.2f_%lluM.csv",
+                          eb_n0_db, static_cast<unsigned long long>(max_blocks / 1000000ULL));
+        } else {
+            std::snprintf(buf, sizeof(buf), "Results/results_circulant_dma_4cw_ar4ja_r12_ebn0_%.2f_%lluk.csv",
+                          eb_n0_db, static_cast<unsigned long long>(max_blocks / 1000ULL));
+        }
+        out_csv = buf;
+    }
+
+    std::ofstream csv_out;
+    if (!out_csv.empty()) {
+        bool file_exists = fs::exists(out_csv);
+        csv_out.open(out_csv, std::ios::app);
+        if (!file_exists) {
+            csv_out << "EbN0_dB,Total_Blocks,Total_Bit_Errors,Total_Block_Errors,BER,FER,Mean_Iterations,Throughput_Msps,Host_Wall_s\n";
+            csv_out.flush();
+        }
+        std::cout << " [CSV] Logging to: " << out_csv << std::endl;
+    }
+
+    std::cout << "[WORKLOAD] Commencing chunked execution across " << total_mesh_cores << " cores..." << std::endl;
+
+    for (uint32_t chunk_idx = 0; total_fe < min_fe && total_cws < max_blocks; ++chunk_idx) {
+        uint64_t remaining_blocks = max_blocks - total_cws;
+        uint32_t cur_batches = chunk_batches_per_core;
+        uint64_t cws_per_chunk = static_cast<uint64_t>(cur_batches) * 4 * total_mesh_cores;
+
+        if (cws_per_chunk > remaining_blocks) {
+            cur_batches = static_cast<uint32_t>((remaining_blocks + (4 * total_mesh_cores - 1)) / (4 * total_mesh_cores));
+            if (cur_batches == 0) cur_batches = 1;
+        }
+
+        uint32_t cur_invocation_id = (invocation_id + chunk_idx) & 0x7FFF;
+        if (cur_invocation_id <= 1) cur_invocation_id = 2;
+
+        auto& programs = workload.get_programs();
+
+        for (size_t chip_idx = 0; chip_idx < chip_handles.size(); ++chip_idx) {
+            auto& ch = chip_handles[chip_idx];
+            Program& program = programs.at(ch.coord_range);
+
+            for (uint32_t local_core = 0; local_core < cores_per_chip; ++local_core) {
+                CoreCoord c = single_core ? CoreCoord{0, 0} : CoreCoord{local_core % grid_size.x, local_core / grid_size.x};
+                uint32_t global_core_id = chip_idx * cores_per_chip + local_core;
+                uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + local_core * stats_per_core_bytes;
+
+                std::vector<uint32_t> r_args = {
+                    cur_batches, max_iterations, num_tiles, cur_invocation_id, global_core_id
+                };
+                SetRuntimeArgs(program, ch.reader, c, r_args);
+
+                std::vector<uint32_t> w_args = {
+                    cur_batches, max_iterations, num_tiles,
+                    core_stats_addr, 0, stats_cb_bytes,
+                    mu_u32, sigma_bits, 0x12345678U, cur_invocation_id,
+                    0u, 0u, global_core_id
+                };
+                SetRuntimeArgs(program, ch.writer, c, w_args);
+
+                std::vector<uint32_t> c_args = {
+                    cur_batches, max_iterations, num_tiles,
+                    mu_u32, sigma_bits, cur_invocation_id,
+                    0u, 0u, global_core_id
+                };
+                SetRuntimeArgs(program, ch.compute, c, c_args);
             }
-            for (uint32_t core = 0; core < cores_per_chip; ++core) {
-                uint32_t off = core * (stats_per_core_bytes / sizeof(uint32_t));
-                total_be += chip_stats[off + TelemSlot::TOTAL_BE];
-                total_fe += chip_stats[off + TelemSlot::TOTAL_FE];
-                total_iters += chip_stats[off + TelemSlot::TOTAL_ITERS];
-                total_cws += chip_stats[off + TelemSlot::TOTAL_CWS];
+        }
+
+        auto t_chunk_start = std::chrono::high_resolution_clock::now();
+        distributed::EnqueueMeshWorkload(cq, workload, false);
+        cq.finish();
+        auto t_chunk_end = std::chrono::high_resolution_clock::now();
+        double chunk_sec = std::chrono::duration<double>(t_chunk_end - t_chunk_start).count();
+        total_sec += chunk_sec;
+
+        uint32_t chunk_be = 0;
+        uint32_t chunk_fe = 0;
+        uint64_t chunk_iters = 0;
+        uint32_t chunk_cws = 0;
+
+        for (uint32_t r = 0; r < (single_core ? 1 : mesh_device->num_rows()); ++r) {
+            for (uint32_t c = 0; c < (single_core ? 1 : mesh_device->num_cols()); ++c) {
+                std::vector<uint32_t> chip_stats(stats_cb_bytes / sizeof(uint32_t), 0);
+                distributed::ReadShard(cq, chip_stats, stats_dram, distributed::MeshCoordinate(r, c), true);
+                if (r == 0 && c == 0 && chunk_idx == 0) {
+                    std::copy(chip_stats.begin(), chip_stats.begin() + core0_stats.size(), core0_stats.begin());
+                }
+                for (uint32_t core = 0; core < cores_per_chip; ++core) {
+                    uint32_t off = core * (stats_per_core_bytes / sizeof(uint32_t));
+                    chunk_be += chip_stats[off + TelemSlot::TOTAL_BE];
+                    chunk_fe += chip_stats[off + TelemSlot::TOTAL_FE];
+                    chunk_iters += chip_stats[off + TelemSlot::TOTAL_ITERS];
+                    chunk_cws += chip_stats[off + TelemSlot::TOTAL_CWS];
+                }
             }
+        }
+
+        total_be += chunk_be;
+        total_fe += chunk_fe;
+        total_iters += chunk_iters;
+        total_cws += chunk_cws;
+
+        double cur_fer = (total_cws > 0) ? (static_cast<double>(total_fe) / total_cws) : 0.0;
+        double cur_ber = (total_cws > 0) ? (static_cast<double>(total_be) / (total_cws * 1024.0)) : 0.0;
+        double cur_mean_iter = (total_cws > 0) ? (static_cast<double>(total_iters) / total_cws) : 0.0;
+        double cur_msps = (total_cws * 2048.0) / (total_sec * 1e6);
+
+        std::cout << "[CHUNK " << std::setw(4) << chunk_idx + 1 << "] "
+                  << "Blocks: " << std::setw(11) << total_cws << " / " << max_blocks
+                  << " | FE: " << std::setw(4) << total_fe << " / " << min_fe
+                  << " | BE: " << std::setw(6) << total_be
+                  << " | FER: " << std::scientific << std::setprecision(2) << cur_fer
+                  << " | MeanIter: " << std::fixed << std::setprecision(2) << cur_mean_iter
+                  << " | Rate: " << std::setprecision(1) << cur_msps << " Msps"
+                  << " | Wall: " << std::setprecision(1) << total_sec << "s"
+                  << std::endl;
+
+        if (csv_out.is_open()) {
+            csv_out << std::fixed << std::setprecision(2) << eb_n0_db << ","
+                    << total_cws << ","
+                    << total_be << ","
+                    << total_fe << ","
+                    << std::scientific << std::setprecision(6) << cur_ber << ","
+                    << cur_fer << ","
+                    << std::fixed << std::setprecision(3) << cur_mean_iter << ","
+                    << std::setprecision(2) << cur_msps << ","
+                    << total_sec << "\n";
+            csv_out.flush();
+        }
+
+        if (passthrough_mode) {
+            break;
         }
     }
 
@@ -260,7 +377,7 @@ int run_circulant_dma_simulation(
     std::cout << "\n=======================================================" << std::endl;
     std::cout << " CIRCULANT DMA DECODER SILICON RESULTS" << std::endl;
     std::cout << "=======================================================" << std::endl;
-    std::cout << "  Active Cores:     " << (single_core ? 1 : (cores_per_chip * num_chips)) << std::endl;
+    std::cout << "  Active Cores:     " << total_mesh_cores << std::endl;
     std::cout << "  Total Blocks:     " << total_cws << std::endl;
     std::cout << "  Frame Errors:     " << total_fe << std::endl;
     std::cout << "  Bit Errors:       " << total_be << std::endl;
@@ -278,7 +395,7 @@ int run_circulant_dma_simulation(
     uint32_t trapped_be    = core0_stats[TelemSlot::FIRST_FAILING_BE];
     uint32_t trapped_mask  = core0_stats[TelemSlot::FIRST_FAILING_MASK];
 
-    if (trapped_batch != 0xFFFFFFFF || num_batches == 1) {
+    if (trapped_batch != 0xFFFFFFFF || max_blocks <= 100) {
         std::cout << "-------------------------------------------------------" << std::endl;
         if (trapped_batch != 0xFFFFFFFF) {
             std::cout << " >>> [FIRST BLOCK ERROR TRAPPED ON CORE (0,0)] <<<" << std::endl;
@@ -317,18 +434,6 @@ int run_circulant_dma_simulation(
     uint32_t tiles_sim = core0_stats[TelemSlot::TOTAL_TILES_SIM];
     double tiles_d = (tiles_sim > 0) ? static_cast<double>(tiles_sim) : 1.0;
 
-    double nc_gather_pt  = core0_stats[TelemSlot::NC_GATHER] / tiles_d;
-    double nc_wait_pt    = core0_stats[TelemSlot::NC_WAIT] / tiles_d;
-    double nc_scatter_pt = core0_stats[TelemSlot::NC_SCATTER] / tiles_d;
-
-    double br_gather_pt  = core0_stats[TelemSlot::BR_GATHER] / tiles_d;
-    double br_wait_pt    = core0_stats[TelemSlot::BR_WAIT] / tiles_d;
-    double br_scatter_pt = core0_stats[TelemSlot::BR_SCATTER] / tiles_d;
-
-    double trisc_turnaround_pt = core0_stats[TelemSlot::TRISC_CYCLES] / tiles_d;
-    double trisc_math_pt       = core0_stats[TelemSlot::TRISC_MATH_CYCLES] / tiles_d;
-    double total_pt            = core0_stats[TelemSlot::ELAPSED_CYCLES] / tiles_d;
-
     double cyc_stage_gather  = core0_stats[TelemSlot::STAGE_GATHER_CYCLES]  / tiles_d;
     double cyc_stage_unpack  = core0_stats[TelemSlot::STAGE_UNPACK_CYCLES]  / tiles_d;
     double cyc_stage_math    = core0_stats[TelemSlot::STAGE_MATH_CYCLES]    / tiles_d;
@@ -343,11 +448,7 @@ int run_circulant_dma_simulation(
     std::cout << "  Channel Gen Cycles:    " << core0_stats[TelemSlot::CYCLES_CHANNEL] << std::endl;
     std::cout << "  Error Scan Cycles:     " << core0_stats[TelemSlot::CYCLES_ERROR_SCAN] << std::endl;
     std::cout << "-------------------------------------------------------" << std::endl;
-    std::cout << " TILE 0 RAW TIMESTAMPS: T0=" << core0_stats[100] << " T1=" << core0_stats[101]
-              << " T2=" << core0_stats[102] << " T3=" << core0_stats[103]
-              << " T4=" << core0_stats[104] << " T5=" << core0_stats[105] << std::endl;
     std::cout << " GAPLESS SEQUENTIAL PER-TILE BREAKDOWN (T0 -> T5)" << std::endl;
-    std::cout << "  Total Simulated Tiles: " << tiles_sim << std::endl;
     std::cout << "  Stage 1: Gather  (W0+W1 512-bit DMA) : " << std::fixed << std::setprecision(1) << cyc_stage_gather  << " cyc/tile  (T1 - T0)" << std::endl;
     std::cout << "  Stage 2: Unpack  (TRISC0 CB -> DEST) : " << std::fixed << std::setprecision(1) << cyc_stage_unpack  << " cyc/tile  (T2 - T1)" << std::endl;
     std::cout << "  Stage 3: Math    (TRISC1 Pure SFPU)  : " << std::fixed << std::setprecision(1) << cyc_stage_math    << " cyc/tile  (T3 - T2)" << std::endl;
@@ -363,7 +464,7 @@ int run_circulant_dma_simulation(
         std::cout << "=======================================================" << std::endl;
         std::cout << "  Total Simulated Tiles: " << core0_stats[TelemSlot::TOTAL_TILES_SIM] << std::endl;
         std::cout << "  Total Word Mismatches: " << total_be << std::endl;
-        std::cout << "  Failing Batches:       " << total_fe << " / " << num_batches << std::endl;
+        std::cout << "  Failing Batches:       " << total_fe << " / " << (total_cws / 4) << std::endl;
         if (total_be == 0) {
             std::cout << "  [SUCCESS] 100% BIT-EXACT MATCH! 0 mismatches across all variable nodes." << std::endl;
             std::cout << "  Circulant 512-bit DMA transfers and gather/scatter symmetry CONFIRMED!" << std::endl;
@@ -381,12 +482,15 @@ int run_circulant_dma_simulation(
 }
 
 int main(int argc, char** argv) {
-    double eb_n0_db = 2.0;
-    uint32_t num_batches = 25;   // 100 codewords
-    uint32_t max_iterations = 16;
-    bool single_core = true;     // Single-core gatekeeper first
+    double eb_n0_db = 2.5;
+    uint64_t max_blocks = 10000000000ULL; // 10 Billion codewords default
+    uint32_t max_iterations = 200;
+    bool single_core = false;     // Default to full 440-core mesh
     bool benchmark = false;
     bool passthrough = false;
+    uint64_t min_fe = 25;
+    uint32_t chunk_batches = 2500; // 2,500 batches/core = 10k CWs/core = 4.4M CWs/chunk across 440 cores
+    std::string csv_path = "";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -394,13 +498,17 @@ int main(int argc, char** argv) {
         else if (arg == "--mesh")    single_core = false;
         else if (arg == "--benchmark") benchmark = true;
         else if (arg == "--passthrough") passthrough = true;
+        else if (arg == "--min-fe" && i + 1 < argc) min_fe = std::stoull(argv[++i]);
+        else if (arg == "--chunk-batches" && i + 1 < argc) chunk_batches = std::stoul(argv[++i]);
+        else if (arg == "--out" && i + 1 < argc) csv_path = argv[++i];
     }
 
     if (argc > 1 && argv[1][0] != '-') eb_n0_db = std::stod(argv[1]);
-    if (argc > 2 && argv[2][0] != '-') num_batches = std::stoul(argv[2]);
+    if (argc > 2 && argv[2][0] != '-') max_blocks = std::stoull(argv[2]);
     if (argc > 3 && argv[3][0] != '-') max_iterations = std::stoul(argv[3]);
 
     return run_circulant_dma_simulation(
-        eb_n0_db, num_batches, max_iterations, single_core, benchmark, passthrough
+        eb_n0_db, max_blocks, max_iterations, single_core, benchmark, passthrough,
+        1, min_fe, chunk_batches, csv_path
     );
 }

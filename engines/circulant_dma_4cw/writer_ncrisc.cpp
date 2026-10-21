@@ -145,8 +145,8 @@ void kernel_main() {
 #endif
         cycles_channel += (get_wall_clock() - t_ch0);
 
-        // Snapshot initial variable node state into DRAM if no failure trapped yet
-        if (first_failing_batch == 0xFFFFFFFF) {
+        // Snapshot initial variable node state into DRAM (Core 0, Batch 0 only for debugging)
+        if (batch == 0 && core_id == 0) {
             uint64_t vnode_noc_addr = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 4096);
             noc_async_write(vnode_l1, vnode_noc_addr, 20480);
             noc_async_write_barrier();
@@ -331,8 +331,8 @@ void kernel_main() {
                 }
             }
         }
-        // Snapshot final variable node state into DRAM (batch 0 or first failing batch)
-        if (batch == 0 || first_failing_batch == batch) {
+        // Snapshot final variable node state into DRAM (Core 0, Batch 0 or first failing batch)
+        if (core_id == 0 && (batch == 0 || first_failing_batch == batch)) {
             uint64_t vnode_final_noc_addr = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 4096 + 20480);
             noc_async_write(vnode_l1, vnode_final_noc_addr, 20480);
             noc_async_write_barrier();

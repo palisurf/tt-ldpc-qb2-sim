@@ -36,6 +36,10 @@ tile:
 	@echo "[BUILD] Tile Matrix 4-Codeword Engine (engines/tile_matrix_4cw)..."
 	$(MAKE) -C engines/tile_matrix_4cw
 
+circulant:
+	@echo "[BUILD] Circulant DMA 4-Codeword Engine (engines/circulant_dma_4cw)..."
+	$(MAKE) -C engines/circulant_dma_4cw
+
 # Scalar binary target delegates directly to engines/scalar_5w
 ldpc_sim: scalar
 	@ln -sf engines/scalar_5w/ldpc_sim_scalar ldpc_sim 2>/dev/null || cp engines/scalar_5w/ldpc_sim_scalar ldpc_sim

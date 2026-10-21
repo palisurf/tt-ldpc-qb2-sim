@@ -178,14 +178,31 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Ensure appropriate C++ engine is compiled
-if [ "${ENGINE}" == "tile" ] || [ "${ENGINE}" == "tile_matrix" ]; then
+if [ "${ENGINE}" == "circulant" ] || [ "${ENGINE}" == "circulant_dma" ]; then
+    make circulant -j
+elif [ "${ENGINE}" == "tile" ] || [ "${ENGINE}" == "tile_matrix" ]; then
     make tile -j
 elif [ "${ENGINE}" == "scalar" ]; then
     make scalar -j
     make ldpc_sim -j
 fi
 
-if [ "${ENGINE}" == "tile" ] || [ "${ENGINE}" == "tile_matrix" ]; then
+if [ "${ENGINE}" == "circulant" ] || [ "${ENGINE}" == "circulant_dma" ]; then
+    echo "=========================================================="
+    echo "Launching Circulant DMA 4-CW Engine Simulation"
+    echo "Matrix                       : ${MATRIX}"
+    echo "Eb/N0 Range (Start:Stop:Step): ${EBNO_START} : ${EBNO_END} : ${EBNO_STEP} dB"
+    echo "Min frame errors             : ${MIN_ERRORS}"
+    echo "Max blocks                   : ${MAX_BLOCKS_PER_CORE}"
+    echo "Max decoder iterations       : ${MAX_ITER}"
+    echo "=========================================================="
+    ./engines/circulant_dma_4cw/ldpc_sim_circulant_dma \
+        --waterfall "${EBNO_START}:${EBNO_END}:${EBNO_STEP}" \
+        "${MIN_ERRORS}" \
+        "${MAX_BLOCKS_PER_CORE}" \
+        "${MAX_ITER}" \
+        "${FORWARD_ARGS[@]}"
+elif [ "${ENGINE}" == "tile" ] || [ "${ENGINE}" == "tile_matrix" ]; then
     echo "=========================================================="
     echo "Launching Tile Matrix 4-CW Engine Simulation"
     echo "Matrix                       : ${MATRIX}"
