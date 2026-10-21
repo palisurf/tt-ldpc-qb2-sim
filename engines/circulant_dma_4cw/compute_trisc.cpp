@@ -564,6 +564,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
       int r1 = base_r + 2 + sub;
       int r2 = base_r + 4 + sub;
       int sc0 = base_r + 6;
+      int sc1 = base_r + 7;
 
       if (iter != 0) {
         sfpi::dst_reg[r0] = round_bf16_fast(sfpi::vFloat(sfpi::dst_reg[r0]) - sfpi::vFloat(sfpi::dst_reg[32 + r0]));
@@ -571,7 +572,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::dst_reg[r2] = round_bf16_fast(sfpi::vFloat(sfpi::dst_reg[r2]) - sfpi::vFloat(sfpi::dst_reg[32 + r2]));
       }
 
-      // Stage 1: Sign parity stored into scratch
+      // Stage 1: Sign parity stored into scratch sc0
       {
         sfpi::vInt s0 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r0]));
         sfpi::vInt s1 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r1]));
@@ -579,7 +580,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>((s0 ^ s1) ^ s2);
       }
 
-      // Edge 0
+      // Edge 0: computes r_out0, writes L_new to dst_reg[32 + r0], stages r_out0 into sc1
       {
         sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
         sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
@@ -589,12 +590,12 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::vFloat q0     = sfpi::dst_reg[r0];
         sfpi::vFloat r_out0 = round_bf16(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
         sfpi::dst_reg[32 + r0] = round_bf16_fast(q0 + r_out0);
-        sfpi::dst_reg[r0]      = r_out0;
+        sfpi::dst_reg[sc1]     = r_out0; // Stage in sc1 so dst_reg[r0] remains pristine q0
       }
 
-      // Edge 1
+      // Edge 1: computes r_out1, writes L_new to dst_reg[32 + r1], stages r_out1 into (32 + sc0)
       {
-        sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]));
+        sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0])); // pristine q0
         sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
         sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m0, m2);
 
@@ -602,13 +603,13 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::vFloat q1     = sfpi::dst_reg[r1];
         sfpi::vFloat r_out1 = round_bf16(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
         sfpi::dst_reg[32 + r1] = round_bf16_fast(q1 + r_out1);
-        sfpi::dst_reg[r1]      = r_out1;
+        sfpi::dst_reg[32 + sc0] = r_out1; // Stage in (32 + sc0) so dst_reg[r1] remains pristine q1
       }
 
-      // Edge 2
+      // Edge 2: computes r_out2, writes L_new to dst_reg[32 + r2], writes r_out2 to dst_reg[r2]
       {
-        sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]));
-        sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
+        sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0])); // pristine q0
+        sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1])); // pristine q1
         sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m0, m1);
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
@@ -617,6 +618,10 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::dst_reg[32 + r2] = round_bf16_fast(q2 + r_out2);
         sfpi::dst_reg[r2]      = r_out2;
       }
+
+      // Commit staged r_out0 and r_out1
+      sfpi::dst_reg[r0] = sfpi::vFloat(sfpi::dst_reg[sc1]);
+      sfpi::dst_reg[r1] = sfpi::vFloat(sfpi::dst_reg[32 + sc0]);
     }
 
     sfpi::dst_reg[base_r + 6] = 0.0f;

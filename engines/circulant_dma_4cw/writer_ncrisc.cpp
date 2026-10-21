@@ -331,6 +331,13 @@ void kernel_main() {
                 }
             }
         }
+        // Snapshot final variable node state into DRAM (batch 0 or first failing batch)
+        if (batch == 0 || first_failing_batch == batch) {
+            uint64_t vnode_final_noc_addr = get_noc_addr_from_bank_id<true>(dram_bank, stats_dram_addr + 4096 + 20480);
+            noc_async_write(vnode_l1, vnode_final_noc_addr, 20480);
+            noc_async_write_barrier();
+        }
+
 #if !LDPC_TEST_PASSTHROUGH_MODE
         cb_pop_front(active_cb, 10);
 #endif

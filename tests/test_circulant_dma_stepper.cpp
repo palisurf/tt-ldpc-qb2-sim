@@ -909,8 +909,21 @@ bool run_stepper_on_dump(const std::string& dump_path, uint32_t max_iter, bool u
 
         if (active_mask == 0) {
             std::cout << "\n>>> [SUCCESS] All 4 codewords converged cleanly by iteration " << iter + 1 << "! <<<" << std::endl;
+            std::ofstream fout("stepper_final_vnodes.bin", std::ios::binary);
+            if (fout.is_open()) {
+                fout.write(reinterpret_cast<const char*>(vnodes.data()), 2560 * sizeof(Packed4CW_BF16));
+                fout.close();
+                std::cout << "  [SUCCESS] Saved Stepper Final Vnodes Dump: stepper_final_vnodes.bin (20,480 Bytes)" << std::endl;
+            }
             return true;
         }
+    }
+
+    std::ofstream fout("stepper_final_vnodes.bin", std::ios::binary);
+    if (fout.is_open()) {
+        fout.write(reinterpret_cast<const char*>(vnodes.data()), 2560 * sizeof(Packed4CW_BF16));
+        fout.close();
+        std::cout << "  [SUCCESS] Saved Stepper Final Vnodes Dump: stepper_final_vnodes.bin (20,480 Bytes)" << std::endl;
     }
 
     std::cout << "\n>>> [FAILURE] Residual Frame Errors Detected (Active Mask: 0x" << std::hex << active_mask << std::dec << ")! <<<" << std::endl;

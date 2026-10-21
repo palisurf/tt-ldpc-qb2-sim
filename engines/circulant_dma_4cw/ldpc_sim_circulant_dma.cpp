@@ -121,8 +121,8 @@ int run_circulant_dma_simulation(
     std::memcpy(&mu_u32, &mu_llr, sizeof(float));
     std::memcpy(&sigma_bits, &sigma_llr, sizeof(float));
 
-    // DRAM Buffer Allocation for Telemetry + Initial Noise Dump (32 KB/core)
-    uint32_t stats_per_core_bytes = 32 * 1024;
+    // DRAM Buffer Allocation for Telemetry + Initial & Final Noise Dump (64 KB/core)
+    uint32_t stats_per_core_bytes = 64 * 1024;
     uint32_t stats_cb_bytes = single_core ? stats_per_core_bytes : (cores_per_chip * stats_per_core_bytes);
 
     distributed::DeviceLocalBufferConfig stats_dram_config{
@@ -278,23 +278,38 @@ int run_circulant_dma_simulation(
     uint32_t trapped_be    = core0_stats[TelemSlot::FIRST_FAILING_BE];
     uint32_t trapped_mask  = core0_stats[TelemSlot::FIRST_FAILING_MASK];
 
-    if (trapped_batch != 0xFFFFFFFF) {
+    if (trapped_batch != 0xFFFFFFFF || num_batches == 1) {
         std::cout << "-------------------------------------------------------" << std::endl;
-        std::cout << " >>> [FIRST BLOCK ERROR TRAPPED ON CORE (0,0)] <<<" << std::endl;
-        std::cout << "  Failing Batch:     " << trapped_batch << std::endl;
-        std::cout << "  Failing Codeword:  " << trapped_cw << std::endl;
-        std::cout << "  Bit Errors:        " << trapped_be << std::endl;
-        std::cout << "  Active Mask:       0x" << std::hex << trapped_mask << std::dec << std::endl;
-
-        const char* vnode_dump_ptr = reinterpret_cast<const char*>(core0_stats.data()) + 4096;
-        std::string dump_path = "tensix_initial_vnodes.bin";
-        std::ofstream fout(dump_path, std::ios::binary);
-        if (fout.is_open()) {
-            fout.write(vnode_dump_ptr, 20480);
-            fout.close();
-            std::cout << "  [SUCCESS] Saved Initial Noise Dump: " << dump_path << " (20,480 Bytes)" << std::endl;
+        if (trapped_batch != 0xFFFFFFFF) {
+            std::cout << " >>> [FIRST BLOCK ERROR TRAPPED ON CORE (0,0)] <<<" << std::endl;
+            std::cout << "  Failing Batch:     " << trapped_batch << std::endl;
+            std::cout << "  Failing Codeword:  " << trapped_cw << std::endl;
+            std::cout << "  Bit Errors:        " << trapped_be << std::endl;
+            std::cout << "  Active Mask:       0x" << std::hex << trapped_mask << std::dec << std::endl;
         } else {
-            std::cerr << "  [ERROR] Failed to write " << dump_path << std::endl;
+            std::cout << " >>> [CAPTURING BATCH 0 VNODE STATE ON CORE (0,0)] <<<" << std::endl;
+        }
+
+        const char* vnode_init_ptr = reinterpret_cast<const char*>(core0_stats.data()) + 4096;
+        std::string init_dump_path = "tensix_initial_vnodes.bin";
+        std::ofstream fout_init(init_dump_path, std::ios::binary);
+        if (fout_init.is_open()) {
+            fout_init.write(vnode_init_ptr, 20480);
+            fout_init.close();
+            std::cout << "  [SUCCESS] Saved Initial Noise Dump: " << init_dump_path << " (20,480 Bytes)" << std::endl;
+        } else {
+            std::cerr << "  [ERROR] Failed to write " << init_dump_path << std::endl;
+        }
+
+        const char* vnode_final_ptr = reinterpret_cast<const char*>(core0_stats.data()) + 4096 + 20480;
+        std::string final_dump_path = "tensix_final_vnodes.bin";
+        std::ofstream fout_final(final_dump_path, std::ios::binary);
+        if (fout_final.is_open()) {
+            fout_final.write(vnode_final_ptr, 20480);
+            fout_final.close();
+            std::cout << "  [SUCCESS] Saved Final Vnodes Dump:  " << final_dump_path << " (20,480 Bytes)" << std::endl;
+        } else {
+            std::cerr << "  [ERROR] Failed to write " << final_dump_path << std::endl;
         }
     }
 
