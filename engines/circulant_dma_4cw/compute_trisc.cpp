@@ -395,19 +395,21 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::dst_reg[sc3] = sfpi_amin_star_branchless(m2, m5); // m25 in sc3
       }
 
-      // Stage 3: Outgoing check messages with Zero LReg pressure
+      // Stage 3: Outgoing check messages with Intrinsic Damping (beta = 0.9375 = 15/16)
+      const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
+
       // Edge pair (0, 3)
       {
         sfpi::vFloat m_oth0 = sfpi_amin_star_branchless(sfpi::dst_reg[sc2], sfpi::dst_reg[sc3]);
 
         sfpi::vFloat q3 = sfpi::dst_reg[r3];
-        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q3));
+        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q3)) * v_damping;
         sfpi::vFloat q0 = sfpi::dst_reg[r0];
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat r_out0 = round_bf16(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
         sfpi::dst_reg[32 + r0] = round_bf16_fast(q0 + r_out0);
 
-        sfpi::vFloat r_mag3 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q0));
+        sfpi::vFloat r_mag3 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q0)) * v_damping;
         sfpi::vFloat r_out3 = round_bf16(sfpi::copysgn(r_mag3, s_tot ^ sfpi::as<sfpi::vInt>(q3)));
         sfpi::dst_reg[32 + r3] = round_bf16_fast(q3 + r_out3);
 
@@ -420,13 +422,13 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::vFloat m_oth1 = sfpi_amin_star_branchless(sfpi::dst_reg[sc1], sfpi::dst_reg[sc3]);
 
         sfpi::vFloat q4 = sfpi::dst_reg[r4];
-        sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q4));
+        sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q4)) * v_damping;
         sfpi::vFloat q1 = sfpi::dst_reg[r1];
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat r_out1 = round_bf16(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
         sfpi::dst_reg[32 + r1] = round_bf16_fast(q1 + r_out1);
 
-        sfpi::vFloat r_mag4 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q1));
+        sfpi::vFloat r_mag4 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q1)) * v_damping;
         sfpi::vFloat r_out4 = round_bf16(sfpi::copysgn(r_mag4, s_tot ^ sfpi::as<sfpi::vInt>(q4)));
         sfpi::dst_reg[32 + r4] = round_bf16_fast(q4 + r_out4);
 
@@ -439,13 +441,13 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::vFloat m_oth2 = sfpi_amin_star_branchless(sfpi::dst_reg[sc1], sfpi::dst_reg[sc2]);
 
         sfpi::vFloat q5 = sfpi::dst_reg[r5];
-        sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q5));
+        sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q5)) * v_damping;
         sfpi::vFloat q2 = sfpi::dst_reg[r2];
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat r_out2 = round_bf16(sfpi::copysgn(r_mag2, s_tot ^ sfpi::as<sfpi::vInt>(q2)));
         sfpi::dst_reg[32 + r2] = round_bf16_fast(q2 + r_out2);
 
-        sfpi::vFloat r_mag5 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q2));
+        sfpi::vFloat r_mag5 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q2)) * v_damping;
         sfpi::vFloat r_out5 = round_bf16(sfpi::copysgn(r_mag5, s_tot ^ sfpi::as<sfpi::vInt>(q5)));
         sfpi::dst_reg[32 + r5] = round_bf16_fast(q5 + r_out5);
 
@@ -580,11 +582,14 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>((s0 ^ s1) ^ s2);
       }
 
+      // Stage 2: Outgoing check messages with Intrinsic Damping (beta = 0.9375 = 15/16)
+      const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
+
       // Edge 0: computes r_out0, writes L_new to dst_reg[32 + r0], stages r_out0 into sc1
       {
         sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
         sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m1, m2);
+        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m1, m2) * v_damping;
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q0     = sfpi::dst_reg[r0];
@@ -597,7 +602,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
       {
         sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0])); // pristine q0
         sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m0, m2);
+        sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m0, m2) * v_damping;
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q1     = sfpi::dst_reg[r1];
@@ -610,7 +615,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
       {
         sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0])); // pristine q0
         sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1])); // pristine q1
-        sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m0, m1);
+        sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m0, m1) * v_damping;
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q2     = sfpi::dst_reg[r2];
