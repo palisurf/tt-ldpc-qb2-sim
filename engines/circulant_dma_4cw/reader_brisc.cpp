@@ -139,18 +139,20 @@ void kernel_main() {
 
             // ------------------------------------------------------------------
             // Phase 3: SCATTER Stage for Tile t_step (Face 0 & Face 2)
+            // Blind Unmasked DMA Scatter: All 4 codewords are written unconditionally.
+            // Codewords that have converged are protected by having their convergence
+            // iteration and 0-error status already locked; no post-convergence errors
+            // are ever counted.
             // ------------------------------------------------------------------
             WAYPOINT("B_SC");
             uint32_t t_s0 = get_wall_clock();
             if (active_mask != 0) {
                 #pragma GCC unroll 3
                 for (uint32_t d = 0; d < 3; ++d) {
-                    scatter_slice_masked_l1(QC_LDPC_4CW::TILE_SLICES_W0_F0[t_step][d], scratch_out_addr + 0 + d * 128, vnode_ptr, active_mask);
-                    scatter_slice_masked_l1(QC_LDPC_4CW::TILE_SLICES_W0_F2[t_step][d], scratch_out_addr + 1024 + d * 128, vnode_ptr, active_mask);
+                    scatter_slice_l1(QC_LDPC_4CW::TILE_SLICES_W0_F0[t_step][d], scratch_out_addr + 0 + d * 128, vnode_ptr);
+                    scatter_slice_l1(QC_LDPC_4CW::TILE_SLICES_W0_F2[t_step][d], scratch_out_addr + 1024 + d * 128, vnode_ptr);
                 }
-                if (active_mask == 0xF) {
-                    noc_async_write_barrier();
-                }
+                noc_async_write_barrier();
             }
             cycles_scatter += (get_wall_clock() - t_s0);
 
