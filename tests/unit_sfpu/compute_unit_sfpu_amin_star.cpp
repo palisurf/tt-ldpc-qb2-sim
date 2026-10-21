@@ -15,6 +15,23 @@
 //   3. Degree-3 Check Node computation (exact formulation from compute_trisc.cpp)
 // ==============================================================================
 
+#if defined(LDPC_USE_SFPU_LUT)
+sfpi_inline sfpi::vFloat sfpi_amin_star_lut(sfpi::vFloat a, sfpi::vFloat b) {
+    auto [min_v, max_v] = sfpi::min_max(a, b);
+    sfpi::vFloat diff   = max_v - min_v;
+    sfpi::vLut16ss s01(-0.4000f, -0.3280f);
+    sfpi::vLut16ii i01(0.69315f, 0.65715f);
+    sfpi::vLut16ss s23(-0.3280f, -0.3280f);
+    sfpi::vLut16ii i23(0.65715f, 0.65715f);
+    sfpi::vLut16ss s45(0.0f, 0.0f);
+    sfpi::vLut16ii i45(0.0f, 0.0f);
+
+    sfpi::vFloat corr = sfpi::lut<sfpi::LutMode::Fp16x6_HWM3>(
+        diff, s01, i01, s23, i23, s45, i45, sfpi::LutSign::Update);
+    return sfpi::max(min_v - corr, 0.0f);
+}
+#define sfpi_amin_star sfpi_amin_star_lut
+#else
 sfpi_inline sfpi::vFloat sfpi_amin_star_branchless(sfpi::vFloat a, sfpi::vFloat b) {
     auto [min_v, max_v] = sfpi::min_max(a, b);
     sfpi::vFloat diff   = max_v - min_v;
@@ -23,6 +40,8 @@ sfpi_inline sfpi::vFloat sfpi_amin_star_branchless(sfpi::vFloat a, sfpi::vFloat 
     sfpi::vFloat corr   = sfpi::max(sfpi::max(line1, line2), 0.0f);
     return sfpi::max(min_v - corr, 0.0f);
 }
+#define sfpi_amin_star sfpi_amin_star_branchless
+#endif
 
 void kernel_main() {
     constexpr uint32_t cb_in    = tt::CBIndex::c_0;
@@ -52,7 +71,7 @@ void kernel_main() {
     {
         sfpi::vFloat a = sfpi::dst_reg[0];
         sfpi::vFloat b = sfpi::dst_reg[1];
-        sfpi::dst_reg[0] = sfpi_amin_star_branchless(a, b);
+        sfpi::dst_reg[0] = sfpi_amin_star(a, b);
     }
 
     // --------------------------------------------------------------------------
@@ -92,11 +111,11 @@ void kernel_main() {
             v_if (min_idx == r) {
                 m = 1000.0f;
             } v_endif;
-            m_others = sfpi_amin_star_branchless(m_others, m);
+            m_others = sfpi_amin_star(m_others, m);
         }
 
         // 3. M_all
-        sfpi::vFloat m_all = sfpi_amin_star_branchless(m_others, min_mag);
+        sfpi::vFloat m_all = sfpi_amin_star(m_others, min_mag);
 
         // 4. Updates: r_out and L_out = q + r_out
         #pragma GCC unroll 6
@@ -148,10 +167,10 @@ void kernel_main() {
             v_if (min_idx == r) {
                 m = 1000.0f;
             } v_endif;
-            m_others = sfpi_amin_star_branchless(m_others, m);
+            m_others = sfpi_amin_star(m_others, m);
         }
 
-        sfpi::vFloat m_all = sfpi_amin_star_branchless(m_others, min_mag);
+        sfpi::vFloat m_all = sfpi_amin_star(m_others, min_mag);
 
         #pragma GCC unroll 3
         for (int r = 0; r < 3; ++r) {

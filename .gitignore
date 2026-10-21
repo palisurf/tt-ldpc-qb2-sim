@@ -4,6 +4,8 @@ ldpc_sim_scalar
 **/ldpc_sim_scalar
 ldpc_sim_tile_matrix
 **/ldpc_sim_tile_matrix
+ldpc_sim_circulant_dma
+**/ldpc_sim_circulant_dma
 test_*
 **/test_*
 !*.cpp
