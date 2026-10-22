@@ -350,6 +350,9 @@ int run_circulant_dma_simulation(
                   << " | Rate: " << std::setprecision(1) << cur_msps << " Msps"
                   << " | Wall: " << std::setprecision(1) << total_sec << "s"
                   << std::endl;
+        // Explicitly flush stdout after each chunk to ensure unbuffered real-time streaming
+        // over pipes, tmux sessions, and background log monitors (e.g. tail -f).
+        std::fflush(stdout);
 
         if (csv_out.is_open()) {
             csv_out << std::fixed << std::setprecision(2) << eb_n0_db << ","
@@ -483,6 +486,9 @@ int run_circulant_dma_simulation(
 }
 
 int main(int argc, char** argv) {
+    // Disable stdout stream buffering to prevent glibc block-buffering delays (4KB/64KB)
+    // when output is redirected to pipes, tee, or background log files.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     double eb_n0_db = 2.5;
     uint64_t max_blocks = 10000000000ULL; // 10 Billion codewords default
     uint32_t max_iterations = 200;
