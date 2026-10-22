@@ -73,7 +73,7 @@ Below is the official 3-dataset comparison plot, illustrating the complete water
 2. **QuietBox 2 Scalar 5-Worker Engine** (Row-layered Gauss-Seidel schedule, 5 workers/core, unclipped bfloat16, 200 max iterations).
 3. **QuietBox 2 Circulant DMA 4-Codeword Engine** (Row-layered Gauss-Seidel schedule, 512-bit L1 NOC DMA, unclipped bfloat16, 200 max iterations).
 
-![AR4JA Rate-1/2 Waterfall Comparison: Historical JPL 2005 vs. QuietBox 2 Scalar 5W vs. QuietBox 2 Circulant DMA 4CW](Results/combined_ar4ja_r12_waterfall_iter200.png)
+![AR4JA Rate-1/2 Waterfall Comparison: Historical JPL 2005 vs. QuietBox 2 Scalar 5W vs. QuietBox 2 Circulant DMA 4CW](docs/figures/ar4ja_rate12_3dataset_waterfall_comparison.png)
 
 ### Summary of Deep Error Floor Points ($E_b/N_0 \ge 2.0\text{ dB}$, 200 Max Iterations)
 

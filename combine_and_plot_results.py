@@ -79,6 +79,7 @@ def main():
     scalar_folder_png = "Results/Scalar_5w/combined_ar4ja_r12_waterfall_iter200.png"
     jpl_folder_png = "Results/Scalar_5w/JPL Results - Read Only/combined_ar4ja_r12_waterfall_iter200.png"
     doc_fig_png = "docs/figures/combined_ar4ja_r12_waterfall_iter200.png"
+    doc_fig_3ds_png = "docs/figures/ar4ja_rate12_3dataset_waterfall_comparison.png"
 
     # -------------------------------------------------------------
     # 2. Load Dataset 1: Historical NASA JPL (2005, Flood Decoder)
@@ -349,7 +350,7 @@ def main():
     plt.tight_layout()
     fig.savefig(output_png, dpi=300, bbox_inches='tight')
     print(f"[OK] Saved combined 3-result waterfall plot to: {output_png}")
-    for extra_png in [scalar_folder_png, jpl_folder_png, doc_fig_png]:
+    for extra_png in [scalar_folder_png, jpl_folder_png, doc_fig_png, doc_fig_3ds_png]:
         dir_name = os.path.dirname(extra_png)
         if os.path.exists(dir_name):
             fig.savefig(extra_png, dpi=300, bbox_inches='tight')

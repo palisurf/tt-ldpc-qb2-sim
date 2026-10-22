@@ -66,6 +66,7 @@ docs/MD_files/*
 docs/figures/*
 !docs/figures/ar4ja_h_matrix_tiles_and_faces_spy_plot.png
 !docs/figures/ar4ja_h_matrix_tiles_and_faces_spy_plot.pdf
+!docs/figures/ar4ja_rate12_3dataset_waterfall_comparison.png
 
 # Additional Test Binaries & Diagnostic Dumps
 test_40tile_stepper
