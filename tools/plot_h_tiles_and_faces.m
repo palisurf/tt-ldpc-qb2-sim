@@ -111,10 +111,10 @@ hold(ax_hdr, 'on');
 rectangle(ax_hdr, 'Position', [0, 0, 1, 1], 'FaceColor', [0.07 0.10 0.18], ...
     'EdgeColor', [0.22 0.40 0.65], 'LineWidth', 1.5, 'Curvature', [0.08, 0.08]);
 
-text(ax_hdr, 0.50, 0.70, 'Deep Space Network (DSN) CCSDS AR4JA RATE-1/2 LDPC: > 20Gsps decoding.', ...
+text(ax_hdr, 0.50, 0.70, 'Deep Space Network (DSN) CCSDS AR4JA Rate-1/2 LDPC: 4.91 Gsps Decoding', ...
     'Color', [1.0 1.0 1.0], 'FontSize', 30.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
-text(ax_hdr, 0.50, 0.28, 'Circulant Structure enables 512 bit parallel Tensix L1 RAM DMA Gather/Scatter. Deep Kernel Optimizations Applied', ...
-    'Color', [1.0 1.0 1.0], 'FontSize', 21.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+text(ax_hdr, 0.50, 0.28, 'Circulant Structure Enables 512-bit Parallel Tensix L1 NOC DMA Gather/Scatter on QuietBox 2 (440 Cores)', ...
+    'Color', [0.0 0.95 0.95], 'FontSize', 21.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
 
 % =========================================================================
@@ -228,9 +228,9 @@ for bc = 512:512:2048
 end
 
 % Labels placed in empty region (Cols 650..1450 are 100% empty) - Zero collision!
-text(ax2, 650, 521, 'Face 0 & 2 (Worker 0: BRISC): Checks 513..528 [3 Slices \times 256 B]', ...
+text(ax2, 650, 521, 'Face 0 & 2 (Worker 0: BRISC): Checks 513..528 [3 Slices \times 128 B = 384 B]', ...
     'Color', col_f0, 'FontSize', 15.0, 'FontWeight', 'bold', 'BackgroundColor', [0.04 0.05 0.09], 'Margin', 4);
-text(ax2, 650, 537, 'Face 1 & 3 (Worker 1: NCRISC): Checks 529..544 [3 Slices \times 256 B]', ...
+text(ax2, 650, 537, 'Face 1 & 3 (Worker 1: NCRISC): Checks 529..544 [3 Slices \times 128 B = 384 B]', ...
     'Color', col_f1, 'FontSize', 15.0, 'FontWeight', 'bold', 'BackgroundColor', [0.04 0.05 0.09], 'Margin', 4);
 
 set(ax2, 'YDir', 'reverse', 'XLim', [0.5, 2560.5], 'YLim', [t1_r_start - 0.5, t1_r_end + 0.5], ...
@@ -322,29 +322,25 @@ text(ax_d, 0.05, 0.965, '1. THE HARDWARE-CODE MATCH', ...
     'Color', [0.0 0.85 1.0], 'FontSize', 19.0, 'FontWeight', 'bold');
 line(ax_d, [0.05, 0.95], [0.938, 0.938], 'Color', [0.22 0.32 0.50], 'LineWidth', 1.2);
 
-% --- Visual 1: 8-Codeword Packed Interleaving (16 Bytes/Node) ---
-text(ax_d, 0.05, 0.902, 'VARIABLE NODE MEMORY FORMAT (8 Codewords SIMD):', ...
+% --- Visual 1: 4-Codeword Packed Quartet (8 Bytes/Node) ---
+text(ax_d, 0.05, 0.902, 'VARIABLE NODE MEMORY FORMAT (4 Codewords SIMD Quartet):', ...
     'Color', [1 1 1], 'FontSize', 16.5, 'FontWeight', 'bold');
 
 cw_colors = [
-    0.20, 0.60, 1.00;
-    0.15, 0.70, 0.95;
-    0.10, 0.80, 0.80;
-    0.05, 0.85, 0.60;
-    0.10, 0.90, 0.40;
-    0.40, 0.85, 0.20;
-    0.70, 0.80, 0.10;
-    0.95, 0.75, 0.05
+    0.00, 0.85, 1.00;  % Cyan (CW0)
+    1.00, 0.60, 0.05;  % Orange (CW1)
+    0.88, 0.25, 1.00;  % Magenta (CW2)
+    0.00, 0.95, 0.50   % Emerald Green (CW3)
 ];
-w_cw = 0.105;
-for cwi = 1:8
-    x_cw = 0.05 + (cwi - 1) * 0.112;
+w_cw = 0.210;
+for cwi = 1:4
+    x_cw = 0.05 + (cwi - 1) * 0.228;
     rectangle(ax_d, 'Position', [x_cw, 0.820, w_cw, 0.056], 'FaceColor', cw_colors(cwi, :), ...
-        'EdgeColor', [1 1 1], 'LineWidth', 0.8, 'Curvature', [0.15, 0.15]);
+        'EdgeColor', [1 1 1], 'LineWidth', 1.0, 'Curvature', [0.15, 0.15]);
     text(ax_d, x_cw + w_cw/2, 0.848, sprintf('CW%d', cwi-1), 'Color', [0 0 0], ...
-        'FontSize', 16.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+        'FontSize', 17.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 end
-text(ax_d, 0.05, 0.776, '1 Variable Node = 8 \times bfloat16 = 16 BYTES TOTAL', ...
+text(ax_d, 0.05, 0.776, '1 Variable Node = 4 \times bfloat16 = 8 BYTES TOTAL (64 BITS)', ...
     'Color', [0.85 0.90 1.0], 'FontSize', 15.5, 'FontWeight', 'bold');
 
 % --- Visual 2: The 16-Variable Contiguous Circulant Slice ---
@@ -367,10 +363,10 @@ text(ax_d, 0.735, 0.665, 'v_{15}', 'Color', [0.0 0.85 1.0], ...
 
 rectangle(ax_d, 'Position', [0.82, 0.630, 0.13, 0.068], 'FaceColor', [0.15 0.25 0.18], ...
     'EdgeColor', [0.0 0.95 0.5], 'LineWidth', 1.3, 'Curvature', [0.1, 0.1]);
-text(ax_d, 0.885, 0.670, '256 B', 'Color', [0.0 0.95 0.5], 'FontSize', 17.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+text(ax_d, 0.885, 0.670, '128 B', 'Color', [0.0 0.95 0.5], 'FontSize', 17.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 text(ax_d, 0.885, 0.645, 'Slice', 'Color', [0.8 1 0.8], 'FontSize', 14.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
-text(ax_d, 0.05, 0.598, '16 Nodes \times 16 Bytes = 256 BYTES CONTIGUOUS MEMORY', ...
+text(ax_d, 0.05, 0.598, '16 Nodes \times 8 Bytes = 128 BYTES CONTIGUOUS MEMORY', ...
     'Color', [0.0 0.95 0.5], 'FontSize', 15.5, 'FontWeight', 'bold');
 
 % --- Visual 3: The 512-bit DMA Superhighway Conduit ---
@@ -387,7 +383,7 @@ end
 
 rectangle(ax_d, 'Position', [0.06, 0.410, 0.88, 0.048], 'FaceColor', [0.04 0.08 0.10], ...
     'EdgeColor', [1.0 0.85 0.2], 'LineWidth', 1.2, 'Curvature', [0.08, 0.08]);
-text(ax_d, 0.50, 0.434, 'BURST FORMULA:  256 Bytes \div 64 Bytes/cycle  =  4 CLOCK CYCLES!', ...
+text(ax_d, 0.50, 0.434, 'BURST FORMULA:  128 Bytes \div 64 Bytes/cycle  =  2 CLOCK CYCLES!', ...
     'Color', [1.0 0.90 0.20], 'FontSize', 15.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
 % --- Visual 4: Summary Card for Face & Tile Memory Bursts ---
@@ -410,10 +406,10 @@ text(ax_d, 0.085, 0.232, 'Slices per Face:', 'Color', [0.85 0.90 1.0], 'FontSize
 text(ax_d, 0.085, 0.204, '3 Contiguous (48 Edges)', 'Color', [0.0 0.95 0.5], 'FontSize', 15.0, 'FontWeight', 'bold');
 
 text(ax_d, 0.085, 0.160, 'Data Volume per Face:', 'Color', [0.85 0.90 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_d, 0.085, 0.132, '3 \times 256 B = 768 Bytes', 'Color', [0.0 0.95 0.5], 'FontSize', 15.0, 'FontWeight', 'bold');
+text(ax_d, 0.085, 0.132, '3 \times 128 B = 384 Bytes', 'Color', [0.0 0.95 0.5], 'FontSize', 15.0, 'FontWeight', 'bold');
 
 text(ax_d, 0.085, 0.088, 'DMA Burst Latency:', 'Color', [0.85 0.90 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_d, 0.085, 0.060, '3 \times 4 cyc = 12 Clock Cycles', 'Color', [1.0 0.85 0.2], 'FontSize', 15.0, 'FontWeight', 'bold');
+text(ax_d, 0.085, 0.060, '3 \times 2 cyc = 6 Clock Cycles', 'Color', [1.0 0.85 0.2], 'FontSize', 15.0, 'FontWeight', 'bold');
 
 % Sub-Card 2: Per-Tile Concurrency (Right side)
 rectangle(ax_d, 'Position', [0.515, 0.048, 0.420, 0.258], 'FaceColor', [0.07 0.12 0.14], ...
@@ -424,13 +420,13 @@ text(ax_d, 0.725, 0.286, 'PER-TILE TOTALS (32 Lanes)', 'Color', [0.00 0.95 0.50]
     'FontSize', 15.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
 text(ax_d, 0.535, 0.232, 'Total Slices per Tile:', 'Color', [0.85 0.90 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_d, 0.535, 0.204, '6 Slices (1,536 Bytes)', 'Color', [0.0 0.95 0.5], 'FontSize', 15.0, 'FontWeight', 'bold');
+text(ax_d, 0.535, 0.204, '6 Slices (768 Bytes)', 'Color', [0.0 0.95 0.5], 'FontSize', 15.0, 'FontWeight', 'bold');
 
 text(ax_d, 0.535, 0.160, 'Parallel DMA Couriers:', 'Color', [0.85 0.90 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
 text(ax_d, 0.535, 0.132, '2 Workers (BRISC & NCRISC)', 'Color', [0.0 0.95 0.5], 'FontSize', 15.0, 'FontWeight', 'bold');
 
 text(ax_d, 0.535, 0.088, 'Total Gather & Scatter:', 'Color', [0.85 0.90 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_d, 0.535, 0.060, '24 Clock Cycles (Overlapped)', 'Color', [1.0 0.85 0.2], 'FontSize', 15.0, 'FontWeight', 'bold');
+text(ax_d, 0.535, 0.060, '12 Clock Cycles (Overlapped)', 'Color', [1.0 0.85 0.2], 'FontSize', 15.0, 'FontWeight', 'bold');
 
 
 % -------------------------------------------------------------------------
@@ -456,14 +452,14 @@ rectangle(ax_e, 'Position', [0.045, 0.740, 0.440, 0.145], 'FaceColor', [0.07 0.1
     'EdgeColor', col_f0, 'LineWidth', 1.4, 'Curvature', [0.06, 0.06]);
 text(ax_e, 0.070, 0.845, 'WORKER 0: BRISC', 'Color', col_f0, 'FontSize', 18.0, 'FontWeight', 'bold');
 text(ax_e, 0.070, 0.795, '\bullet Streams Face 0 & Face 2 (16 Lanes)', 'Color', [0.85 0.90 0.98], 'FontSize', 14.5, 'FontWeight', 'bold');
-text(ax_e, 0.070, 0.755, '\bullet 3 Slices \times 256 B = 768 B (12 cyc)', 'Color', [0.0 0.95 0.5], 'FontSize', 14.5, 'FontWeight', 'bold');
+text(ax_e, 0.070, 0.755, '\bullet 3 Slices \times 128 B = 384 B (6 cyc)', 'Color', [0.0 0.95 0.5], 'FontSize', 14.5, 'FontWeight', 'bold');
 
 % Worker 1 (NCRISC) Card
 rectangle(ax_e, 'Position', [0.515, 0.740, 0.440, 0.145], 'FaceColor', [0.07 0.11 0.18], ...
     'EdgeColor', col_f1, 'LineWidth', 1.4, 'Curvature', [0.06, 0.06]);
 text(ax_e, 0.540, 0.845, 'WORKER 1: NCRISC', 'Color', col_f1, 'FontSize', 18.0, 'FontWeight', 'bold');
 text(ax_e, 0.540, 0.795, '\bullet Streams Face 1 & Face 3 (16 Lanes)', 'Color', [0.85 0.90 0.98], 'FontSize', 14.5, 'FontWeight', 'bold');
-text(ax_e, 0.540, 0.755, '\bullet 3 Slices \times 256 B = 768 B (12 cyc)', 'Color', [0.0 0.95 0.5], 'FontSize', 14.5, 'FontWeight', 'bold');
+text(ax_e, 0.540, 0.755, '\bullet 3 Slices \times 128 B = 384 B (6 cyc)', 'Color', [0.0 0.95 0.5], 'FontSize', 14.5, 'FontWeight', 'bold');
 
 % --- Compute Engine: TRISC Tri-Core & 32-Lane SFPU ---
 text(ax_e, 0.05, 0.680, 'COMPUTE ENGINE (32-Lane SIMD Vector SFPU Turbine):', ...
@@ -512,39 +508,39 @@ rectangle(ax_e, 'Position', [0.065, 0.295, 0.870, 0.058], 'FaceColor', [0.08 0.1
 text(ax_e, 0.50, 0.324, 'ACTIVE MATH TIME: 912 CYCLES / TILE (All 4 Faces in Parallel)', ...
     'Color', [0.0 0.95 0.5], 'FontSize', 16.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
-% --- Hardware Invariant Box: Two-Card Architecture ---
+% --- Hardware Breakthrough Box: Zero-Transpose SIMD & Lockstep DMA ---
 rectangle(ax_e, 'Position', [0.045, 0.035, 0.910, 0.230], 'FaceColor', [0.07 0.08 0.13], ...
-    'EdgeColor', [0.85 0.25 0.25], 'LineWidth', 1.4, 'Curvature', [0.04, 0.04]);
+    'EdgeColor', [0.00 0.85 1.00], 'LineWidth', 1.4, 'Curvature', [0.04, 0.04]);
 
-% Crimson Title Banner across top
-rectangle(ax_e, 'Position', [0.045, 0.222, 0.910, 0.043], 'FaceColor', [0.22 0.06 0.08], ...
-    'EdgeColor', [0.85 0.25 0.25], 'LineWidth', 1.0, 'Curvature', [0.08, 0.08]);
-text(ax_e, 0.50, 0.243, 'HARDWARE INVARIANT: Zero-Live-LReg Rule for SFPTRANSP', ...
-    'Color', [1.0 0.65 0.65], 'FontSize', 17.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+% Title Banner across top
+rectangle(ax_e, 'Position', [0.045, 0.222, 0.910, 0.043], 'FaceColor', [0.06 0.15 0.24], ...
+    'EdgeColor', [0.00 0.85 1.00], 'LineWidth', 1.0, 'Curvature', [0.08, 0.08]);
+text(ax_e, 0.50, 0.243, 'HARDWARE INVARIANTS: Zero-Transpose SIMD & Lockstep DMA', ...
+    'Color', [0.00 0.95 0.95], 'FontSize', 17.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
-% Sub-Card 1: The Hardware Hazard (Left side)
-rectangle(ax_e, 'Position', [0.060, 0.048, 0.430, 0.162], 'FaceColor', [0.12 0.06 0.08], ...
-    'EdgeColor', [0.85 0.25 0.25], 'LineWidth', 1.2, 'Curvature', [0.06, 0.06]);
-rectangle(ax_e, 'Position', [0.060, 0.172, 0.430, 0.038], 'FaceColor', [0.25 0.08 0.10], ...
-    'EdgeColor', [0.85 0.25 0.25], 'LineWidth', 0.8, 'Curvature', [0.08, 0.08]);
-text(ax_e, 0.275, 0.191, 'THE HARDWARE HAZARD', 'Color', [1.0 0.55 0.55], ...
-    'FontSize', 15.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+% Sub-Card 1: Zero-Transpose Vertical SIMD Math (Left side)
+rectangle(ax_e, 'Position', [0.060, 0.048, 0.430, 0.162], 'FaceColor', [0.06 0.12 0.18], ...
+    'EdgeColor', [0.00 0.85 1.00], 'LineWidth', 1.2, 'Curvature', [0.06, 0.06]);
+rectangle(ax_e, 'Position', [0.060, 0.172, 0.430, 0.038], 'FaceColor', [0.08 0.18 0.26], ...
+    'EdgeColor', [0.00 0.85 1.00], 'LineWidth', 0.8, 'Curvature', [0.08, 0.08]);
+text(ax_e, 0.275, 0.191, 'ZERO-TRANSPOSE VERTICAL SIMD', 'Color', [0.00 0.85 1.00], ...
+    'FontSize', 14.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
-text(ax_e, 0.075, 0.142, '\bullet Crossbar hardwires to L0..L3', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_e, 0.075, 0.102, '\bullet HW clobbers staging latches L4..L7', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_e, 0.075, 0.062, '\bullet GCC compiler blind to clobber', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
+text(ax_e, 0.075, 0.142, '\bullet Edges 0..2 (Face 0) & 3..5 (Face 2)', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
+text(ax_e, 0.075, 0.102, '\bullet Pure vertical column vector math', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
+text(ax_e, 0.075, 0.062, '\bullet 100% of SFPTRANSP eliminated!', 'Color', [0.0 0.95 0.5], 'FontSize', 14.0, 'FontWeight', 'bold');
 
-% Sub-Card 2: The Architectural Invariant (Right side)
+% Sub-Card 2: Strict Lockstep & Convergence Latching (Right side)
 rectangle(ax_e, 'Position', [0.510, 0.048, 0.430, 0.162], 'FaceColor', [0.06 0.14 0.10], ...
     'EdgeColor', [0.00 0.95 0.50], 'LineWidth', 1.2, 'Curvature', [0.06, 0.06]);
 rectangle(ax_e, 'Position', [0.510, 0.172, 0.430, 0.038], 'FaceColor', [0.08 0.22 0.14], ...
     'EdgeColor', [0.00 0.95 0.50], 'LineWidth', 0.8, 'Curvature', [0.08, 0.08]);
-text(ax_e, 0.725, 0.191, 'THE ZERO-LIVE-LREG RULE', 'Color', [0.00 0.95 0.50], ...
-    'FontSize', 15.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+text(ax_e, 0.725, 0.191, 'LOCKSTEP & CONVERGENCE LATCH', 'Color', [0.00 0.95 0.50], ...
+    'FontSize', 14.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
-text(ax_e, 0.525, 0.142, '\bullet Stage intermediate sums in DEST', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_e, 0.525, 0.102, '\bullet Zero live vFloat across SFPTRANSP', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
-text(ax_e, 0.525, 0.062, '\bullet 100% Bit-Exact Silicon Stability!', 'Color', [0.0 0.95 0.5], 'FontSize', 14.0, 'FontWeight', 'bold');
+text(ax_e, 0.525, 0.142, '\bullet Sequential Gather \rightarrow Math \rightarrow Scatter', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
+text(ax_e, 0.525, 0.102, '\bullet Blind DMA scatter across 4 CW', 'Color', [0.92 0.94 1.0], 'FontSize', 14.0, 'FontWeight', 'bold');
+text(ax_e, 0.525, 0.062, '\bullet Zero RAW hazards; 94.2% Duty Cycle!', 'Color', [0.0 0.95 0.5], 'FontSize', 14.0, 'FontWeight', 'bold');
 
 
 % -------------------------------------------------------------------------
@@ -570,12 +566,12 @@ rectangle(ax_f, 'Position', [0.05, 0.792, 0.90 * 0.268, 0.044], 'FaceColor', [0.
 text(ax_f, 0.17, 0.814, '26.8% Compute', 'Color', [1 1 1], 'FontSize', 16.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 text(ax_f, 0.62, 0.814, '73.2% MEMORY STALL', 'Color', [1.0 0.7 0.7], 'FontSize', 16.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
-text(ax_f, 0.05, 0.748, 'Circulant 512-bit DMA: 976 cyc', 'Color', [0.0 0.95 0.5], 'FontSize', 17.5, 'FontWeight', 'bold');
+text(ax_f, 0.05, 0.748, 'Circulant 512-bit DMA: 968 cyc', 'Color', [0.0 0.95 0.5], 'FontSize', 17.5, 'FontWeight', 'bold');
 rectangle(ax_f, 'Position', [0.05, 0.690, 0.90, 0.044], 'FaceColor', [0.20 0.25 0.35], 'EdgeColor', 'none', 'Curvature', [0.2, 0.2]);
-rectangle(ax_f, 'Position', [0.05, 0.690, 0.90 * 0.934, 0.044], 'FaceColor', [0.00 0.95 0.50], 'EdgeColor', 'none', 'Curvature', [0.2, 0.2]);
-text(ax_f, 0.50, 0.712, '93.4% ACTIVE SFPU COMPUTE!', 'Color', [0 0 0], 'FontSize', 16.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
+rectangle(ax_f, 'Position', [0.05, 0.690, 0.90 * 0.942, 0.044], 'FaceColor', [0.00 0.95 0.50], 'EdgeColor', 'none', 'Curvature', [0.2, 0.2]);
+text(ax_f, 0.50, 0.712, '94.2% ACTIVE SFPU COMPUTE!', 'Color', [0 0 0], 'FontSize', 16.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'middle');
 
-text(ax_f, 0.05, 0.655, '\Delta 24-cycle DMA 100% submerged in compute!', 'Color', [0.0 0.95 0.5], 'FontSize', 17.0, 'FontWeight', 'bold');
+text(ax_f, 0.05, 0.655, '\Delta 12-cycle DMA 100% submerged in lockstep!', 'Color', [0.0 0.95 0.5], 'FontSize', 17.0, 'FontWeight', 'bold');
 
 line(ax_f, [0.05, 0.95], [0.630, 0.630], 'Color', [0.22 0.32 0.50], 'LineWidth', 1.0);
 
@@ -612,15 +608,15 @@ text(ax_f, 0.50, 0.388, 'TOTAL: 440 TENSIX CORES IN 2x2 MESH', ...
 % --- Big Impact Performance Badges ---
 rectangle(ax_f, 'Position', [0.05, 0.210, 0.90, 0.140], 'FaceColor', [0.08 0.16 0.14], ...
     'EdgeColor', [0.0 0.95 0.5], 'LineWidth', 1.8, 'Curvature', [0.06, 0.06]);
-text(ax_f, 0.50, 0.316, 'SUSTAINED MESH THROUGHPUT', 'Color', [0.8 1.0 0.9], 'FontSize', 18.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
-text(ax_f, 0.50, 0.268, '26.1 Gsps', 'Color', [0.0 0.95 0.5], 'FontSize', 38.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
-text(ax_f, 0.50, 0.230, '13.05 Gbps Information Bit Rate (Rate-1/2)', 'Color', [0.85 0.92 1.0], 'FontSize', 17.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+text(ax_f, 0.50, 0.316, 'SUSTAINED MESH THROUGHPUT', 'Color', [0.8 1.0 0.9], 'FontSize', 17.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+text(ax_f, 0.50, 0.268, '4.91 Gsps', 'Color', [0.0 0.95 0.5], 'FontSize', 38.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+text(ax_f, 0.50, 0.230, '2.46 Gbps Information Bit Rate (Rate-1/2)', 'Color', [0.85 0.92 1.0], 'FontSize', 16.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
 
 rectangle(ax_f, 'Position', [0.05, 0.045, 0.90, 0.145], 'FaceColor', [0.15 0.12 0.24], ...
     'EdgeColor', [0.85 0.25 1.0], 'LineWidth', 1.8, 'Curvature', [0.06, 0.06]);
-text(ax_f, 0.50, 0.156, 'NET HARDWARE ACCELERATION', 'Color', [0.9 0.8 1.0], 'FontSize', 18.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
-text(ax_f, 0.50, 0.108, '13.8x MULTIPLIER', 'Color', [0.90 0.35 1.0], 'FontSize', 38.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
-text(ax_f, 0.50, 0.068, 'vs Current Scalar Pointer Chasing Baseline', 'Color', [0.85 0.90 0.98], 'FontSize', 17.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+text(ax_f, 0.50, 0.156, 'NET HARDWARE ACCELERATION', 'Color', [0.9 0.8 1.0], 'FontSize', 17.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+text(ax_f, 0.50, 0.108, '29.5x MULTIPLIER', 'Color', [0.90 0.35 1.0], 'FontSize', 38.0, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+text(ax_f, 0.50, 0.068, 'vs Verified 5-Worker Scalar Baseline (166 Msps)', 'Color', [0.85 0.90 0.98], 'FontSize', 15.5, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
 
 % -------------------------------------------------------------------------
 % 3. Export Polished Figure (Widescreen Unconstrained Canvas - No Letter Paper Constraint!)
