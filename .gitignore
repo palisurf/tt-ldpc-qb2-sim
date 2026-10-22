@@ -49,10 +49,10 @@ Results/**/*.log
 Results/*backup*/
 Results/Scalar_5w/
 tests/Results/
-**/Results/
 *.png
 
 # Whitelist validation artifacts for BPSK noise benchmark
+!Results/
 !Results/results_uncoded_bpsk_awgn.csv
 !Results/uncoded_bpsk_waterfall.png
 !Results/combined_ar4ja_r12_waterfall_iter200.png
