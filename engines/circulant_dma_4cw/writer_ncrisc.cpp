@@ -94,7 +94,7 @@ void kernel_main() {
     uint32_t stage_scatter_acc = 0;
     uint32_t stage_total_acc = 0;
 
-    uint32_t max_steps = max_iter * num_tiles;
+    uint32_t max_steps = (diff_test_mode > 0) ? diff_test_mode : (max_iter * num_tiles);
 
     uint32_t first_failing_batch = 0xFFFFFFFF;
     uint32_t first_failing_cw    = 0xFFFFFFFF;

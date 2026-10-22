@@ -112,6 +112,12 @@ inline void compute_tile_deg6_sfpi(
     const int w_low_bases[2]  = {0, 8};   // Face 0, Face 1
     const int w_high_bases[2] = {16, 24}; // Face 2, Face 3
 
+    if (iter != 0) {
+        for (int r = 0; r < 32; ++r) {
+            sfpi::dst_reg[r] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r]) - sfpi::vFloat(sfpi::dst_reg[32 + r]));
+        }
+    }
+
     for (int w = 0; w < 2; ++w) {
         int f_low  = w_low_bases[w];
         int f_high = w_high_bases[w];
@@ -123,16 +129,6 @@ inline void compute_tile_deg6_sfpi(
             int r4 = f_high + 2 + sub; // Edge 4
             int r2 = f_low  + 4 + sub; // Edge 2
             int r5 = f_high + 4 + sub; // Edge 5
-
-            // Stage 0: Q = L - R_old in-place in Tile 0 (iter > 0)
-            if (iter != 0) {
-                sfpi::dst_reg[r0] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r0]) - sfpi::vFloat(sfpi::dst_reg[32 + r0]));
-                sfpi::dst_reg[r3] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r3]) - sfpi::vFloat(sfpi::dst_reg[32 + r3]));
-                sfpi::dst_reg[r1] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r1]) - sfpi::vFloat(sfpi::dst_reg[32 + r1]));
-                sfpi::dst_reg[r4] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r4]) - sfpi::vFloat(sfpi::dst_reg[32 + r4]));
-                sfpi::dst_reg[r2] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r2]) - sfpi::vFloat(sfpi::dst_reg[32 + r2]));
-                sfpi::dst_reg[r5] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r5]) - sfpi::vFloat(sfpi::dst_reg[32 + r5]));
-            }
 
             sfpi::vFloat q0 = sfpi::dst_reg[r0];
             sfpi::vFloat q3 = sfpi::dst_reg[r3];
@@ -156,59 +152,100 @@ inline void compute_tile_deg6_sfpi(
             sfpi::vInt s2 = sfpi::as<sfpi::vInt>(q2);
             sfpi::vInt s5 = sfpi::as<sfpi::vInt>(q5);
 
-            // Native 1-Cycle Integer XOR Sign Parity
-            sfpi::vInt s_tot = ((s0 ^ s3) ^ (s1 ^ s4)) ^ (s2 ^ s5);
-
-            // Pairwise Tree Approximate-Min*
-            sfpi::vFloat m03 = sfpi::sfpi_amin_star_branchless(m0, m3);
-            sfpi::vFloat m14 = sfpi::sfpi_amin_star_branchless(m1, m4);
-            sfpi::vFloat m25 = sfpi::sfpi_amin_star_branchless(m2, m5);
-
-            sfpi::vFloat m_oth0 = sfpi::sfpi_amin_star_branchless(m14, m25);
-            sfpi::vFloat m_oth1 = sfpi::sfpi_amin_star_branchless(m03, m25);
-            sfpi::vFloat m_oth2 = sfpi::sfpi_amin_star_branchless(m03, m14);
-
-            sfpi::vFloat r_mag0 = sfpi::sfpi_amin_star_branchless(m_oth0, m3);
-            sfpi::vFloat r_mag3 = sfpi::sfpi_amin_star_branchless(m_oth0, m0);
-            sfpi::vFloat r_mag1 = sfpi::sfpi_amin_star_branchless(m_oth1, m4);
-            sfpi::vFloat r_mag4 = sfpi::sfpi_amin_star_branchless(m_oth1, m1);
-            sfpi::vFloat r_mag2 = sfpi::sfpi_amin_star_branchless(m_oth2, m5);
-            sfpi::vFloat r_mag5 = sfpi::sfpi_amin_star_branchless(m_oth2, m2);
-
-            if (damping_factor < 1.0f) {
-                r_mag0 = r_mag0 * damping_factor;
-                r_mag3 = r_mag3 * damping_factor;
-                r_mag1 = r_mag1 * damping_factor;
-                r_mag4 = r_mag4 * damping_factor;
-                r_mag2 = r_mag2 * damping_factor;
-                r_mag5 = r_mag5 * damping_factor;
+            int sc0 = f_low + 6;
+            // Native 1-Cycle Integer XOR Sign Parity -> stored in dst_reg[sc0]
+            {
+                sfpi::vInt s0 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r0]));
+                sfpi::vInt s3 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r3]));
+                sfpi::vInt s1 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r1]));
+                sfpi::vInt s4 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r4]));
+                sfpi::vInt s2 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r2]));
+                sfpi::vInt s5 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r5]));
+                sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>(((s0 ^ s3) ^ (s1 ^ s4)) ^ (s2 ^ s5));
             }
 
-            sfpi::vFloat r_out0 = sfpi::round_bf16(sfpi::copysgn(r_mag0, s_tot ^ s0));
-            sfpi::vFloat r_out3 = sfpi::round_bf16(sfpi::copysgn(r_mag3, s_tot ^ s3));
-            sfpi::vFloat r_out1 = sfpi::round_bf16(sfpi::copysgn(r_mag1, s_tot ^ s1));
-            sfpi::vFloat r_out4 = sfpi::round_bf16(sfpi::copysgn(r_mag4, s_tot ^ s4));
-            sfpi::vFloat r_out2 = sfpi::round_bf16(sfpi::copysgn(r_mag2, s_tot ^ s2));
-            sfpi::vFloat r_out5 = sfpi::round_bf16(sfpi::copysgn(r_mag5, s_tot ^ s5));
+            // Step 1: Compute all 3 pairwise checks into transient FP32 LRegs
+            sfpi::vFloat m03 = sfpi::sfpi_amin_star_branchless(sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0])),
+                                                               sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r3])));
+            sfpi::vFloat m14 = sfpi::sfpi_amin_star_branchless(sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1])),
+                                                               sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r4])));
+            sfpi::vFloat m25 = sfpi::sfpi_amin_star_branchless(sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2])),
+                                                               sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r5])));
 
-            // Writeback R_new to Tile 0, L_new to Tile 1
-            sfpi::dst_reg[32 + r0] = sfpi::round_bf16(q0 + r_out0);
-            sfpi::dst_reg[r0]      = r_out0;
+            // Step 2: Edge pair (0, 3) using m_oth0 = min*(m14, m25)
+            {
+                sfpi::vFloat m_oth0 = sfpi::sfpi_amin_star_branchless(m14, m25);
+                sfpi::vFloat r_mag0 = sfpi::sfpi_amin_star_branchless(m_oth0, sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r3]))) * damping_factor;
+                sfpi::vFloat r_mag3 = sfpi::sfpi_amin_star_branchless(m_oth0, sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]))) * damping_factor;
 
-            sfpi::dst_reg[32 + r3] = sfpi::round_bf16(q3 + r_out3);
-            sfpi::dst_reg[r3]      = r_out3;
+                // Finish Edge 0:
+                {
+                    sfpi::vFloat q0 = sfpi::dst_reg[r0];
+                    sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+                    sfpi::vFloat r_out0 = sfpi::round_bf16(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
+                    sfpi::dst_reg[32 + r0] = sfpi::round_bf16(q0 + r_out0);
+                    sfpi::dst_reg[r0]      = r_out0;
+                }
 
-            sfpi::dst_reg[32 + r1] = sfpi::round_bf16(q1 + r_out1);
-            sfpi::dst_reg[r1]      = r_out1;
+                // Finish Edge 3:
+                {
+                    sfpi::vFloat q3 = sfpi::dst_reg[r3];
+                    sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+                    sfpi::vFloat r_out3 = sfpi::round_bf16(sfpi::copysgn(r_mag3, s_tot ^ sfpi::as<sfpi::vInt>(q3)));
+                    sfpi::dst_reg[32 + r3] = sfpi::round_bf16(q3 + r_out3);
+                    sfpi::dst_reg[r3]      = r_out3;
+                }
+            }
 
-            sfpi::dst_reg[32 + r4] = sfpi::round_bf16(q4 + r_out4);
-            sfpi::dst_reg[r4]      = r_out4;
+            // Step 3: Edge pair (1, 4) using m_oth1 = min*(m03, m25). m25 dies!
+            {
+                sfpi::vFloat m_oth1 = sfpi::sfpi_amin_star_branchless(m03, m25);
+                sfpi::vFloat r_mag1 = sfpi::sfpi_amin_star_branchless(m_oth1, sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r4]))) * damping_factor;
+                sfpi::vFloat r_mag4 = sfpi::sfpi_amin_star_branchless(m_oth1, sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]))) * damping_factor;
 
-            sfpi::dst_reg[32 + r2] = sfpi::round_bf16(q2 + r_out2);
-            sfpi::dst_reg[r2]      = r_out2;
+                // Finish Edge 1:
+                {
+                    sfpi::vFloat q1 = sfpi::dst_reg[r1];
+                    sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+                    sfpi::vFloat r_out1 = sfpi::round_bf16(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
+                    sfpi::dst_reg[32 + r1] = sfpi::round_bf16(q1 + r_out1);
+                    sfpi::dst_reg[r1]      = r_out1;
+                }
 
-            sfpi::dst_reg[32 + r5] = sfpi::round_bf16(q5 + r_out5);
-            sfpi::dst_reg[r5]      = r_out5;
+                // Finish Edge 4:
+                {
+                    sfpi::vFloat q4 = sfpi::dst_reg[r4];
+                    sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+                    sfpi::vFloat r_out4 = sfpi::round_bf16(sfpi::copysgn(r_mag4, s_tot ^ sfpi::as<sfpi::vInt>(q4)));
+                    sfpi::dst_reg[32 + r4] = sfpi::round_bf16(q4 + r_out4);
+                    sfpi::dst_reg[r4]      = r_out4;
+                }
+            }
+
+            // Step 4: Edge pair (2, 5) using m_oth2 = min*(m03, m14). Both m03 and m14 die!
+            {
+                sfpi::vFloat m_oth2 = sfpi::sfpi_amin_star_branchless(m03, m14);
+                sfpi::vFloat r_mag2 = sfpi::sfpi_amin_star_branchless(m_oth2, sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r5]))) * damping_factor;
+                sfpi::vFloat r_mag5 = sfpi::sfpi_amin_star_branchless(m_oth2, sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]))) * damping_factor;
+
+                // Finish Edge 2:
+                {
+                    sfpi::vFloat q2 = sfpi::dst_reg[r2];
+                    sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+                    sfpi::vFloat r_out2 = sfpi::round_bf16(sfpi::copysgn(r_mag2, s_tot ^ sfpi::as<sfpi::vInt>(q2)));
+                    sfpi::dst_reg[32 + r2] = sfpi::round_bf16(q2 + r_out2);
+                    sfpi::dst_reg[r2]      = r_out2;
+                }
+
+                // Finish Edge 5:
+                {
+                    sfpi::vFloat q5 = sfpi::dst_reg[r5];
+                    sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
+                    sfpi::vFloat r_out5 = sfpi::round_bf16(sfpi::copysgn(r_mag5, s_tot ^ sfpi::as<sfpi::vInt>(q5)));
+                    sfpi::dst_reg[32 + r5] = sfpi::round_bf16(q5 + r_out5);
+                    sfpi::dst_reg[r5]      = r_out5;
+                }
+            }
         }
 
         // Zero out unused scratch/padding registers (regs 6, 7 of each face)
@@ -230,6 +267,12 @@ inline void compute_tile_deg3_sfpi(
     uint32_t iter,
     float damping_factor = 1.0f
 ) {
+    if (iter != 0) {
+        for (int r = 0; r < 32; ++r) {
+            sfpi::dst_reg[r] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r]) - sfpi::vFloat(sfpi::dst_reg[32 + r]));
+        }
+    }
+
     const int face_bases[4] = {0, 8, 16, 24};
     for (int f = 0; f < 4; ++f) {
         int base_r = face_bases[f];
@@ -237,12 +280,6 @@ inline void compute_tile_deg3_sfpi(
             int r0 = base_r + 0 + sub;
             int r1 = base_r + 2 + sub;
             int r2 = base_r + 4 + sub;
-
-            if (iter != 0) {
-                sfpi::dst_reg[r0] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r0]) - sfpi::vFloat(sfpi::dst_reg[32 + r0]));
-                sfpi::dst_reg[r1] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r1]) - sfpi::vFloat(sfpi::dst_reg[32 + r1]));
-                sfpi::dst_reg[r2] = sfpi::round_bf16(sfpi::vFloat(sfpi::dst_reg[r2]) - sfpi::vFloat(sfpi::dst_reg[32 + r2]));
-            }
 
             sfpi::vFloat q0 = sfpi::dst_reg[r0];
             sfpi::vFloat q1 = sfpi::dst_reg[r1];
@@ -463,7 +500,8 @@ inline void step_tile_circulant_dma_sfpu(
     TileScratchpad& scratch,
     uint32_t active_mask = 0xF,
     bool passthrough_mode = false,
-    float damping_factor = 1.0f
+    float damping_factor = 1.0f,
+    uint32_t max_steps = 0
 ) {
     bool is_deg6 = (tile_idx < DEG6_TILES);
     char* vnode_base = reinterpret_cast<char*>(vnodes);
@@ -820,13 +858,16 @@ void run_monte_carlo(double ebn0_db, uint64_t max_blocks, uint64_t target_fe, ui
 // ------------------------------------------------------------------------------
 // Step Loaded Channel Noise Dump from Core (0,0) Hardware Execution
 // ------------------------------------------------------------------------------
-bool run_stepper_on_dump(const std::string& dump_path, uint32_t max_iter, bool use_sfpu, float damping_factor = 1.0f) {
+bool run_stepper_on_dump(const std::string& dump_path, uint32_t max_iter, bool use_sfpu, float damping_factor = 0.9375f, uint32_t max_steps = 0) {
     std::cout << "================================================================================" << std::endl;
     std::cout << "STEPPING 4-CODEWORD CIRCULANT DMA ENGINE ON LOADED NOISE DUMP" << std::endl;
     std::cout << "  Input File:     " << dump_path << std::endl;
     std::cout << "  Engine Mode:    " << (use_sfpu ? "SFPU VECTOR (Zero-Transpose)" : "SCALAR") << std::endl;
     std::cout << "  Max Iterations: " << max_iter << std::endl;
     std::cout << "  Damping Factor: " << damping_factor << std::endl;
+    if (max_steps > 0) {
+        std::cout << "  Max Steps:      " << max_steps << " (Tile " << (max_steps % TOTAL_TILES) << ", Iter " << (max_steps / TOTAL_TILES) << ")" << std::endl;
+    }
     std::cout << "================================================================================" << std::endl;
 
     std::ifstream fin(dump_path, std::ios::binary);
@@ -863,16 +904,25 @@ bool run_stepper_on_dump(const std::string& dump_path, uint32_t max_iter, bool u
 
     uint32_t active_mask = 0xF;
     uint32_t cw_conv_iter[4] = {0, 0, 0, 0};
+    uint32_t current_step = 0;
 
     for (uint32_t iter = 0; iter < max_iter; ++iter) {
         bool is_iter0 = (iter == 0);
 
         for (uint32_t t = 0; t < TOTAL_TILES; ++t) {
+            if (max_steps > 0 && current_step >= max_steps) {
+                break;
+            }
             if (use_sfpu) {
-                step_tile_circulant_dma_sfpu(t, vnodes.data(), &r_msg_sfpu[t * 1024], is_iter0, scratch, active_mask, false, damping_factor);
+                step_tile_circulant_dma_sfpu(t, vnodes.data(), &r_msg_sfpu[t * 1024], is_iter0, scratch, active_mask, false, damping_factor, max_steps);
             } else {
                 step_tile_circulant_dma_scalar(t, vnodes.data(), &r_msg_scalar[t * 192], is_iter0, scratch, active_mask, false);
             }
+            current_step++;
+        }
+        if (max_steps > 0 && current_step >= max_steps) {
+            std::cout << "[MAX STEPS REACHED] Stopped at Step " << current_step << " (Tile " << (current_step % TOTAL_TILES) << ", Iter " << (current_step / TOTAL_TILES) << ")" << std::endl;
+            break;
         }
 
         std::cout << "[Iter " << std::setw(2) << iter + 1 << "] Active Mask: 0x" << std::hex << active_mask << std::dec << " | ";
@@ -941,10 +991,12 @@ bool run_stepper_on_dump(const std::string& dump_path, uint32_t max_iter, bool u
 
 int main(int argc, char** argv) {
     bool use_sfpu = false;
+    uint32_t max_steps = 0;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--sfpi") {
             use_sfpu = true;
-            break;
+        } else if (std::string(argv[i]) == "--max-steps" && i + 1 < argc) {
+            max_steps = std::stoul(argv[i + 1]);
         }
     }
 
@@ -960,9 +1012,10 @@ int main(int argc, char** argv) {
 
     if (argc > 1 && (std::string(argv[1]) == "--load-init" || (argc > 2 && std::string(argv[2]) == "--load-init"))) {
         int base_idx = (std::string(argv[1]) == "--load-init") ? 1 : 2;
-        std::string dump_path = (argc > base_idx + 1) ? argv[base_idx + 1] : "tensix_initial_vnodes.bin";
-        uint32_t max_iter = (argc > base_idx + 2) ? std::stoul(argv[base_idx + 2]) : 16;
-        bool pass = run_stepper_on_dump(dump_path, max_iter, use_sfpu);
+        std::string dump_path = (argc > base_idx + 1 && argv[base_idx + 1][0] != '-') ? argv[base_idx + 1] : "tensix_initial_vnodes.bin";
+        uint32_t max_iter = (argc > base_idx + 2 && argv[base_idx + 2][0] != '-') ? std::stoul(argv[base_idx + 2]) : 16;
+        float damping = (argc > base_idx + 3 && argv[base_idx + 3][0] != '-') ? std::stof(argv[base_idx + 3]) : 0.9375f;
+        bool pass = run_stepper_on_dump(dump_path, max_iter, use_sfpu, damping, max_steps);
         return pass ? 0 : 1;
     }
 
@@ -980,7 +1033,7 @@ int main(int argc, char** argv) {
     std::cout << "Usage:" << std::endl;
     std::cout << "  " << argv[0] << " [--sfpi] --passthrough" << std::endl;
     std::cout << "  " << argv[0] << " --compare" << std::endl;
-    std::cout << "  " << argv[0] << " [--sfpi] --load-init [tensix_initial_vnodes.bin] [max_iter]" << std::endl;
+    std::cout << "  " << argv[0] << " [--sfpi] --load-init [tensix_initial_vnodes.bin] [max_iter] [damping] [--max-steps N]" << std::endl;
     std::cout << "  " << argv[0] << " [--sfpi] --monte-carlo [ebn0] [max_blocks] [target_fe] [max_iter] [threads]" << std::endl;
     return 0;
 }

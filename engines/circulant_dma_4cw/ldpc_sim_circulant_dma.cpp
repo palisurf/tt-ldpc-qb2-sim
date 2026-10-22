@@ -80,7 +80,8 @@ int run_circulant_dma_simulation(
     uint32_t invocation_id = 1,
     uint64_t min_fe = 25,
     uint32_t chunk_batches_per_core = 2500,
-    const std::string& csv_filename = ""
+    const std::string& csv_filename = "",
+    uint32_t max_steps_override = 0
 ) {
     if (invocation_id <= 1) {
         invocation_id = get_unique_invocation_id();
@@ -188,7 +189,7 @@ int run_circulant_dma_simulation(
                 uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + local_core * stats_per_core_bytes;
 
                 std::vector<uint32_t> r_args = {
-                    chunk_batches_per_core, max_iterations, num_tiles, invocation_id, global_core_id
+                    chunk_batches_per_core, max_iterations, num_tiles, invocation_id, global_core_id, max_steps_override
                 };
                 SetRuntimeArgs(program, reader, c, r_args);
 
@@ -196,14 +197,14 @@ int run_circulant_dma_simulation(
                     chunk_batches_per_core, max_iterations, num_tiles,
                     core_stats_addr, 0, stats_cb_bytes,
                     mu_u32, sigma_bits, 0x12345678U, invocation_id,
-                    0u, 0u, global_core_id
+                    max_steps_override, 0u, global_core_id
                 };
                 SetRuntimeArgs(program, writer, c, w_args);
 
                 std::vector<uint32_t> c_args = {
                     chunk_batches_per_core, max_iterations, num_tiles,
                     mu_u32, sigma_bits, invocation_id,
-                    0u, 0u, global_core_id
+                    max_steps_override, 0u, global_core_id
                 };
                 SetRuntimeArgs(program, compute, c, c_args);
             }
@@ -280,7 +281,7 @@ int run_circulant_dma_simulation(
                 uint32_t core_stats_addr = static_cast<uint32_t>(stats_dram->address()) + local_core * stats_per_core_bytes;
 
                 std::vector<uint32_t> r_args = {
-                    cur_batches, max_iterations, num_tiles, cur_invocation_id, global_core_id
+                    cur_batches, max_iterations, num_tiles, cur_invocation_id, global_core_id, max_steps_override
                 };
                 SetRuntimeArgs(program, ch.reader, c, r_args);
 
@@ -288,14 +289,14 @@ int run_circulant_dma_simulation(
                     cur_batches, max_iterations, num_tiles,
                     core_stats_addr, 0, stats_cb_bytes,
                     mu_u32, sigma_bits, 0x12345678U, cur_invocation_id,
-                    0u, 0u, global_core_id
+                    max_steps_override, 0u, global_core_id
                 };
                 SetRuntimeArgs(program, ch.writer, c, w_args);
 
                 std::vector<uint32_t> c_args = {
                     cur_batches, max_iterations, num_tiles,
                     mu_u32, sigma_bits, cur_invocation_id,
-                    0u, 0u, global_core_id
+                    max_steps_override, 0u, global_core_id
                 };
                 SetRuntimeArgs(program, ch.compute, c, c_args);
             }
@@ -491,6 +492,7 @@ int main(int argc, char** argv) {
     uint64_t min_fe = 25;
     uint32_t chunk_batches = 2500; // 2,500 batches/core = 10k CWs/core = 4.4M CWs/chunk across 440 cores
     std::string csv_path = "";
+    uint32_t max_steps = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -501,6 +503,7 @@ int main(int argc, char** argv) {
         else if (arg == "--min-fe" && i + 1 < argc) min_fe = std::stoull(argv[++i]);
         else if (arg == "--chunk-batches" && i + 1 < argc) chunk_batches = std::stoul(argv[++i]);
         else if (arg == "--out" && i + 1 < argc) csv_path = argv[++i];
+        else if (arg == "--max-steps" && i + 1 < argc) max_steps = std::stoul(argv[++i]);
     }
 
     if (argc > 1 && argv[1][0] != '-') eb_n0_db = std::stod(argv[1]);
@@ -509,6 +512,6 @@ int main(int argc, char** argv) {
 
     return run_circulant_dma_simulation(
         eb_n0_db, max_blocks, max_iterations, single_core, benchmark, passthrough,
-        1, min_fe, chunk_batches, csv_path
+        1, min_fe, chunk_batches, csv_path, max_steps
     );
 }

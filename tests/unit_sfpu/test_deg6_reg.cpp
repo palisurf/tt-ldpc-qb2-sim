@@ -36,15 +36,15 @@ void test_deg6_subquartet(int p0, int p1, int p2) {
 
   sfpi::vFloat m0 = sfpi::abs(q0);
   sfpi::vFloat m0_sw = sfpi::abs(q0_sw);
-  sfpi::vFloat m01 = round_bf16_fast(sfpi_amin_star_branchless(m0, m0_sw));
+  sfpi::vFloat m01 = sfpi_amin_star_branchless(m0, m0_sw);
 
   sfpi::vFloat m1 = sfpi::abs(q1);
   sfpi::vFloat m1_sw = sfpi::abs(q1_sw);
-  sfpi::vFloat m23 = round_bf16_fast(sfpi_amin_star_branchless(m1, m1_sw));
+  sfpi::vFloat m23 = sfpi_amin_star_branchless(m1, m1_sw);
 
   sfpi::vFloat m2 = sfpi::abs(q2);
   sfpi::vFloat m2_sw = sfpi::abs(q2_sw);
-  sfpi::vFloat m45 = round_bf16_fast(sfpi_amin_star_branchless(m2, m2_sw));
+  sfpi::vFloat m45 = sfpi_amin_star_branchless(m2, m2_sw);
 
   // Edge pair 0
   {

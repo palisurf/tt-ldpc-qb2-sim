@@ -28,6 +28,7 @@ void kernel_main() {
     uint32_t num_tiles     = get_arg_val<uint32_t>(2);
     uint32_t invocation_id = get_arg_val<uint32_t>(3);
     uint32_t core_id       = get_arg_val<uint32_t>(4);
+    uint32_t max_steps_arg = get_arg_val<uint32_t>(5);
     (void)core_id;
 
     if (invocation_id == 0) invocation_id = 1;
@@ -57,7 +58,7 @@ void kernel_main() {
     uint32_t cycles_gather = 0;
     uint32_t cycles_scatter = 0;
     uint32_t cycles_brisc_wait = 0;
-    uint32_t max_steps = max_iter * num_tiles;
+    uint32_t max_steps = (max_steps_arg > 0) ? max_steps_arg : (max_iter * num_tiles);
 
     for (uint32_t batch = 0; batch < num_batches; ++batch) {
         // Tri-core batch rendezvous barrier

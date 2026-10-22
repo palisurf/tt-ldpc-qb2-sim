@@ -110,8 +110,14 @@ sfpi_inline sfpi::vFloat round_bf16_rne(sfpi::vFloat val) {
 }
 #define round_bf16(v) round_bf16_rne(v)
 
+// Fast RNE for values written directly to 16-bit DEST (sfpstore drops bits [15:0] in hardware).
+// Saves 2 instructions per round (sfploadi and sfpand).
 sfpi_inline sfpi::vFloat round_bf16_fast(sfpi::vFloat val) {
-  return round_bf16_rne(val);
+  sfpi::vUInt u = sfpi::as<sfpi::vUInt>(val);
+  sfpi::vUInt lsb = (u >> 16) & 1U;
+  sfpi::vUInt bias = lsb + 0x7FFFU;
+  u += bias;
+  return sfpi::as<sfpi::vFloat>(u);
 }
 
 
@@ -296,7 +302,8 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
                                                      uint32_t cb_out,
                                                      uint32_t cb_r_msg,
                                                      uint32_t iter,
-                                                     volatile uint32_t* sync_flags) {
+                                                     volatile uint32_t* sync_flags,
+                                                     uint32_t diff_test_mode = 0) {
   volatile uint32_t *const wall_clock_reg = reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
 
   if (iter == 0) {
@@ -406,11 +413,11 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q3)) * v_damping;
         sfpi::vFloat q0 = sfpi::dst_reg[r0];
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
-        sfpi::vFloat r_out0 = round_bf16(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
+        sfpi::vFloat r_out0 = round_bf16_fast(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
         sfpi::dst_reg[32 + r0] = round_bf16_fast(q0 + r_out0);
 
         sfpi::vFloat r_mag3 = sfpi_amin_star_branchless(m_oth0, sfpi::abs(q0)) * v_damping;
-        sfpi::vFloat r_out3 = round_bf16(sfpi::copysgn(r_mag3, s_tot ^ sfpi::as<sfpi::vInt>(q3)));
+        sfpi::vFloat r_out3 = round_bf16_fast(sfpi::copysgn(r_mag3, s_tot ^ sfpi::as<sfpi::vInt>(q3)));
         sfpi::dst_reg[32 + r3] = round_bf16_fast(q3 + r_out3);
 
         sfpi::dst_reg[r0] = r_out0;
@@ -425,11 +432,11 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::vFloat r_mag1 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q4)) * v_damping;
         sfpi::vFloat q1 = sfpi::dst_reg[r1];
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
-        sfpi::vFloat r_out1 = round_bf16(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
+        sfpi::vFloat r_out1 = round_bf16_fast(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
         sfpi::dst_reg[32 + r1] = round_bf16_fast(q1 + r_out1);
 
         sfpi::vFloat r_mag4 = sfpi_amin_star_branchless(m_oth1, sfpi::abs(q1)) * v_damping;
-        sfpi::vFloat r_out4 = round_bf16(sfpi::copysgn(r_mag4, s_tot ^ sfpi::as<sfpi::vInt>(q4)));
+        sfpi::vFloat r_out4 = round_bf16_fast(sfpi::copysgn(r_mag4, s_tot ^ sfpi::as<sfpi::vInt>(q4)));
         sfpi::dst_reg[32 + r4] = round_bf16_fast(q4 + r_out4);
 
         sfpi::dst_reg[r1] = r_out1;
@@ -444,11 +451,11 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::vFloat r_mag2 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q5)) * v_damping;
         sfpi::vFloat q2 = sfpi::dst_reg[r2];
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
-        sfpi::vFloat r_out2 = round_bf16(sfpi::copysgn(r_mag2, s_tot ^ sfpi::as<sfpi::vInt>(q2)));
+        sfpi::vFloat r_out2 = round_bf16_fast(sfpi::copysgn(r_mag2, s_tot ^ sfpi::as<sfpi::vInt>(q2)));
         sfpi::dst_reg[32 + r2] = round_bf16_fast(q2 + r_out2);
 
         sfpi::vFloat r_mag5 = sfpi_amin_star_branchless(m_oth2, sfpi::abs(q2)) * v_damping;
-        sfpi::vFloat r_out5 = round_bf16(sfpi::copysgn(r_mag5, s_tot ^ sfpi::as<sfpi::vInt>(q5)));
+        sfpi::vFloat r_out5 = round_bf16_fast(sfpi::copysgn(r_mag5, s_tot ^ sfpi::as<sfpi::vInt>(q5)));
         sfpi::dst_reg[32 + r5] = round_bf16_fast(q5 + r_out5);
 
         sfpi::dst_reg[r2] = r_out2;
@@ -512,6 +519,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
 }
 
 // ------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 // Zero-Transpose 32-Lane Vector Approximate-Min* for Degree-3 Tile (64 Checks)
 // ------------------------------------------------------------------------------
 uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
@@ -568,6 +576,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
       int sc0 = base_r + 6;
       int sc1 = base_r + 7;
 
+      // Stage 0: Q = L - R_old in-place in Tile 0 (iter > 0)
       if (iter != 0) {
         sfpi::dst_reg[r0] = round_bf16_fast(sfpi::vFloat(sfpi::dst_reg[r0]) - sfpi::vFloat(sfpi::dst_reg[32 + r0]));
         sfpi::dst_reg[r1] = round_bf16_fast(sfpi::vFloat(sfpi::dst_reg[r1]) - sfpi::vFloat(sfpi::dst_reg[32 + r1]));
@@ -593,7 +602,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q0     = sfpi::dst_reg[r0];
-        sfpi::vFloat r_out0 = round_bf16(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
+        sfpi::vFloat r_out0 = round_bf16_fast(sfpi::copysgn(r_mag0, s_tot ^ sfpi::as<sfpi::vInt>(q0)));
         sfpi::dst_reg[32 + r0] = round_bf16_fast(q0 + r_out0);
         sfpi::dst_reg[sc1]     = r_out0; // Stage in sc1 so dst_reg[r0] remains pristine q0
       }
@@ -606,7 +615,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q1     = sfpi::dst_reg[r1];
-        sfpi::vFloat r_out1 = round_bf16(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
+        sfpi::vFloat r_out1 = round_bf16_fast(sfpi::copysgn(r_mag1, s_tot ^ sfpi::as<sfpi::vInt>(q1)));
         sfpi::dst_reg[32 + r1] = round_bf16_fast(q1 + r_out1);
         sfpi::dst_reg[32 + sc0] = r_out1; // Stage in (32 + sc0) so dst_reg[r1] remains pristine q1
       }
@@ -619,7 +628,7 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q2     = sfpi::dst_reg[r2];
-        sfpi::vFloat r_out2 = round_bf16(sfpi::copysgn(r_mag2, s_tot ^ sfpi::as<sfpi::vInt>(q2)));
+        sfpi::vFloat r_out2 = round_bf16_fast(sfpi::copysgn(r_mag2, s_tot ^ sfpi::as<sfpi::vInt>(q2)));
         sfpi::dst_reg[32 + r2] = round_bf16_fast(q2 + r_out2);
         sfpi::dst_reg[r2]      = r_out2;
       }
@@ -750,7 +759,7 @@ void kernel_main() {
   WAYPOINT("M_02");
 #endif
 
-  uint32_t max_steps = max_iter * num_tiles;
+  uint32_t max_steps = (diff_test_mode > 0) ? diff_test_mode : (max_iter * num_tiles);
 
   volatile uint32_t *const wall_clock_reg = reinterpret_cast<volatile uint32_t *>(0xFFB121F0);
   uint32_t cycles_compute = 0;
@@ -856,7 +865,7 @@ void kernel_main() {
       uint32_t m_cyc = 0;
       bool is_deg6 = (t_step < QC_LDPC_4CW::DEG6_TILES);
       if (is_deg6) {
-        m_cyc = compute_tile_deg6(cb_scratch_in, cb_scratch_out, cb_r_msg, iter, sync_flags);
+        m_cyc = compute_tile_deg6(cb_scratch_in, cb_scratch_out, cb_r_msg, iter, sync_flags, diff_test_mode);
       } else {
         m_cyc = compute_tile_deg3(cb_scratch_in, cb_scratch_out, cb_r_msg, iter, sync_flags);
       }
