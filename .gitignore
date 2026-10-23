@@ -58,15 +58,23 @@ tests/Results/
 !Results/combined_ar4ja_r12_waterfall_iter200.png
 !docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.html
 !docs/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.pdf
+!docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.html
+!docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.pdf
+!docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.md
 !docs/MD_files/
 docs/MD_files/*
 !docs/MD_files/uncoded_bpsk_validation.md
 !docs/MD_files/ARCHITECTURE_AND_THROUGHPUT_ROADMAP.md
+!docs/MD_files/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.md
+!docs/MD_files/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.pdf
 !docs/figures/
 docs/figures/*
 !docs/figures/ar4ja_h_matrix_tiles_and_faces_spy_plot.png
 !docs/figures/ar4ja_h_matrix_tiles_and_faces_spy_plot.pdf
 !docs/figures/ar4ja_rate12_3dataset_waterfall_comparison.png
+!docs/scripts/
+docs/scripts/*
+!docs/scripts/generate_system_report_and_trapping_set_research_pdf.py
 
 # Additional Test Binaries & Diagnostic Dumps
 test_40tile_stepper

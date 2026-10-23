@@ -6,6 +6,15 @@
 
 ---
 
+> [!TIP]
+> ### 📄 Comprehensive System Architecture & Research Report
+> For a complete, ground-truth technical reference covering the full 4.91 Gsps circulant DMA architecture, quasi-cyclic parity-check matrix decomposition ($H$ spy plot and Tensix tile/face formation), physical silicon performance metrics down to $8 \times 10^{-10}$ FER, and high-speed trapping-set mitigation research:
+> 
+> - 📥 **Download Publication PDF:** [**`QuietBox 2 AR4JA LDPC Decoder System Report.pdf`**](docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.pdf)
+> - 📖 **Read Online Markdown:** [**`QuietBox 2 AR4JA LDPC Decoder System Report.md`**](docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.md)
+
+---
+
 ## Overview
 
 Characterizing Low-Density Parity-Check (LDPC) code performance in the asymptotic **"error floor"** regime ($\mathrm{FER} \le 10^{-8}$ to $10^{-10}$) is critical for deep space telemetry, optical deep-space downlinks, and mission-critical communications. Evaluating these error floors via conventional CPU cluster simulation is computationally prohibitive, requiring months or years of compute.
@@ -185,8 +194,11 @@ Evaluated on the Tensix SFPU vector floating-point pipeline branchlessly, Approx
 │   ├── unit_sfpu/                       # TRISC SFPU standalone vector unit tests
 │   └── scalar_5w/                       # Legacy unit test suite
 ├── docs/
-│   └── figures/
-│       └── ar4ja_h_matrix_tiles_and_faces_spy_plot.png # Parity-check matrix & Tensix mapping
+│   ├── figures/
+│   │   ├── ar4ja_h_matrix_tiles_and_faces_spy_plot.png # Parity-check matrix & Tensix mapping
+│   │   └── ar4ja_rate12_3dataset_waterfall_comparison.png # 3-Dataset waterfall comparison
+│   ├── QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.pdf # Publication PDF
+│   └── QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.md  # System Architecture Report
 ├── Results/
 │   └── combined_ar4ja_r12_waterfall_iter200.png # Official waterfall comparison plot
 ├── CallSim.sh                           # Master batch execution script (supports all engines)
