@@ -111,6 +111,40 @@ The Blackhole Tensix compute pipeline is face-aligned ($32 \times 32$ tile split
 | **Face 2** | Checks $0 \dots 3$ | Lanes $0 \dots 15$ | Worker 0 (BRISC) | `dst_reg[16..23]` ($R_{\text{new}}$) & `dst_reg[48..55]` ($L_{\text{new}}$) |
 | **Face 3** | Checks $4 \dots 7$ | Lanes $16 \dots 31$ | Worker 1 (NCRISC) | `dst_reg[24..31]` ($R_{\text{new}}$) & `dst_reg[56..63]` ($L_{\text{new}}$) |
 
+### 2.5 Tensix Core Hardware Microarchitecture & Vertical Data Flow Stack
+
+The complete internal microarchitecture of a single Tenstorrent QuietBox 2 Tensix core operating the Circulant DMA 4-Codeword LDPC Decoder Engine (replicated $\times 440$ copies across the full 4-chip mesh device to process 1,760 codewords simultaneously) is organized as a **5-layer vertical hierarchy** (Layer 1 L1 SRAM &rarr; Layer 2 Couriers &rarr; Layer 3 Scratchpads &rarr; Layer 4 Unpack/Pack &rarr; Layer 5 Compute Engine), illustrated below:
+
+![Tensix Core LDPC Dataflow and Memory Architecture](../figures/tensix_ldpc_dataflow_block_diagram.png)
+
+#### Vertical Layers, Processing Cores & Data Paths Breakdown:
+1. **Layer 1 (Top): L1 SRAM Persistent Storage (1.5 MB Total L1, <220 KB Active Footprint / 14.3%):**
+   - **`CB_VNODE` (CB 0, 20 KB):** Variable Node Posterior LLR Beliefs for all 2,560 nodes packed across 4 codewords (8 bytes/node). Maintains the evolving in-place posterior sum $L_v = L_v^{\mathrm{ch}} + \sum R$. Because $\Delta v / \Delta c = +1$, consecutive check rows access contiguous 128-byte memory slices in L1 SRAM.
+   - **`CB_R_MSG` (CB 1, 80 KB):** 40-Tile Check Message Circular FIFO storing all 7,680 check-to-variable messages $\times$ 4 codewords in native bfloat16 format. Supplies $R_{\mathrm{old}}$ to TRISC0 (Unpack) and receives $R_{\mathrm{new}}$ from TRISC2 (Pack).
+   - **`CB_TELEMETRY` (CB 24, 4 KB):** Hardware mailboxes storing `active_mask` [3:0], locked iteration counts (`cw_iters`), and microsecond-precision hardware cycle timers (Gather, Unpack, Math, Pack, Scatter). Implements strict convergence latching with zero post-convergence error measurement.
+
+2. **Layer 2: Gather / Scatter & Data Movement Plane (Couriers & 512-Bit NOC DMA Engine):**
+   - **Worker 0 (BRISC):** Dedicated courier for Checks $0 \dots 3$ (Faces 0 & 2, SFPU vector lanes $0 \dots 15$). In Stage 1 Gather, transfers three 128-byte slices (384 bytes) to Face 0/2 via 512-bit NOC DMA bursts (2 cycles/slice). In Stage 5 Scatter, executes blind unmasked DMA writeback to `CB_VNODE`. On Tile 39, executes the hardware parity check ($H \cdot c^T = 0$).
+   - **Worker 1 (NCRISC):** Dedicated courier for Checks $4 \dots 7$ (Faces 1 & 3, SFPU vector lanes $16 \dots 31$). Executes parallel 512-bit DMA Gather/Scatter and coordinates lockstep barrier flags (`GATHER_DONE`, `SCATTER_DONE`).
+   - **512-Bit L1 NOC DMA Bus:** Delivers 64 bytes/cycle burst throughput ($128\text{ B} \div 64\text{ B/cyc} = \mathbf{2\text{ clock cycles}}$), eliminating the 3,300-cycle pointer chasing bottleneck.
+
+3. **Layer 3: Scratch Pads & Staging Circular Buffers (Double-Buffered Tile Pages):**
+   - **`CB_SCRATCH_GATHER` (CB 2, 4 KB):** Double-buffered staging page storing four 512-byte faces (2 KB/page) assembled by BRISC and NCRISC in vertical SIMD orientation.
+   - **`CB_SCRATCH_SCATTER` (CB 3, 4 KB):** Double-buffered staging page receiving freshly packed $L_{\mathrm{new}}$ beliefs from TRISC2. Read concurrently by BRISC and NCRISC for DMA writeback.
+   - **Mandatory Lockstep Invariant:** Guarantees strict sequential stop-and-wait processing ($\text{Gather} \to \text{Unpack} \to \text{Compute} \to \text{Pack} \to \text{Scatter}$) to eliminate Read-After-Write hazards across overlapping variable nodes. With 512-bit DMA (12c Gather + 16c Unpack + 912c Compute + 16c Pack + 12c Scatter = 968c total), this achieves a stellar **94.2% Compute Duty Cycle**!
+
+4. **Layer 4: Unpack / Pack Orchestration (Workers 2 & 4):**
+   - **Worker 2 (TRISC0 - Unpack Engine):** Directs dual unpack from `CB_SCRATCH_GATHER` ($L_v$ Vnode beliefs into DEST Tile 1) and `CB_R_MSG` FIFO ($R_{\mathrm{old}}$ Edge messages into DEST Tile 0). Zero SFPU transpositions are required due to vertical SIMD alignment.
+   - **Worker 4 (TRISC2 - Pack Engine):** Reads completed check results and posterior beliefs from DEST registers, packing Tile 0 ($R_{\mathrm{new}}$ Edge messages) into <code>CB_R_MSG</code> FIFO and Tile 1 ($L_{\mathrm{new}}$ Vnode beliefs) into `CB_SCRATCH_SCATTER`, signaling `PACK_DONE` to release scatter couriers.
+
+5. **Layer 5 (Bottom): Compute Engine & Tensix DEST Registers (Worker 3: TRISC1):**
+   - **Tensix DEST Registers (64 &times; 16-bit FP):** Tile 0 (`dst_reg[0..31]`) holds outgoing check messages $R_{\mathrm{new}}$ across Faces 0..3; Tile 1 (`dst_reg[32..63]`) holds updated variable beliefs $L_{\mathrm{new}}$ across Faces 0..3, with exact RNE mantissa rounding and belief damping ($\beta = 0.9375$).
+   - **Worker 3 (TRISC1 - SFPU Vector Engine):** Executes 32-lane vectorized parallel binary tree Approximate-Min* algorithm: 1. Prior subtraction ($q_d = L_v - R_{\mathrm{old}}$ in-place) &rarr; 2. Subvector transposition (`swap_subvec16` pairwise alignment) &rarr; 3. Parallel tree pairwise accumulation ($M_{01}, M_{23}, M_{45}$ in full FP32 LRegs) &rarr; 4. Full extrinsics generation ($R_{\text{mag}}(d)$ strictly excludes edge $d$) &rarr; 5. Intrinsic belief damping ($\beta = 0.9375 = 15/16$) for error floor trapping set suppression &rarr; 6. Posterior update ($L_{\mathrm{new}} = q_d + R_{\mathrm{new}}$).
+
+6. **Data Flow Directionality (Left Down • Right Up):**
+   - **Left Side Highway (Flowing Down):** *Vnode Data Lane* streams $L_v$ beliefs down from `CB_VNODE` through Gather couriers, staging scratchpad, TRISC0 Unpack, and into DEST Tile 1. *Edge Data Lane* streams $R_{\mathrm{old}}$ check messages from `CB_R_MSG` down bypassing staging directly into TRISC0 Unpack and DEST Tile 0.
+   - **Right Side Highway (Flowing Up):** *Vnode Commit Lane* carries fresh $L_{\mathrm{new}}$ beliefs up from TRISC2 Pack into `CB_SCRATCH_SCATTER`, then up through Scatter couriers via 512-bit DMA writeback into `CB_VNODE`. *Edge Commit Lane* carries fresh $R_{\mathrm{new}}$ check messages up from TRISC2 Pack bypassing staging directly into `CB_R_MSG` FIFO for the subsequent iteration.
+
 ---
 
 ## 3. Mathematical Core: True Recursive Approximate-Min\*

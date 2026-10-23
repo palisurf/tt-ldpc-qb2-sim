@@ -494,6 +494,64 @@ The Blackhole Tensix compute pipeline is face-aligned ($32 \times 32$ tile split
   </tbody>
 </table>
 
+<div class="page-break"></div>
+
+<h3>2.5 Tensix Core Hardware Microarchitecture &amp; Vertical Data Flow Stack</h3>
+<p>
+The complete internal microarchitecture of a single Tenstorrent QuietBox 2 Tensix core operating the Circulant DMA 4-Codeword LDPC Decoder Engine (replicated $\times 440$ copies across the full 4-chip mesh device to process 1,760 codewords simultaneously) is organized as a <strong>5-layer vertical hierarchy</strong> (Layer 1 L1 SRAM &rarr; Layer 2 Couriers &rarr; Layer 3 Scratchpads &rarr; Layer 4 Unpack/Pack &rarr; Layer 5 Compute Engine), illustrated below:
+</p>
+
+<!-- Embedded Data Flow Block Diagram -->
+<div class="figure-box">
+  <img class="figure-img" src="{{DATAFLOW_B64}}" alt="Tenstorrent QuietBox 2 Tensix Core LDPC Dataflow and Memory Architecture">
+  <div class="figure-caption">
+    <strong>Figure 2:</strong> Tensix Core LDPC Vertical Layered Architecture (Replicated &times; 440 Copies Across Full Mesh, 1,760 Codewords Parallel): 1.5 MB L1 SRAM Storage (CB_VNODE, CB_R_MSG, CB_TELEMETRY), 5 RISC-V Workers (BRISC, NCRISC, TRISC0, TRISC1, TRISC2), Circular Buffers, 512-Bit L1 NOC DMA Burst Engine, 64 DEST Registers, and SFPU Parallel Binary Tree with Full Extrinsics and Belief Damping ($\beta = 0.9375$). Data flows <strong>down on the left</strong> (Vnode &amp; Edge Ingest/Staging) and <strong>up on the right</strong> (Pack, Commit &amp; Writeback).
+  </div>
+</div>
+
+<h4>Vertical Layers, Processing Cores &amp; Data Paths Breakdown:</h4>
+<ul>
+  <li><strong>Layer 1 (Top): L1 SRAM Persistent Storage (1.5 MB Total L1, &lt;220 KB Active Footprint / 14.3%):</strong>
+    <ul>
+      <li><code>CB_VNODE</code> (CB 0, 20 KB): Variable Node Posterior LLR Beliefs for all 2,560 nodes packed across 4 codewords (8 bytes/node). Maintains the evolving in-place posterior sum $L_v = L_v^{\mathrm{ch}} + \sum R$. Because $\Delta v / \Delta c = +1$, consecutive check rows access contiguous 128-byte memory slices in L1 SRAM.</li>
+      <li><code>CB_R_MSG</code> (CB 1, 80 KB): 40-Tile Check Message Circular FIFO storing all 7,680 check-to-variable messages $\times$ 4 codewords in native bfloat16 format. Supplies $R_{\mathrm{old}}$ to TRISC0 (Unpack) and receives $R_{\mathrm{new}}$ from TRISC2 (Pack).</li>
+      <li><code>CB_TELEMETRY</code> (CB 24, 4 KB): Hardware mailboxes storing <code>active_mask</code> [3:0], locked iteration counts (<code>cw_iters</code>), and microsecond-precision hardware cycle timers (Gather, Unpack, Math, Pack, Scatter). Implements strict convergence latching with zero post-convergence error measurement.</li>
+    </ul>
+  </li>
+  <li><strong>Layer 2: Gather / Scatter &amp; Data Movement Plane (Couriers &amp; 512-Bit NOC DMA Engine):</strong>
+    <ul>
+      <li><strong>Worker 0 (BRISC):</strong> Dedicated courier for Checks $0 \dots 3$ (Faces 0 &amp; 2, SFPU vector lanes $0 \dots 15$). In Stage 1 Gather, transfers three 128-byte slices (384 bytes) to Face 0/2 via 512-bit NOC DMA bursts (2 cycles/slice). In Stage 5 Scatter, executes blind unmasked DMA writeback to <code>CB_VNODE</code>. On Tile 39, executes the hardware parity check ($H \cdot c^T = 0$).</li>
+      <li><strong>Worker 1 (NCRISC):</strong> Dedicated courier for Checks $4 \dots 7$ (Faces 1 &amp; 3, SFPU vector lanes $16 \dots 31$). Executes parallel 512-bit DMA Gather/Scatter and coordinates lockstep barrier flags (<code>GATHER_DONE</code>, <code>SCATTER_DONE</code>).</li>
+      <li><strong>512-Bit L1 NOC DMA Bus:</strong> Delivers 64 bytes/cycle burst throughput ($128\text{ B} \div 64\text{ B/cyc} = \mathbf{2\text{ clock cycles}}$), eliminating the 3,300-cycle pointer chasing bottleneck.</li>
+    </ul>
+  </li>
+  <li><strong>Layer 3: Scratch Pads &amp; Staging Circular Buffers (Double-Buffered Tile Pages):</strong>
+    <ul>
+      <li><code>CB_SCRATCH_GATHER</code> (CB 2, 4 KB): Double-buffered staging page storing four 512-byte faces (2 KB/page) assembled by BRISC and NCRISC in vertical SIMD orientation.</li>
+      <li><code>CB_SCRATCH_SCATTER</code> (CB 3, 4 KB): Double-buffered staging page receiving freshly packed $L_{\mathrm{new}}$ beliefs from TRISC2. Read concurrently by BRISC and NCRISC for DMA writeback.</li>
+      <li><strong>Mandatory Lockstep Invariant:</strong> Guarantees strict sequential stop-and-wait processing ($\text{Gather} \to \text{Unpack} \to \text{Compute} \to \text{Pack} \to \text{Scatter}$) to eliminate Read-After-Write hazards across overlapping variable nodes. With 512-bit DMA (12c Gather + 16c Unpack + 912c Compute + 16c Pack + 12c Scatter = 968c total), this achieves a stellar <strong>94.2% Compute Duty Cycle</strong>!</li>
+    </ul>
+  </li>
+  <li><strong>Layer 4: Unpack / Pack Orchestration (Workers 2 &amp; 4):</strong>
+    <ul>
+      <li><strong>Worker 2 (TRISC0 - Unpack Engine):</strong> Directs dual unpack from <code>CB_SCRATCH_GATHER</code> ($L_v$ Vnode beliefs into DEST Tile 1) and <code>CB_R_MSG</code> FIFO ($R_{\mathrm{old}}$ Edge messages into DEST Tile 0). Zero SFPU transpositions are required due to vertical SIMD alignment.</li>
+      <li><strong>Worker 4 (TRISC2 - Pack Engine):</strong> Reads completed check results and posterior beliefs from DEST registers, packing Tile 0 ($R_{\mathrm{new}}$ Edge messages) into <code>CB_R_MSG</code> FIFO and Tile 1 ($L_{\mathrm{new}}$ Vnode beliefs) into <code>CB_SCRATCH_SCATTER</code>, signaling <code>PACK_DONE</code> to release scatter couriers.</li>
+    </ul>
+  </li>
+  <li><strong>Layer 5 (Bottom): Compute Engine &amp; Tensix DEST Registers (Worker 3: TRISC1):</strong>
+    <ul>
+      <li><strong>Tensix DEST Registers (64 &times; 16-bit FP):</strong> Tile 0 (<code>dst_reg[0..31]</code>) holds outgoing check messages $R_{\mathrm{new}}$ across Faces 0..3; Tile 1 (<code>dst_reg[32..63]</code>) holds updated variable beliefs $L_{\mathrm{new}}$ across Faces 0..3, with exact RNE mantissa rounding and belief damping ($\beta = 0.9375$).</li>
+      <li><strong>Worker 3 (TRISC1 - SFPU Vector Engine):</strong> Executes 32-lane vectorized parallel binary tree Approximate-Min* algorithm: 1. Prior subtraction ($q_d = L_v - R_{\mathrm{old}}$ in-place) &rarr; 2. Subvector transposition (<code>swap_subvec16</code> pairwise alignment) &rarr; 3. Parallel tree pairwise accumulation ($M_{01}, M_{23}, M_{45}$ in full FP32 LRegs) &rarr; 4. Full extrinsics generation ($R_{\text{mag}}(d)$ strictly excludes edge $d$) &rarr; 5. Intrinsic belief damping ($\beta = 0.9375 = 15/16$) for error floor trapping set suppression &rarr; 6. Posterior update ($L_{\mathrm{new}} = q_d + R_{\mathrm{new}}$).</li>
+    </ul>
+  </li>
+  <li><strong>Data Flow Directionality (Left Down &bull; Right Up):</strong>
+    <ul>
+      <li><strong>Left Side Highway (Flowing Down):</strong> <em>Vnode Data Lane</em> streams $L_v$ beliefs down from <code>CB_VNODE</code> through Gather couriers, staging scratchpad, TRISC0 Unpack, and into DEST Tile 1. <em>Edge Data Lane</em> streams $R_{\mathrm{old}}$ check messages from <code>CB_R_MSG</code> down bypassing staging directly into TRISC0 Unpack and DEST Tile 0.</li>
+      <li><strong>Right Side Highway (Flowing Up):</strong> <em>Vnode Commit Lane</em> carries fresh $L_{\mathrm{new}}$ beliefs up from TRISC2 Pack into <code>CB_SCRATCH_SCATTER</code>, then up through Scatter couriers via 512-bit DMA writeback into <code>CB_VNODE</code>. <em>Edge Commit Lane</em> carries fresh $R_{\mathrm{new}}$ check messages up from TRISC2 Pack bypassing staging directly into <code>CB_R_MSG</code> FIFO for the subsequent iteration.</li>
+    </ul>
+  </li>
+</ul>
+
 <!-- Section 3 -->
 <h2>3. Mathematical Core: True Recursive Approximate-Min\*</h2>
 
@@ -629,7 +687,7 @@ Throughput progression across 440 Tensix cores on physical Blackhole silicon run
 <div class="figure-box">
   <img class="figure-img" src="{{WATERFALL_B64}}" alt="AR4JA Rate-1/2 Waterfall Comparison: Historical JPL 2005 vs. QuietBox 2 Scalar 5W vs. QuietBox 2 Circulant DMA 4CW">
   <div class="figure-caption">
-    <strong>Figure 2:</strong> CCSDS AR4JA Rate-1/2 ($N=2560, K=1024$) Asymptotic Waterfall Comparison: Historical NASA JPL 2005 Benchmark (Flood Decoder, 200 iters) vs. QuietBox 2 Scalar 5-Worker Engine (Row-Layered, 200 iters) vs. QuietBox 2 Circulant DMA 4-Codeword Engine (Row-Layered, 512-bit DMA, 200 iters). Error bars indicate exact 95% Poisson/Binomial confidence intervals.
+    <strong>Figure 3:</strong> CCSDS AR4JA Rate-1/2 ($N=2560, K=1024$) Asymptotic Waterfall Comparison: Historical NASA JPL 2005 Benchmark (Flood Decoder, 200 iters) vs. QuietBox 2 Scalar 5-Worker Engine (Row-Layered, 200 iters) vs. QuietBox 2 Circulant DMA 4-Codeword Engine (Row-Layered, 512-bit DMA, 200 iters). Error bars indicate exact 95% Poisson/Binomial confidence intervals.
   </div>
 </div>
 
@@ -935,11 +993,15 @@ def main():
     fig_matrix = docs_dir / "figures" / "ar4ja_h_matrix_tiles_and_faces_spy_plot.png"
     matrix_b64 = get_base64_image(fig_matrix)
 
+    fig_dataflow = docs_dir / "figures" / "tensix_ldpc_dataflow_block_diagram.png"
+    dataflow_b64 = get_base64_image(fig_dataflow)
+
     fig_waterfall = docs_dir / "figures" / "ar4ja_rate12_3dataset_waterfall_comparison.png"
     waterfall_b64 = get_base64_image(fig_waterfall)
 
     html_content = HTML_TEMPLATE.replace("{{WATERFALL_B64}}", waterfall_b64)
     html_content = html_content.replace("{{SPY_PLOT_B64}}", matrix_b64)
+    html_content = html_content.replace("{{DATAFLOW_B64}}", dataflow_b64)
 
     html_path = docs_dir / "QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.html"
     pdf_path = docs_dir / "QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.pdf"

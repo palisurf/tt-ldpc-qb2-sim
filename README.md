@@ -6,6 +6,8 @@
 
 ---
 
+![Tensix Core LDPC Dataflow & Memory Architecture](docs/figures/tensix_ldpc_dataflow_block_diagram.png)
+
 > [!TIP]
 > ### 📄 Comprehensive System Architecture & Research Report
 > For a complete, ground-truth technical reference covering the full 4.91 Gsps circulant DMA architecture, quasi-cyclic parity-check matrix decomposition ($H$ spy plot and Tensix tile/face formation), physical silicon performance metrics down to $8 \times 10^{-10}$ FER, and high-speed trapping-set mitigation research:
