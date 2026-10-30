@@ -60,6 +60,10 @@ void kernel_main() {
     uint32_t cycles_brisc_wait = 0;
     uint32_t max_steps = (max_steps_arg > 0) ? max_steps_arg : (max_iter * num_tiles);
 
+    // Pre-configure local L1-to-L1 128-byte one-packet NOC DMA state once
+    noc_async_read_one_packet_set_state(get_noc_addr(0), 128);
+    noc_async_write_one_packet_set_state<false>(get_noc_addr(0), 128);
+
     for (uint32_t batch = 0; batch < num_batches; ++batch) {
         // Tri-core batch rendezvous barrier
         sync_flags[SyncSlot::BATCH_BARRIER_BRISC] = epoch + batch + 1;

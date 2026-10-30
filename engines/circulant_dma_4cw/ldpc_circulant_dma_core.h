@@ -394,7 +394,7 @@ inline void gather_slice_l1(uint32_t dest_addr, const QC_LDPC_4CW::CirculantSlic
     const uint32_t src_a = reinterpret_cast<uint32_t>(vnode_base) + desc.offset_a;
     if (__builtin_expect(desc.len_b == 0, 1)) {
         if ((src_a & 0xF) == 0) {
-            noc_async_read(get_noc_addr(src_a), dest_addr, 128);
+            noc_async_read_one_packet_with_state(src_a, dest_addr);
         } else {
             copy_128b(reinterpret_cast<char*>(dest_addr), reinterpret_cast<const char*>(src_a));
         }
@@ -419,7 +419,7 @@ inline void scatter_slice_l1(const QC_LDPC_4CW::CirculantSliceDesc& desc, uint32
     const uint32_t dst_a = reinterpret_cast<uint32_t>(vnode_base) + desc.offset_a;
     if (__builtin_expect(desc.len_b == 0, 1)) {
         if ((dst_a & 0xF) == 0) {
-            noc_async_write(src_addr, get_noc_addr(dst_a), 128);
+            noc_async_write_one_packet_with_state<false>(src_addr, dst_a);
         } else {
             copy_128b(reinterpret_cast<char*>(dst_a), reinterpret_cast<const char*>(src_addr));
         }

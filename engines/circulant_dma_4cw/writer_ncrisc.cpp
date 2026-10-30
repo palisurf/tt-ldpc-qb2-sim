@@ -160,6 +160,10 @@ void kernel_main() {
         uint8_t active_mask = 0x0F;
         uint32_t cw_iters[4] = {max_iter, max_iter, max_iter, max_iter};
 
+        // Pre-configure local L1-to-L1 128-byte one-packet NOC DMA state for the step loop
+        noc_async_read_one_packet_set_state(get_noc_addr(0), 128);
+        noc_async_write_one_packet_set_state<false>(get_noc_addr(0), 128);
+
         // Strict Sequential Lockstep Step Loop: Gather -> Compute -> Scatter
         for (uint32_t step = 0; step < max_steps; ++step) {
             uint32_t bar = batch * max_steps + step + 1;
