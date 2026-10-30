@@ -6,7 +6,7 @@
 To confirm that the Monte Carlo error rates recorded down to the ultra-deep error floor ($10^{-8} - 10^{-9}$ FER) are physically and mathematically sound, the underlying Gaussian noise generator, transcendental arithmetic, and $E_b/N_0 \to \text{LLR}$ scaling formulas must be validated against the exact theoretical Bit Error Rate (BER) of an uncoded BPSK system ($R = 1.0$).
 
 In an uncoded BPSK AWGN channel, the theoretical bit error probability is given by:
-$$P_b = Q\left(\sqrt{\frac{2 E_b}{N_0}}\right) = \frac{1}{2} \operatorname{erfc}\left(\sqrt{10^{(E_b/N_0)_{\text{dB}} / 10}}\right)$$
+$$P_b = Q\left(\sqrt{\frac{2 E_b}{N_0}}\right) = \frac{1}{2} \mathrm{erfc}\left(\sqrt{10^{(E_b/N_0)_{\text{dB}} / 10}}\right)$$
 
 By simulating over $500\text{ million bits}$ using the exact compute kernel math routines from [compute_trisc_ldpc_awgn_sim.cpp](file:///y:/JPL/LDPC_QB2/LDPC_QB2_GA/kernel/compute_trisc_ldpc_awgn_sim.cpp), we directly verify:
 1. **Gaussian Uniformity & Tail Statistics**: The trigonometry-free Marsaglia Polar Box-Muller PRNG (`Xoshiro128+` uniform generator, 6th-degree minimax `fast_ln`, and 2-iteration Newton-Raphson `fast_rsqrt`).

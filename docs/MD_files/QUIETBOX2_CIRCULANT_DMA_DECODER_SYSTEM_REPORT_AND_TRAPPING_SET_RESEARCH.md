@@ -139,7 +139,7 @@ The complete internal microarchitecture of a single Tenstorrent QuietBox 2 Tensi
 
 5. **Layer 5 (Bottom): Compute Engine & Tensix DEST Registers (Worker 3: TRISC1, `1,764.5 cyc/tile`):**
    - **Tensix DEST Registers (64 &times; 16-bit FP):** Tile 0 (`dst_reg[0..31]`) computes $Q_d = L_v - R_{\mathrm{old}}$ in-place and stores outgoing check messages $R_{\mathrm{new}}$ across Faces 0..3; Tile 1 (`dst_reg[32..63]`) holds incoming $R_{\mathrm{old}}$ and receives updated variable beliefs $L_{\mathrm{new}} = Q_d + R_{\mathrm{new}}$ across Faces 0..3.
-   - **Worker 3 (TRISC1 - SFPU Vector Engine):** Executes the zero-transpose 32-lane vectorized pairwise tree Approximate-Min\* algorithm: 1. Prior subtraction ($q_d = \text{round\_bf16\_fast}(L_v - R_{\mathrm{old}})$ in-place in Tile 0) &rarr; 2. Fused single-load Sign-Parity XOR & pairwise $\operatorname{AMin}^*$ tree ($M_{03}, M_{14}, M_{25}$ stored in face scratch registers `6..7`) &rarr; 3. Zero `SFPTRANSP` vertical pairing across Face 0/2 and Face 1/3 &rarr; 4. Full extrinsics generation ($R_{\text{mag}}(d)$ strictly excludes edge $d$) &rarr; 5. Intrinsic belief damping ($\beta = 0.9375 = 15/16$) and exact RNE rounding (`round_bf16`) on $R_{\mathrm{new}}$ &rarr; 6. Posterior update ($L_{\mathrm{new}} = \text{round\_bf16\_fast}(q_d + R_{\mathrm{new}})$ in Tile 1).
+   - **Worker 3 (TRISC1 - SFPU Vector Engine):** Executes the zero-transpose 32-lane vectorized pairwise tree Approximate-Min\* algorithm: 1. Prior subtraction ($q_d = \text{round\_bf16\_fast}(L_v - R_{\mathrm{old}})$ in-place in Tile 0) &rarr; 2. Fused single-load Sign-Parity XOR & pairwise $\mathrm{AMin}^*$ tree ($M_{03}, M_{14}, M_{25}$ stored in face scratch registers `6..7`) &rarr; 3. Zero `SFPTRANSP` vertical pairing across Face 0/2 and Face 1/3 &rarr; 4. Full extrinsics generation ($R_{\text{mag}}(d)$ strictly excludes edge $d$) &rarr; 5. Intrinsic belief damping ($\beta = 0.9375 = 15/16$) and exact RNE rounding (`round_bf16`) on $R_{\mathrm{new}}$ &rarr; 6. Posterior update ($L_{\mathrm{new}} = \text{round\_bf16\_fast}(q_d + R_{\mathrm{new}})$ in Tile 1).
 
 6. **Data Flow Directionality (Left Down • Right Up):**
    - **Left Side Highway (Flowing Down):** *Vnode Data Lane* streams $L_v$ beliefs down from `CB_VNODE` through Gather couriers, staging scratchpad, TRISC0 Unpack, and into DEST Tile 0. *Edge Data Lane* streams $R_{\mathrm{old}}$ check messages from `CB_R_MSG` down bypassing staging directly into TRISC0 Unpack and DEST Tile 1.
@@ -161,17 +161,17 @@ Conventional decoders employ full Min-Sum or multi-element sorting trees that re
    For a check node of degree $d_c$ with incoming variable LLR messages $q_d$ ($d \in \{0 \dots d_c - 1\}$):
    $$d_{\min} = \arg\min_{d} |q_d|, \quad q_{\min} = |q_{d_{\min}}|$$
 2. **Recursive Partial Accumulation ($M_{\text{others}}$):**
-   Accumulate all edges *excluding* $d_{\min}$ using the binary operator $\operatorname{AMin}^*(a, b) = \min(a, b) - g(|a - b|)$:
-   $$M_{\text{others}} = \sideset{}{^*}\min_{k \ne d_{\min}} |q_k|$$
+   Accumulate all edges *excluding* $d_{\min}$ using the binary operator $\mathrm{AMin}^*(a, b) = \min(a, b) - g(|a - b|)$:
+   $$M_{\text{others}} = \min^*_{k \ne d_{\min}} |q_k|$$
 3. **All-Inclusive Metric Formation ($M_{\text{all}}$):**
-   Combine $M_{\text{others}}$ with the isolated minimum magnitude $q_{\min}$ using a single final binary $\operatorname{AMin}^*$:
-   $$M_{\text{all}} = \operatorname{AMin}^*(M_{\text{others}}, q_{\min})$$
+   Combine $M_{\text{others}}$ with the isolated minimum magnitude $q_{\min}$ using a single final binary $\mathrm{AMin}^*$:
+   $$M_{\text{all}} = \mathrm{AMin}^*(M_{\text{others}}, q_{\min})$$
 4. **Branchless Outgoing Check Message Assignment:**
    Exactly **two outgoing check magnitudes** exist for the entire check node:
    $$r_{\text{mag}}(d) = \begin{cases} M_{\text{others}}, & d = d_{\min} \\ M_{\text{all}}, & d \ne d_{\min} \end{cases}$$
 5. **Sign Product Propagation:**
    Total parity sign is accumulated branchlessly:
-   $$S_{\text{total}} = \prod_{d=0}^{d_c - 1} \operatorname{sgn}(q_d), \quad \operatorname{sgn}(r_d) = S_{\text{total}} \cdot \operatorname{sgn}(q_d)$$
+   $$S_{\text{total}} = \prod_{d=0}^{d_c - 1} \mathrm{sgn}(q_d), \quad \mathrm{sgn}(r_d) = S_{\text{total}} \cdot \mathrm{sgn}(q_d)$$
 
 ### 3.3 2-Region Piecewise Linear Correction Function
 The transcendental correction $g(\Delta) = \ln(1 + e^{-\Delta})$ is evaluated branchlessly on the Tensix SFPU using Dr. Jones' 2-region piecewise linear approximation:
@@ -182,10 +182,10 @@ $$g(\Delta) \approx \begin{cases}
 \end{cases}$$
 This achieves **$97.8\%$ of full continuous belief propagation coding gain** (within $0.05\text{ dB}$ of Shannon capacity) with zero transcendental look-up overhead.
 
-### 3.4 Zero-Transpose 32-Lane SFPU Pairwise $\operatorname{AMin}^*$ Tree (`compute_trisc.cpp`)
-To eliminate `SFPTRANSP` (`swap_subvec16`) register clobbering and maximize 32-lane SFPU throughput, `compute_tile_deg6` and `compute_tile_deg3` evaluate $\operatorname{AMin}^*$ vertically across all 32 lanes using a **fused pairwise prefix/suffix tree**:
-- **Fused Single-Load Sign Parity & Pairwise Reduction:** Each edge pair $(q_0, q_3)$, $(q_1, q_4)$, and $(q_2, q_5)$ is loaded once from `dst_reg` to simultaneously accumulate the 32-lane bitwise sign XOR $S_{\text{total}}$ and compute pairwise magnitudes $M_{03} = \operatorname{AMin}^*(|q_0|, |q_3|)$, $M_{14} = \operatorname{AMin}^*(|q_1|, |q_4|)$, and $M_{25} = \operatorname{AMin}^*(|q_2|, |q_5|)$, staged in the two unused face registers (`r_in_face = 6, 7`).
-- **Cross-Pair Extrinsic Synthesis & Intrinsic Damping ($\beta = 0.9375$):** Outgoing check magnitudes for edge pair $(0, 3)$ combine $M_{\text{oth},03} = \operatorname{AMin}^*(M_{14}, M_{25})$ with $|q_3|$ and $|q_0|$ respectively, scaled by $\beta = 0.9375 = 15/16$, signed via `sfpi::copysgn`, and rounded via exact RNE (`round_bf16`) before updating $L_{\text{new}} = \text{round\_bf16\_fast}(q_d + r_{\text{out}})$.
+### 3.4 Zero-Transpose 32-Lane SFPU Pairwise $\mathrm{AMin}^*$ Tree (`compute_trisc.cpp`)
+To eliminate `SFPTRANSP` (`swap_subvec16`) register clobbering and maximize 32-lane SFPU throughput, `compute_tile_deg6` and `compute_tile_deg3` evaluate $\mathrm{AMin}^*$ vertically across all 32 lanes using a **fused pairwise prefix/suffix tree**:
+- **Fused Single-Load Sign Parity & Pairwise Reduction:** Each edge pair $(q_0, q_3)$, $(q_1, q_4)$, and $(q_2, q_5)$ is loaded once from `dst_reg` to simultaneously accumulate the 32-lane bitwise sign XOR $S_{\text{total}}$ and compute pairwise magnitudes $M_{03} = \mathrm{AMin}^*(|q_0|, |q_3|)$, $M_{14} = \mathrm{AMin}^*(|q_1|, |q_4|)$, and $M_{25} = \mathrm{AMin}^*(|q_2|, |q_5|)$, staged in the two unused face registers (`r_in_face = 6, 7`).
+- **Cross-Pair Extrinsic Synthesis & Intrinsic Damping ($\beta = 0.9375$):** Outgoing check magnitudes for edge pair $(0, 3)$ combine $M_{\text{oth},03} = \mathrm{AMin}^*(M_{14}, M_{25})$ with $|q_3|$ and $|q_0|$ respectively, scaled by $\beta = 0.9375 = 15/16$, signed via `sfpi::copysgn`, and rounded via exact RNE (`round_bf16`) before updating $L_{\text{new}} = \text{round\_bf16\_fast}(q_d + r_{\text{out}})$.
 
 ---
 
@@ -205,7 +205,7 @@ Measured directly on Core `(0,0)` via gapless hardware wall-clock cycle timestam
 | :--- | :---: | :---: | :---: | :--- |
 | **Stage 1: Gather (`T0 -> T1`)** | `722.4` | **`636.0`** | `-86.4 (-12.0%)` | Stateful one-packet NOC DMA (`noc_async_read_one_packet_with_state`) + inline 8-byte wrap copy |
 | **Stage 2: Unpack (`T1 -> T2`)** | `124.8` | **`126.5`** | `+1.7` | Hardware Unpacker (`CB_SCRATCH_GATHER` & `CB_R_MSG` $\to$ `dst_reg`) |
-| **Stage 3: Math (`T2 -> T3`)** | `1,875.3` | **`1,764.5`** | `-110.8 (-5.9%)` | Fused Sign-Parity XOR & Pairwise $\operatorname{AMin}^*$ loads + mask-free `round_bf16_fast` + dead-store removal |
+| **Stage 3: Math (`T2 -> T3`)** | `1,875.3` | **`1,764.5`** | `-110.8 (-5.9%)` | Fused Sign-Parity XOR & Pairwise $\mathrm{AMin}^*$ loads + mask-free `round_bf16_fast` + dead-store removal |
 | **Stage 4: Pack (`T3 -> T4`)** | `209.4` | **`209.9`** | `+0.5` | Hardware Packer (`dst_reg` $\to$ `CB_SCRATCH_SCATTER` & `CB_R_MSG`) |
 | **Stage 5: Scatter (`T4 -> T5`)** | `924.8` | **`744.0`** | `-180.8 (-19.5%)` | Stateful NOC write + decoupled Tile 39 `BRISC` parity scan (`SCATTER_DONE_W0` signaled before scan) |
 | **Exact Tile Turnaround (`T0 -> T5`)** | **`3,856.7`** | **`3,481.0`** | **`-375.7 (-9.7%)`** | Plus runtime `divu`/`remu` elimination across all 3 RISC-V cores |

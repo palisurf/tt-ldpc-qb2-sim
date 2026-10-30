@@ -65,7 +65,7 @@ Measured via gapless hardware wall-clock cycle timers (`T0` through `T5`) on Cor
 | :--- | :---: | :---: | :---: | :--- |
 | **Stage 1: Gather (`T0 -> T1`)** | `722.4` | **`636.0`** | `-86.4 (-12.0%)` | Stateful one-packet NOC DMA (`noc_async_read_one_packet_with_state`) + inline 8-byte wrap copy |
 | **Stage 2: Unpack (`T1 -> T2`)** | `124.8` | **`126.5`** | `+1.7` | Hardware Unpacker (`CB_SCRATCH_IN` $\to$ `dst_reg`) |
-| **Stage 3: Math (`T2 -> T3`)** | `1,875.3` | **`1,764.5`** | `-110.8 (-5.9%)` | Fused Sign-Parity XOR & Pairwise $\operatorname{AMin}^*$ loads + mask-free `round_bf16_fast` + dead-store removal |
+| **Stage 3: Math (`T2 -> T3`)** | `1,875.3` | **`1,764.5`** | `-110.8 (-5.9%)` | Fused Sign-Parity XOR & Pairwise $\mathrm{AMin}^*$ loads + mask-free `round_bf16_fast` + dead-store removal |
 | **Stage 4: Pack (`T3 -> T4`)** | `209.4` | **`209.9`** | `+0.5` | Hardware Packer (`dst_reg` $\to$ `CB_SCRATCH_OUT`) |
 | **Stage 5: Scatter (`T4 -> T5`)** | `924.8` | **`744.0`** | `-180.8 (-19.5%)` | Stateful NOC write + decoupled Tile 39 `BRISC` parity scan (`SCATTER_DONE_W0` signaled before scan) |
 | **Exact Tile Turnaround (`T0 -> T5`)** | **`3,856.7`** | **`3,481.0`** | **`-375.7 (-9.7%)`** | Plus runtime `divu`/`remu` elimination across all 3 RISC-V cores |
@@ -80,7 +80,7 @@ Measured via gapless hardware wall-clock cycle timers (`T0` through `T5`) on Cor
 | **Data Movement** | **Stateful 512-Bit L1 NOC DMA** (`scatter_slice_l1` / `gather_slice_l1`) | **636 cyc/tile Gather & 744 cyc/tile Scatter** across all 6 check edges; zero scalar memory chasing |
 | **Decoding Schedule** | **In-Place Row-Layered (Gauss-Seidel serial schedule)** | **$2\times$ faster convergence** over flood decoding; zero-overhead inline early syndrome termination ($H \cdot \mathbf{c}^T = \mathbf{0}$) |
 | **Pipeline Architecture**| **Strict Stop-and-Wait Pipeline Locking** ($\text{Gather} \to \text{Compute} \to \text{Scatter}$) | Eliminates RAW graph hazards on shared variable nodes (`3,481.0 cyc/tile` total turnaround) |
-| **Check Node Algorithm**| **True Recursive Approximate-Min\*** (Dr. Christopher R. Jones, MILCOM 2003) | Zero-transpose 32-lane pairwise $\operatorname{AMin}^*$ tree; 2-region piecewise linear $g(\Delta)$; within $0.05\text{ dB}$ of Shannon capacity |
+| **Check Node Algorithm**| **True Recursive Approximate-Min\*** (Dr. Christopher R. Jones, MILCOM 2003) | Zero-transpose 32-lane pairwise $\mathrm{AMin}^*$ tree; 2-region piecewise linear $g(\Delta)$; within $0.05\text{ dB}$ of Shannon capacity |
 | **PRNG & AWGN Channel** | **3-Tier Orthogonal `xoshiro128+` + 32-Lane SFPU Remez Box-Muller** | Non-overlapping runways $>3.7 \times 10^{17}$ blocks (batched) and $>1.3 \times 10^{28}$ blocks (continuous); deterministic (`--seed`) or random (`--random-seed`) |
 | **Scatter Architecture** | **Unconditional Blind DMA Scatter & Convergence Latching** | Freezes converged codeword errors permanently; avoids $2\times$ scalar bitmasking penalty; cuts scatter latency by $>50\%$ |
 | **L1 SRAM Optimization** | Native 16-bit brain floating-point (`Float16_b`) | Circulant DMA uses only **$24.5\%$** of $1.5\text{ MB}$ L1 SRAM; headroom directly supports codes up to $K=4096$ ($Z=512$) |
@@ -196,11 +196,11 @@ Instead of complex sorting or multi-element Jacobi trees, the algorithm:
 4. Outgoing check message magnitudes are assigned with **zero branching**:
    $$r_{\text{mag}}(d) = \begin{cases} M_{\text{others}}, & d = d_{\min} \\ M_{\text{all}}, & d \ne d_{\min} \end{cases}$$
 
-### Zero-Transpose 32-Lane SFPU Pairwise $\operatorname{AMin}^*$ Tree (`compute_trisc.cpp`)
+### Zero-Transpose 32-Lane SFPU Pairwise $\mathrm{AMin}^*$ Tree (`compute_trisc.cpp`)
 
 On the Tensix 32-lane SFPU, each tile packs 32 check nodes across 4 concurrent codewords vertically (`128` check evaluations per tile). Rather than transposing subvectors across lanes—where the hardware `SFPTRANSP` instruction destructively clobbers $L_4 \dots L_7$—the kernel evaluates `sfpi_amin_star_branchless(a, b)` vertically across all 32 lanes using a **fused prefix/suffix pairwise tree**:
-- **Degree-6 Check Tiles (`compute_tile_deg6`)**: Fuses incoming sign-parity XOR accumulation with pairwise reductions $m_{01} = \operatorname{AMin}^*(|q_0|, |q_1|)$, $m_{23} = \operatorname{AMin}^*(|q_2|, |q_3|)$, and $m_{45} = \operatorname{AMin}^*(|q_4|, |q_5|)$, followed by cross-pair combinations $m_{0123}$, $m_{0145}$, and $m_{2345}$ so each outgoing edge $d \in \{0..5\}$ is computed in a single forward/backward pass with zero register spills.
-- **Degree-3 Check Tiles (`compute_tile_deg3`)**: Directly evaluates the 2-input extrinsic pairs $\operatorname{AMin}^*(|q_1|, |q_2|)$, $\operatorname{AMin}^*(|q_0|, |q_2|)$, and $\operatorname{AMin}^*(|q_0|, |q_1|)$ across all 4 faces.
+- **Degree-6 Check Tiles (`compute_tile_deg6`)**: Fuses incoming sign-parity XOR accumulation with pairwise reductions $m_{01} = \mathrm{AMin}^*(|q_0|, |q_1|)$, $m_{23} = \mathrm{AMin}^*(|q_2|, |q_3|)$, and $m_{45} = \mathrm{AMin}^*(|q_4|, |q_5|)$, followed by cross-pair combinations $m_{0123}$, $m_{0145}$, and $m_{2345}$ so each outgoing edge $d \in \{0..5\}$ is computed in a single forward/backward pass with zero register spills.
+- **Degree-3 Check Tiles (`compute_tile_deg3`)**: Directly evaluates the 2-input extrinsic pairs $\mathrm{AMin}^*(|q_1|, |q_2|)$, $\mathrm{AMin}^*(|q_0|, |q_2|)$, and $\mathrm{AMin}^*(|q_0|, |q_1|)$ across all 4 faces.
 
 ### 2-Region Piecewise Linear Correction $g(\Delta)$
 

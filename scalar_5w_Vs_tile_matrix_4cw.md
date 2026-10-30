@@ -69,8 +69,8 @@ inline void compute_amin_star_general(
 1. **Precursor Minimum Separation:** The algorithm isolates $d_{\min} = \arg\min_d |q_d|$.
 2. **Asymmetric Accumulation:** It accumulates all other $d_c - 1$ edges into $M_{\text{others}} = r_{\text{mag}}(d_{\min})$ in a serial chain of length 4.
 3. **The Intrinsic Damping Effect:** For all other edges $d \ne d_{\min}$, the outgoing magnitude is set to:
-   $$M_{\text{all}} = \operatorname{AMin}^*(M_{\text{others}}, |q_{d_{\min}}|)$$
-   Because $M_{\text{others}}$ contains $|q_d|$, $M_{\text{all}}$ is strictly **smaller** than the true theoretical extrinsic value $\operatorname{AMin}^*_{k \ne d}(|q_k|)$.
+   $$M_{\text{all}} = \mathrm{AMin}^*(M_{\text{others}}, |q_{d_{\min}}|)$$
+   Because $M_{\text{others}}$ contains $|q_d|$, $M_{\text{all}}$ is strictly **smaller** than the true theoretical extrinsic value $\mathrm{AMin}^*_{k \ne d}(|q_k|)$.
 4. **Why Intrinsic Damping Suppresses Error Floors:**
    On finite-length Tanner graphs containing short topological cycles (e.g. length-4 and length-6 cycles), standard sum-product or strict un-damped extrinsic messages experience positive feedback loops that inflate LLR magnitudes too quickly. This locks the decoder into non-codeword trapping sets. The slight magnitude attenuation inherent in $M_{\text{all}}$ acts as a natural **damping factor** (analogous to $\alpha < 1$ in normalized min-sum), preventing premature saturation and allowing weak parity equations to correct erroneous nodes.
 
@@ -153,8 +153,8 @@ In `tile_matrix_4cw`, the physical TRISC SFPU executes in native 16-bit destinat
 
 As a result, as mirrored in [`tests/test_tile_matrix_40tile_lockstep_stepper_sfpi.cpp`](file:///Y:/JPL/LDPC_QB2/LDPC_QB2_GA/tests/test_tile_matrix_40tile_lockstep_stepper_sfpi.cpp#L618-L687), intermediate values are truncated/rounded to `bfloat16` across **four separate stages within a single check node**:
 1. **Stage 0:** $Q = \text{round\_bf16}(L - R_{\text{old}})$
-2. **Stage 3:** $M_{01}, M_{23}, M_{45} = \text{round\_bf16}(\operatorname{AMin}^*(m_a, m_b))$
-3. **Stage 4a:** $r_{\text{out}} = \text{round\_bf16}(\operatorname{copysgn}(r_{\text{mag}}, s))$
+2. **Stage 3:** $M_{01}, M_{23}, M_{45} = \text{round\_bf16}(\mathrm{AMin}^*(m_a, m_b))$
+3. **Stage 4a:** $r_{\text{out}} = \text{round\_bf16}(\mathrm{copysgn}(r_{\text{mag}}, s))$
 4. **Stage 4b:** $L_{\text{new}} = \text{round\_bf16}(Q + r_{\text{out}})$
 
 #### Impact of Intermediate Rounding Noise:
