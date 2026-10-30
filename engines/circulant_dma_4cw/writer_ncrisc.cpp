@@ -264,6 +264,9 @@ void kernel_main() {
             // Iteration-Boundary Parity & Termination Check
 #if !LDPC_TEST_PASSTHROUGH_MODE
             if (t_step == num_tiles - 1) {
+                while (sync_flags[SyncSlot::PARITY_REPORT_W1] < bar) {
+                    asm volatile("" ::: "memory");
+                }
                 uint32_t info_errs = sync_flags[SyncSlot::PARITY_REPORT_W0];
                 for (uint32_t cw = 0; cw < 4; ++cw) {
                     if ((active_mask & (1 << cw)) && !(info_errs & (1 << cw))) {

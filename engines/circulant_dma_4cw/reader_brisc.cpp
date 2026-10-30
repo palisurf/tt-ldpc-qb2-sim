@@ -159,6 +159,10 @@ void kernel_main() {
             }
             cycles_scatter += (get_wall_clock() - t_s0);
 
+            sync_flags[SyncSlot::SCATTER_DONE_W0] = bar;
+            asm volatile("fence rw, rw" ::: "memory");
+            WAYPOINT("B_SD");
+
             // Information Node Parity Scan (Tile 39)
 #if !LDPC_TEST_PASSTHROUGH_MODE
             if (t_step == num_tiles - 1) {
@@ -191,13 +195,10 @@ void kernel_main() {
                 if ((brisc_err23 & 0x00008000) && (active_mask & 4)) info_err_mask |= 4;
                 if ((brisc_err23 & 0x80000000) && (active_mask & 8)) info_err_mask |= 8;
                 sync_flags[SyncSlot::PARITY_REPORT_W0] = info_err_mask;
+                sync_flags[SyncSlot::PARITY_REPORT_W1] = bar;
                 asm volatile("fence rw, rw" ::: "memory");
             }
 #endif
-
-            sync_flags[SyncSlot::SCATTER_DONE_W0] = bar;
-            asm volatile("fence rw, rw" ::: "memory");
-            WAYPOINT("B_SD");
 
             // Wait for Worker 1 (NCRISC) to finish scatter and commit L1 writeback
             while (sync_flags[SyncSlot::SCATTER_DONE_W1] < bar) {
