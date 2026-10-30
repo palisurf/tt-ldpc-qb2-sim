@@ -48,9 +48,16 @@ static std::string resolve_filepath(const std::string& filename) {
 
 // ------------------------------------------------------------------------------
 // Run Simulation Workload on Blackhole Hardware / ttsim
+static const char* get_invocation_id_path() {
+    const char* sim_env = std::getenv("TT_METAL_SIMULATOR");
+    return (sim_env && sim_env[0] != '\0')
+        ? "/tmp/tt_circulant_invocation_id_sim"
+        : "/tmp/tt_circulant_invocation_id";
+}
+
 static uint32_t get_unique_invocation_id() {
     uint32_t id = 1;
-    const char* path = "/tmp/tt_circulant_invocation_id";
+    const char* path = get_invocation_id_path();
     std::ifstream fin(path);
     if (fin.is_open()) {
         fin >> id;
@@ -71,7 +78,7 @@ static uint32_t get_unique_invocation_id() {
 }
 
 static void save_invocation_id(uint32_t id) {
-    const char* path = "/tmp/tt_circulant_invocation_id";
+    const char* path = get_invocation_id_path();
     std::ofstream fout(path);
     if (fout.is_open()) {
         fout << id;
