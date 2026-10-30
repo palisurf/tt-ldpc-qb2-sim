@@ -196,11 +196,14 @@ Instead of complex sorting or multi-element Jacobi trees, the algorithm:
 4. Outgoing check message magnitudes are assigned with **zero branching**:
    $$r_{\text{mag}}(d) = \begin{cases} M_{\text{others}}, & d = d_{\min} \\ M_{\text{all}}, & d \ne d_{\min} \end{cases}$$
 
-### Zero-Transpose 32-Lane SFPU Pairwise $\mathrm{AMin}^*$ Tree (`compute_trisc.cpp`)
+### Zero-Transpose 32-Lane SFPU Pairwise $\mathrm{AMin}^*$ Tree & Intrinsic Damping (`compute_trisc.cpp`)
 
-On the Tensix 32-lane SFPU, each tile packs 32 check nodes across 4 concurrent codewords vertically (`128` check evaluations per tile). Rather than transposing subvectors across lanes—where the hardware `SFPTRANSP` instruction destructively clobbers $L_4 \dots L_7$—the kernel evaluates `sfpi_amin_star_branchless(a, b)` vertically across all 32 lanes using a **fused prefix/suffix pairwise tree**:
-- **Degree-6 Check Tiles (`compute_tile_deg6`)**: Fuses incoming sign-parity XOR accumulation with pairwise reductions $m_{01} = \mathrm{AMin}^*(|q_0|, |q_1|)$, $m_{23} = \mathrm{AMin}^*(|q_2|, |q_3|)$, and $m_{45} = \mathrm{AMin}^*(|q_4|, |q_5|)$, followed by cross-pair combinations $m_{0123}$, $m_{0145}$, and $m_{2345}$ so each outgoing edge $d \in \{0..5\}$ is computed in a single forward/backward pass with zero register spills.
+On the Tensix 32-lane SFPU, each tile packs 32 check nodes across 4 concurrent codewords vertically (`128` check evaluations per tile). Rather than transposing subvectors across lanes—where the hardware `SFPTRANSP` instruction destructively clobbers $L_4 \dots L_7$—the kernel pairs low/high faces vertically (Face `0` with Face `2` for Worker 0; Face `1` with Face `3` for Worker 1) and evaluates `sfpi_amin_star_branchless(a, b)` across all 32 lanes using a **fused prefix/suffix pairwise tree**:
+- **Degree-6 Check Tiles (`compute_tile_deg6`)**: Fuses incoming sign-parity XOR accumulation with single-load pairwise reductions $m_{03} = \mathrm{AMin}^*(|q_0|, |q_3|)$, $m_{14} = \mathrm{AMin}^*(|q_1|, |q_4|)$, and $m_{25} = \mathrm{AMin}^*(|q_2|, |q_5|)$ staged in face scratch registers `6..7`, followed by cross-pair extrinsic combinations $m_{\text{oth},03} = \mathrm{AMin}^*(m_{14}, m_{25})$, $m_{\text{oth},14} = \mathrm{AMin}^*(m_{03}, m_{25})$, and $m_{\text{oth},25} = \mathrm{AMin}^*(m_{03}, m_{14})$ with zero register spills.
 - **Degree-3 Check Tiles (`compute_tile_deg3`)**: Directly evaluates the 2-input extrinsic pairs $\mathrm{AMin}^*(|q_1|, |q_2|)$, $\mathrm{AMin}^*(|q_0|, |q_2|)$, and $\mathrm{AMin}^*(|q_0|, |q_1|)$ across all 4 faces.
+- **Intrinsic Check-Message Damping ($\beta = 0.9375 = 15/16$)**: Prior to sign restoration (`sfpi::copysgn`) and Round-to-Nearest-Even (`round_bf16`) quantization, each outgoing check magnitude is scaled by an exact dyadic damping factor $\beta = 0.9375 = 15/16$:
+  $$r_{\text{out}}(d) = \mathrm{round\_bf16}\!\left(\mathrm{sgn}(r_d) \cdot \beta \cdot \mathrm{AMin}^*_{k \ne d}(|q_k|)\right), \quad L_{\text{new}}(d) = \mathrm{round\_bf16\_fast}\!\left(q_d + r_{\text{out}}(d)\right)$$
+  Applying $\beta = 0.9375$ counteracts slight positive bias from finite-precision `bfloat16` accumulation and pairwise tree non-associativity in high-girth row-layered schedules, suppressing oscillating trapping-set beliefs in the deep waterfall and error-floor regimes ($2.25\text{--}2.50\text{ dB}$).
 
 ### 2-Region Piecewise Linear Correction $g(\Delta)$
 
