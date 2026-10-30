@@ -8,8 +8,8 @@ Circulant DMA 4-Codeword LDPC Decoder Engine for a single Tensix Core.
 Architectural Structure:
   VERTICAL LAYERS (Top to Bottom Stack):
     Layer 1 (Top):    L1 SRAM Persistent Storage (CB_VNODE, CB_R_MSG, CB_TELEMETRY)
-    Layer 2:          Gather / Scatter & Data Movement Plane (BRISC, NCRISC, 512-Bit NOC DMA Engine)
-    Layer 3:          Scratch Pads & Staging Circular Buffers (CB_SCRATCH_GATHER, CB_SCRATCH_SCATTER, Lockstep Monitor)
+    Layer 2:          Gather / Scatter & Data Movement Plane (BRISC, NCRISC, Stateful 512-Bit NOC DMA Engine)
+    Layer 3:          Scratch Pads & Staging Circular Buffers (CB_SCRATCH_GATHER, CB_SCRATCH_SCATTER, Lockstep Pipeline)
     Layer 4:          Unpack / Pack Orchestration (Worker 2: TRISC0 Unpack, Worker 4: TRISC2 Pack)
     Layer 5 (Bottom): Compute Engine & Tensix DEST Registers (Worker 3: TRISC1 Math, 64 FP16 DEST Regs)
 
@@ -62,10 +62,10 @@ def create_diagram():
     ax.text(100, 112.4, "TENSIX CORE LDPC DATAFLOW & MEMORY ARCHITECTURE",
             ha='center', va='center', fontsize=16.0, fontweight='bold', color='#ffffff',
             family='sans-serif')
-    ax.text(100, 109.5, "QuietBox 2 Circulant DMA 4-Codeword Engine • × 440 Copies Across Full Mesh (4 Chips × 110 Cores = 1,760 Concurrent Codewords)",
-            ha='center', va='center', fontsize=9.2, fontweight='bold', color='#fde047',
+    ax.text(100, 109.5, "QuietBox 2 Circulant DMA 4-CW Engine • 5.29 Gsps (1,350 MHz) – 5.48 Gsps (1,400 MHz) Across 440 Cores (1,760 Codewords)",
+            ha='center', va='center', fontsize=9.1, fontweight='bold', color='#fde047',
             family='sans-serif')
-    ax.text(100, 107.2, "Vertical Layered Stack: L1 Persistent SRAM → Gather/Scatter Couriers → Staging Scratchpads → Unpack/Pack → Compute Engine",
+    ax.text(100, 107.2, "Vertical Layered Stack: L1 Persistent SRAM → Stateful 512b DMA Couriers → Staging Scratchpads → Unpack/Pack → Zero-Transpose SFPU",
             ha='center', va='center', fontsize=8.2, fontweight='bold', color='#93c5fd',
             family='sans-serif')
 
@@ -125,9 +125,9 @@ def create_diagram():
     ax.add_patch(telem_box)
     ax.text(139.5, 98.2, "CB_TELEMETRY (CB 24)", ha='center', va='center',
             fontsize=8.8, fontweight='bold', color='#c084fc')
-    ax.text(139.5, 95.8, "Mailboxes & Convergence Latch", ha='center', va='center',
+    ax.text(139.5, 95.8, "Mailboxes, Timers & Convergence Latch", ha='center', va='center',
             fontsize=7.2, color='#e2e8f0', fontweight='bold')
-    ax.text(139.5, 93.6, "• active_mask[3:0] & cw_iters[0..3]", ha='center', va='center',
+    ax.text(139.5, 93.6, "• active_mask[3:0] & T0..T5 Cycle Timers", ha='center', va='center',
             fontsize=6.8, color='#fde047', fontweight='bold')
     ax.text(139.5, 91.6, "• Zero post-convergence error count", ha='center', va='center',
             fontsize=6.8, color='#34d399', fontweight='bold')
@@ -143,8 +143,8 @@ def create_diagram():
     ax.add_patch(l2_box)
     ax.text(sx0 + 3, 81.0, "LAYER 2: GATHER / SCATTER COURIERS",
             ha='left', va='center', fontsize=10.0, fontweight='bold', color='#60a5fa')
-    ax.text(sx1 - 3, 81.0, "Workers 0 & 1 • 512-Bit NOC DMA Bursts (2c / 128-Byte Slice)",
-            ha='right', va='center', fontsize=7.6, color='#94a3b8')
+    ax.text(sx1 - 3, 81.0, "Workers 0 & 1 • Stateful One-Packet 512-Bit NOC DMA + Inline 8B Wrap Copy",
+            ha='right', va='center', fontsize=7.5, color='#94a3b8')
 
     # 2.1 Worker 0 (BRISC) - (x: 44 to 77, w: 33, y: 69.5 to 79.2)
     brisc_box = patches.FancyBboxPatch(
@@ -154,12 +154,12 @@ def create_diagram():
     ax.add_patch(brisc_box)
     ax.text(60.5, 77.6, "WORKER 0: BRISC (Faces 0 & 2)", ha='center', va='center',
             fontsize=8.8, fontweight='bold', color='#93c5fd')
-    ax.text(60.5, 75.3, "• Checks 0..3 (16 Rows), Lanes 0..15", ha='center', va='center',
+    ax.text(60.5, 75.3, "• Checks 0..15 (F0: E0..2, F2: E3..5)", ha='center', va='center',
             fontsize=6.8, color='#cbd5e1')
-    ax.text(60.5, 73.3, "• Stage 1 Gather: 384 B to Face 0/2", ha='center', va='center',
+    ax.text(60.5, 73.3, "• Stage 1 Gather: 636.0 cyc/tile", ha='center', va='center',
             fontsize=6.8, color='#38bdf8', fontweight='bold')
-    ax.text(60.5, 71.3, "• Stage 5 Scatter: Blind DMA Commit", ha='center', va='center',
-            fontsize=6.8, color='#f59e0b', fontweight='bold')
+    ax.text(60.5, 71.3, "• Stage 5 Scatter + Decoupled Info Scan", ha='center', va='center',
+            fontsize=6.7, color='#f59e0b', fontweight='bold')
 
     # 2.2 512-Bit DMA Engine Badge (x: 80 to 120, w: 40, y: 69.5 to 79.2)
     dma_box = patches.FancyBboxPatch(
@@ -167,14 +167,14 @@ def create_diagram():
         facecolor='#0c4a6e', edgecolor='#38bdf8', linewidth=1.5
     )
     ax.add_patch(dma_box)
-    ax.text(100, 77.6, "512-BIT L1 NOC DMA ENGINE", ha='center', va='center',
-            fontsize=9.0, fontweight='bold', color='#ffffff')
+    ax.text(100, 77.6, "STATEFUL 512-BIT NOC DMA ENGINE", ha='center', va='center',
+            fontsize=8.8, fontweight='bold', color='#ffffff')
     ax.text(100, 75.3, "Circulant Contiguity: Δv/Δc = +1", ha='center', va='center',
             fontsize=7.2, color='#67e8f9', fontweight='bold')
     ax.text(100, 73.3, "128-Byte Slice ÷ 64 B/Cyc = 2 Cycles!", ha='center', va='center',
             fontsize=7.2, color='#fde047', fontweight='bold')
-    ax.text(100, 71.3, "Collapses Gather & Scatter to 12c", ha='center', va='center',
-            fontsize=6.8, color='#cbd5e1')
+    ax.text(100, 71.3, "One-Packet NOC State + Inline 8B Wrap", ha='center', va='center',
+            fontsize=6.7, color='#cbd5e1')
 
     # 2.3 Worker 1 (NCRISC) - (x: 123 to 156, w: 33, y: 69.5 to 79.2)
     ncrisc_box = patches.FancyBboxPatch(
@@ -184,11 +184,11 @@ def create_diagram():
     ax.add_patch(ncrisc_box)
     ax.text(139.5, 77.6, "WORKER 1: NCRISC (Faces 1 & 3)", ha='center', va='center',
             fontsize=8.8, fontweight='bold', color='#93c5fd')
-    ax.text(139.5, 75.3, "• Checks 4..7 (16 Rows), Lanes 16..31", ha='center', va='center',
+    ax.text(139.5, 75.3, "• Checks 16..31 (F1: E0..2, F3: E3..5)", ha='center', va='center',
             fontsize=6.8, color='#cbd5e1')
-    ax.text(139.5, 73.3, "• Stage 1 Gather: 384 B to Face 1/3", ha='center', va='center',
+    ax.text(139.5, 73.3, "• Stage 1 Gather: 636.0 cyc/tile", ha='center', va='center',
             fontsize=6.8, color='#38bdf8', fontweight='bold')
-    ax.text(139.5, 71.3, "• Stage 5 Scatter: Blind DMA Commit", ha='center', va='center',
+    ax.text(139.5, 71.3, "• Stage 5 Scatter: 744.0 cyc/tile", ha='center', va='center',
             fontsize=6.8, color='#f59e0b', fontweight='bold')
 
     # =============================================================
@@ -225,14 +225,14 @@ def create_diagram():
         facecolor='#0f172a', edgecolor='#10b981', linewidth=1.5
     )
     ax.add_patch(ls_box)
-    ax.text(100.5, 59.8, "MANDATORY LOCKSTEP INVARIANT", ha='center', va='center',
-            fontsize=8.5, fontweight='bold', color='#34d399')
-    ax.text(100.5, 57.5, "Gather(12c) → Unpack(16c) → Compute(912c) →", ha='center', va='center',
-            fontsize=6.8, color='#cbd5e1')
-    ax.text(100.5, 55.5, "Pack(16c) → Scatter(12c) = 968c Turnaround", ha='center', va='center',
-            fontsize=6.8, color='#cbd5e1')
-    ax.text(100.5, 53.3, "94.2% Compute Duty Cycle (912c ÷ 968c)!", ha='center', va='center',
-            fontsize=7.2, color='#fde047', fontweight='bold')
+    ax.text(100.5, 59.8, "GAPLESS LOCKSTEP PIPELINE (T0 → T5)", ha='center', va='center',
+            fontsize=8.3, fontweight='bold', color='#34d399')
+    ax.text(100.5, 57.5, "Gather(636c) → Unpack(127c) → Math(1,765c)", ha='center', va='center',
+            fontsize=6.7, color='#cbd5e1')
+    ax.text(100.5, 55.5, "→ Pack(210c) → Scatter(744c) = 3,481c/Tile", ha='center', va='center',
+            fontsize=6.7, color='#cbd5e1')
+    ax.text(100.5, 53.3, "Zero RAW Hazards • 5.29–5.48 Gsps Mesh!", ha='center', va='center',
+            fontsize=7.1, color='#fde047', fontweight='bold')
 
     # 3.3 CB_SCRATCH_SCATTER (x: 123 to 156, w: 33, y: 51.5 to 61.5)
     ss_box = patches.FancyBboxPatch(
@@ -268,11 +268,11 @@ def create_diagram():
         facecolor='#2e1065', edgecolor='#a855f7', linewidth=1.5
     )
     ax.add_patch(t0_box)
-    ax.text(71, 41.5, "WORKER 2: TRISC0 (UNPACK ENGINE)", ha='center', va='center',
-            fontsize=8.8, fontweight='bold', color='#f3e8ff')
-    ax.text(71, 39.2, "• Unpacks Vnode Beliefs (CB_SCRATCH_GATHER) → Tile 1 (dst[32..63])", ha='center', va='center',
+    ax.text(71, 41.5, "WORKER 2: TRISC0 (UNPACK ENGINE • 126.5c)", ha='center', va='center',
+            fontsize=8.6, fontweight='bold', color='#f3e8ff')
+    ax.text(71, 39.2, "• Unpacks Vnode Beliefs (CB_SCRATCH_GATHER) → Tile 0 (dst[0..31])", ha='center', va='center',
             fontsize=6.8, color='#38bdf8', fontweight='bold')
-    ax.text(71, 37.0, "• Unpacks Edge Messages (CB_R_MSG FIFO) → Tile 0 (dst[0..31])", ha='center', va='center',
+    ax.text(71, 37.0, "• Unpacks Edge Messages (CB_R_MSG FIFO) → Tile 1 (dst[32..63])", ha='center', va='center',
             fontsize=6.8, color='#818cf8', fontweight='bold')
 
     # 4.2 Worker 4: TRISC2 (PACK) - (x: 102 to 156, w: 54, y: 35 to 43.5)
@@ -281,8 +281,8 @@ def create_diagram():
         facecolor='#2e1065', edgecolor='#a855f7', linewidth=1.5
     )
     ax.add_patch(t2_box)
-    ax.text(129, 41.5, "WORKER 4: TRISC2 (PACK ENGINE)", ha='center', va='center',
-            fontsize=8.8, fontweight='bold', color='#f3e8ff')
+    ax.text(129, 41.5, "WORKER 4: TRISC2 (PACK ENGINE • 209.9c)", ha='center', va='center',
+            fontsize=8.6, fontweight='bold', color='#f3e8ff')
     ax.text(129, 39.2, "• Packs Fresh Beliefs L_new (Tile 1) → CB_SCRATCH_SCATTER", ha='center', va='center',
             fontsize=6.8, color='#34d399', fontweight='bold')
     ax.text(129, 37.0, "• Packs Fresh Checks R_new (Tile 0) → CB_R_MSG FIFO Commit", ha='center', va='center',
@@ -297,9 +297,9 @@ def create_diagram():
     )
     ax.add_patch(l5_box)
     ax.text(sx0 + 3, 28.5, "LAYER 5: COMPUTE ENGINE & TENSIX DEST REGISTERS (WORKER 3: TRISC1)",
-            ha='left', va='center', fontsize=10.5, fontweight='bold', color='#f472b6')
-    ax.text(sx1 - 3, 28.5, "32-Lane SFPU Vector Engine • Vectorized True Recursive Approximate-Min*",
-            ha='right', va='center', fontsize=7.6, color='#94a3b8')
+            ha='left', va='center', fontsize=10.2, fontweight='bold', color='#f472b6')
+    ax.text(sx1 - 2.5, 28.5, "32-Lane SFPU (1,764.5c/tile) • Zero-Transpose",
+            ha='right', va='center', fontsize=7.3, color='#94a3b8')
 
     # 5.1 TENSIX DEST REGISTERS (x: 44 to 98, w: 54, y: 7 to 26.5)
     dest_box = patches.FancyBboxPatch(
@@ -309,18 +309,18 @@ def create_diagram():
     ax.add_patch(dest_box)
     ax.text(71, 24.5, "TENSIX DEST REGISTERS (64 × 16-BIT FP)", ha='center', va='center',
             fontsize=9.0, fontweight='bold', color='#86efac')
-    ax.text(71, 22.0, "Tile 0: dst_reg[0..31] → Outgoing Checks R_new (Edge Data)", ha='center', va='center',
-            fontsize=7.4, color='#bbf7d0', fontweight='bold')
-    ax.text(71, 19.8, "  F0 [0..7] | F1 [8..15] | F2 [16..23] | F3 [24..31]", ha='center', va='center',
-            fontsize=6.8, color='#cbd5e1')
-    ax.text(71, 17.0, "Tile 1: dst_reg[32..63] → Updated Beliefs L_new (Vnode Data)", ha='center', va='center',
-            fontsize=7.4, color='#fef08a', fontweight='bold')
-    ax.text(71, 14.8, "  F0 [32..39] | F1 [40..47] | F2 [48..55] | F3 [56..63]", ha='center', va='center',
-            fontsize=6.8, color='#cbd5e1')
-    ax.text(71, 12.0, "• Round-to-Nearest-Even (RNE) Mantissa Protection", ha='center', va='center',
-            fontsize=7.0, color='#86efac', fontweight='bold')
-    ax.text(71, 9.4, "• Damped Checks: R_new = R_mag · 0.9375 · sgn", ha='center', va='center',
-            fontsize=7.0, color='#34d399', fontweight='bold')
+    ax.text(71, 22.0, "Tile 0: dst_reg[0..31] → In-Place Q_d & Outgoing R_new", ha='center', va='center',
+            fontsize=7.3, color='#bbf7d0', fontweight='bold')
+    ax.text(71, 19.8, "  F0 [0..7] (W0 E0..2) | F1 [8..15] (W1 E0..2) | F2 [16..23] | F3 [24..31]", ha='center', va='center',
+            fontsize=6.5, color='#cbd5e1')
+    ax.text(71, 17.0, "Tile 1: dst_reg[32..63] → Input R_old & Updated Beliefs L_new", ha='center', va='center',
+            fontsize=7.3, color='#fef08a', fontweight='bold')
+    ax.text(71, 14.8, "  F0 [32..39] | F1 [40..47] | F2 [48..55] (W0 E3..5) | F3 [56..63] (W1 E3..5)", ha='center', va='center',
+            fontsize=6.5, color='#cbd5e1')
+    ax.text(71, 12.0, "• Exact RNE Mantissa Rounding on R_out (u &= 0xFFFF0000U)", ha='center', va='center',
+            fontsize=6.9, color='#86efac', fontweight='bold')
+    ax.text(71, 9.4, "• Fast Mask-Free RNE on Direct 16b DEST Stores (round_bf16_fast)", ha='center', va='center',
+            fontsize=6.9, color='#34d399', fontweight='bold')
 
     # 5.2 SFPU ARITHMETIC PIPELINE (x: 102 to 156, w: 54, y: 7 to 26.5)
     math_box = patches.FancyBboxPatch(
@@ -328,21 +328,21 @@ def create_diagram():
         facecolor='#1e1b4b', edgecolor='#ec4899', linewidth=1.5
     )
     ax.add_patch(math_box)
-    ax.text(129, 24.5, "SFPU PARALLEL TREE APPROX-MIN* (32 LANES)", ha='center', va='center',
-            fontsize=8.8, fontweight='bold', color='#f472b6')
-    ax.text(129, 22.2, "1. Prior Subtraction: q_d = Lv - R_old (in-place Tile 0)", ha='center', va='center',
-            fontsize=7.1, color='#cbd5e1')
-    ax.text(129, 19.8, "2. Subvector Transpose: swap_subvec16 (pairwise align)", ha='center', va='center',
-            fontsize=7.1, color='#cbd5e1')
-    ax.text(129, 17.4, "3. Parallel Tree: Pairwise M01, M23, M45 (FP32 LRegs)", ha='center', va='center',
-            fontsize=7.1, color='#cbd5e1')
+    ax.text(129, 24.5, "ZERO-TRANSPOSE SFPU TREE APPROX-MIN* (32 LANES)", ha='center', va='center',
+            fontsize=8.5, fontweight='bold', color='#f472b6')
+    ax.text(129, 22.2, "1. Prior Subtraction: q_d = round_bf16_fast(Lv - R_old) in Tile 0", ha='center', va='center',
+            fontsize=7.0, color='#cbd5e1')
+    ax.text(129, 19.8, "2. Fused Single-Load Sign Parity XOR + Pairwise AMin* (M03, M14, M25)", ha='center', va='center',
+            fontsize=6.9, color='#cbd5e1')
+    ax.text(129, 17.4, "3. Zero SFPTRANSP: Face 0/2 & Face 1/3 Vertical Alignment", ha='center', va='center',
+            fontsize=7.0, color='#cbd5e1')
     ax.text(129, 15.0, "4. Full Extrinsics: R_mag(d) strictly excludes edge d", ha='center', va='center',
             fontsize=7.2, color='#fde047', fontweight='bold')
-    ax.text(129, 12.6, "5. Belief Damping (β = 0.9375): Trapping set suppression", ha='center', va='center',
-            fontsize=7.2, color='#34d399', fontweight='bold')
-    ax.text(129, 10.2, "6. Posterior Update: L_new = q_d + R_new (Tile 1 RNE)", ha='center', va='center',
-            fontsize=7.2, color='#a5f3fc', fontweight='bold')
-    ax.text(129, 8.1, "Full Extrinsics • Zero Sorting • Intrinsic Damping (β = 15/16)", ha='center', va='center',
+    ax.text(129, 12.6, "5. Intrinsic Damping (β = 0.9375) + Exact RNE on R_new", ha='center', va='center',
+            fontsize=7.1, color='#34d399', fontweight='bold')
+    ax.text(129, 10.2, "6. Posterior Update: L_new = round_bf16_fast(q_d + R_new) (Tile 1)", ha='center', va='center',
+            fontsize=7.0, color='#a5f3fc', fontweight='bold')
+    ax.text(129, 8.1, "Plus 32-Lane VectorXoshiro128Plus + Remez Box-Muller Channel Gen", ha='center', va='center',
             fontsize=6.6, color='#fbcfe8')
 
     # =============================================================
@@ -373,10 +373,10 @@ def create_diagram():
                 arrowprops=dict(arrowstyle="->", color=col_vnode_down, lw=2.0))
 
     # Lane L1 Labels (placed cleanly to avoid line crossings)
-    ax.text(30, 78.5, "512b DMA\nGather", ha='right', va='center', fontsize=6.8, color=col_vnode_down, fontweight='bold')
-    ax.text(30, 60.5, "Stage 1\nGather", ha='right', va='center', fontsize=6.8, color=col_vnode_down, fontweight='bold')
-    ax.text(30, 43.5, "Stage 2\nUnpack", ha='right', va='center', fontsize=6.8, color=col_vnode_down, fontweight='bold')
-    ax.text(37, 18.5, "Vnode In (Tile 1)", ha='center', va='bottom', fontsize=6.8, color=col_vnode_down, fontweight='bold')
+    ax.text(28.6, 78.5, "512b DMA\nGather", ha='right', va='center', fontsize=6.8, color=col_vnode_down, fontweight='bold')
+    ax.text(28.6, 60.5, "Stage 1\nGather (636c)", ha='right', va='center', fontsize=6.8, color=col_vnode_down, fontweight='bold')
+    ax.text(28.6, 43.5, "Stage 2\nUnpack (127c)", ha='right', va='center', fontsize=6.8, color=col_vnode_down, fontweight='bold')
+    ax.text(37, 18.5, "Vnode In (Tile 0)", ha='center', va='bottom', fontsize=6.8, color=col_vnode_down, fontweight='bold')
 
     # Badge for Vnode Downward Bus
     ax.text(30, 102.5, "VNODE DATA (DOWN)\nLv Beliefs Highway", ha='center', va='center',
@@ -407,7 +407,7 @@ def create_diagram():
     ax.text(13, 50, "Bypasses L2/L3 Staging\nDirect FIFO Unpack", ha='center', va='center',
             fontsize=6.5, color='#a5b4fc', fontweight='bold',
             bbox=dict(boxstyle='round,pad=0.15', facecolor='#0f172a', edgecolor=col_edge_down, alpha=0.9))
-    ax.text(37, 23.5, "Edge In (Tile 0)", ha='center', va='bottom', fontsize=6.8, color=col_edge_down, fontweight='bold')
+    ax.text(37, 23.5, "Edge In (Tile 1)", ha='center', va='bottom', fontsize=6.8, color=col_edge_down, fontweight='bold')
 
     # Badge for Edge Downward Bus
     ax.text(13, 102.5, "EDGE DATA (DOWN)\nR_old Check FIFO", ha='center', va='center',
@@ -438,11 +438,11 @@ def create_diagram():
     # Tap from TRISC2 Pack in Layer 4: freshly packed L_new up into CB_SCRATCH_SCATTER
     ax.annotate('', xy=(156, 53.5), xytext=(156, 42.0),
                 arrowprops=dict(arrowstyle="->", color=col_vnode_up, lw=2.2))
-    ax.text(158, 47.5, "Pack L_new", ha='left', va='center', fontsize=6.8, color=col_vnode_up, fontweight='bold')
+    ax.text(158, 47.5, "Pack L_new (210c)", ha='left', va='center', fontsize=6.8, color=col_vnode_up, fontweight='bold')
 
     # Lane R1 Labels
-    ax.text(170, 61.5, "Stage 5\nScatter", ha='left', va='center', fontsize=6.8, color=col_vnode_up, fontweight='bold')
-    ax.text(170, 78.5, "512b DMA\nCommit", ha='left', va='center', fontsize=6.8, color=col_vnode_up, fontweight='bold')
+    ax.text(171.4, 61.5, "Stage 5\nScatter (744c)", ha='left', va='center', fontsize=6.8, color=col_vnode_up, fontweight='bold')
+    ax.text(171.4, 78.5, "512b DMA\nCommit", ha='left', va='center', fontsize=6.8, color=col_vnode_up, fontweight='bold')
     ax.text(125, 87.2, "In-Place Posterior Writeback: Lv ← L_new (384 B / face)", ha='center', va='center',
             fontsize=6.8, color=col_vnode_up, fontweight='bold',
             bbox=dict(boxstyle='round,pad=0.15', facecolor='#0b1120', edgecolor=col_vnode_up, alpha=0.9))
@@ -472,7 +472,7 @@ def create_diagram():
     ax.text(187, 65, "Bypasses L3/L2 Couriers\nDirect FIFO Commit", ha='center', va='center',
             fontsize=6.5, color='#fbcfe8', fontweight='bold',
             bbox=dict(boxstyle='round,pad=0.15', facecolor='#0f172a', edgecolor=col_edge_up, alpha=0.9))
-    ax.text(187, 41.5, "Stage 4 Pack\nR_new", ha='left', va='center', fontsize=6.8, color=col_edge_up, fontweight='bold')
+    ax.text(188.4, 41.5, "Stage 4 Pack\nR_new (210c)", ha='left', va='center', fontsize=6.8, color=col_edge_up, fontweight='bold')
 
     # Badge for Edge Upward Bus
     ax.text(187, 102.5, "EDGE COMMIT (UP)\nR_new to FIFO", ha='center', va='center',
@@ -497,7 +497,7 @@ def create_diagram():
     ax.plot([77, 78.5, 78.5, 139.5, 139.5], [74.5, 74.5, 84.6, 84.6, 90.5], color='#fde047', linewidth=1.8, linestyle=':')
     ax.annotate('', xy=(139.5, 90.5), xytext=(139.5, 87.5),
                 arrowprops=dict(arrowstyle="->", color='#fde047', lw=1.8))
-    ax.text(92, 84.6, "Tile 39 Parity Scan (H · c^T = 0) → Convergence Latch", ha='center', va='center',
+    ax.text(92, 84.6, "Tile 39 Decoupled Parity Scan (H · c^T = 0) → Convergence Latch", ha='center', va='center',
             fontsize=6.5, color='#fde047', fontweight='bold',
             bbox=dict(boxstyle='round,pad=0.12', facecolor='#0b1120', edgecolor='#fde047', alpha=0.9))
 

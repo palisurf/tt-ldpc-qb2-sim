@@ -118,12 +118,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-weight: 600;
   }
 
-  .author-affil {
-    font-size: 7.8pt;
-    color: #64748b;
-    font-weight: 400;
-  }
-
   /* Section Headings */
   h2 {
     font-size: 11.8pt;
@@ -169,7 +163,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 7.8pt;
+    font-size: 7.7pt;
     margin: 8px 0 12px 0;
     page-break-inside: avoid;
   }
@@ -184,17 +178,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
 
   td {
-    padding: 4px 6px;
+    padding: 3.8px 6px;
     border: 1px solid #cbd5e1;
     vertical-align: middle;
   }
 
   tr:nth-child(even) td {
     background-color: #f8fafc;
-  }
-
-  tr:hover td {
-    background-color: #f1f5f9;
   }
 
   /* Callout Boxes */
@@ -309,8 +299,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="header-card">
   <div class="badge-row">
     <span class="badge badge-blue">Hardware: 440 Tensix Cores</span>
-    <span class="badge badge-purple">Topology: 2x2 Blackhole Mesh</span>
-    <span class="badge badge-green">Throughput: 4.91 &ndash; 5.15 Gsps</span>
+    <span class="badge badge-purple">Topology: 2x2 Blackhole Mesh (1.35 &ndash; 1.40 GHz)</span>
+    <span class="badge badge-green">Throughput: 5.29 &ndash; 5.48 Gsps Sustained</span>
     <span class="badge badge-amber">Code: CCSDS AR4JA Rate-1/2</span>
     <span class="badge badge-slate">Published: October 2026</span>
   </div>
@@ -333,8 +323,8 @@ This report provides an exhaustive, ground-truth operational reference for the p
 </p>
 
 <div class="callout callout-green">
-  <div class="callout-title">&check; Key Production Milestone: 4.91 Gsps Sustained on Physical Silicon</div>
-  The flagship <strong>Circulant DMA 4-Codeword Engine</strong> (<code>engines/circulant_dma_4cw/</code>) achieves a sustained mesh decoding throughput of <strong>4,910.8 Msps (4.91 Gsps)</strong> across all 440 Tensix cores during full 200-iteration sweeps, peaking at <strong>5.15 Gsps</strong> at high SNR. Simulating <strong>10 Billion codewords</strong> executes in <strong>&approx; 35 minutes</strong> on physical QuietBox 2 hardware&mdash;a 29.5&times; speedup over the packed scalar engine (2.3 days) and a 174&times; speedup over the single-worker baseline (14.7 days).
+  <div class="callout-title">&check; Key Production Milestone: 5.29 &ndash; 5.48 Gsps Sustained on Physical Silicon (40B Blocks Certified at 2.50 dB)</div>
+  The flagship <strong>Circulant DMA 4-Codeword Engine</strong> (<code>engines/circulant_dma_4cw/</code>) achieves a sustained mesh decoding throughput of <strong>5,287.3 Msps (5.29 Gsps)</strong> at the default 1,350 MHz ASIC clock and <strong>5,484.5 Msps (5.48 Gsps raw / 2.74 Gbps info rate)</strong> at the 1,400 MHz ARC clock ceiling across all 440 Tensix cores during full 200-iteration sweeps. Simulating <strong>10 Billion codewords</strong> ($20.48\text{ Trillion}$ channel symbols) executes in <strong>62.2 minutes (3,734 seconds)</strong> on physical QuietBox 2 hardware&mdash;a 33.0&times; speedup over the packed scalar engine (1.4 days) and a 194.5&times; speedup over the single-worker baseline (8.4 days).
 </div>
 
 <pre><code>┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -342,22 +332,22 @@ This report provides an exhaustive, ground-truth operational reference for the p
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ HOST SYSTEM: Ubuntu 24.04 LTS, TT-Metalium SDK 0.54, PCIe Gen4/Gen5 Host Interconnect                  │
 │                                                                                                        │
-│ 2x2 BLACKHOLE MESH (4 Chips):                                                                          │
+│ 2x2 BLACKHOLE MESH (4 Chips @ 1,350 MHz Default / 1,400 MHz FORCE_AICLK Ceiling):                      │
 │ ┌──────────────────────────┐  ┌──────────────────────────┐                                             │
 │ │ Chip (0,0): 110 Cores    │==│ Chip (0,1): 110 Cores    │                                             │
 │ └──────────────────────────┘  └──────────────────────────┘                                             │
 │              ||                            ||                                                          │
 │ ┌──────────────────────────┐  ┌──────────────────────────┐                                             │
-│ │ Chip (1,0): 110 Cores    │==│ Chip (1,1): 110 Cores    │  ==> Total Grid: 440 Tensix Compute Cores   │
+│ │ Chip (1,0): 110 Cores    │==│ Chip (1,1): 110 Cores    │  ==&gt; Total Grid: 440 Tensix Compute Cores   │
 │ └──────────────────────────┘  └──────────────────────────┘                                             │
 │                                                                                                        │
-│ PER-CORE TENSIX ARCHITECTURE:                                                                          │
+│ PER-CORE TENSIX ARCHITECTURE (3,481.0 cyc/tile Exact Turnaround):                                      │
 │ ├── 1.5 MB High-Speed L1 SRAM (Working footprint: &lt;375 KB, 24.5% utilization)                         │
-│ ├── BRISC  (Worker 0): 512-bit DMA Gather/Scatter for Faces 0 &amp; 2 (Checks 0..3) + Parity Scan         │
-│ ├── NCRISC (Worker 1): 512-bit DMA Gather/Scatter for Faces 1 &amp; 3 (Checks 4..7) + Convergence Latch    │
-│ ├── TRISC0 (Worker 2): Unpack orchestration and synchronization                                        │
-│ ├── TRISC1 (Worker 3): SFPU Vector Approx-Min* Check Node Kernel (DEST Register Compute)               │
-│ └── TRISC2 (Worker 4): Pack orchestration and state monitoring                                         │
+│ ├── BRISC  (Worker 0): Stateful 512-bit DMA Gather/Scatter (Faces 0 &amp; 2) + Decoupled Info Parity Scan  │
+│ ├── NCRISC (Worker 1): Stateful 512-bit DMA Gather/Scatter (Faces 1 &amp; 3) + Syndrome Convergence Latch  │
+│ ├── TRISC0 (Worker 2): Hardware Unpack Orchestration (126.5 cyc/tile)                                  │
+│ ├── TRISC1 (Worker 3): Zero-Transpose 32-Lane SFPU Pairwise Approx-Min* Kernel (1,764.5 cyc/tile)      │
+│ └── TRISC2 (Worker 4): Hardware Pack Orchestration (209.9 cyc/tile)                                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────┘</code></pre>
 
 <!-- Section 2 -->
@@ -395,9 +385,9 @@ The complete structural mapping of the CCSDS AR4JA Rate-1/2 parity-check matrix 
   <li><strong>Panel A: Matrix Sparsity Pattern ($1536 \times 2560$):</strong> Full spy plot showing the 7,680 non-zero edge entries of the AR4JA Rate-1/2 parity-check matrix. The matrix is partitioned into 40 row-layered scheduling tiles ($12 \times 128 = 1536$ checks grouped into 40 tiles of 32 checks, plus a neutral remainder tile).</li>
   <li><strong>Panel B: Tile Matrix Structure:</strong> Illustrates the check node degree distribution across the 40 scheduling tiles: 32 tiles of degree 6 ($1,024$ checks) and 8 tiles of degree 3 ($512$ checks).</li>
   <li><strong>Panel C: Tile-to-Face Decomposition ($16 \times 16$ Faces):</strong> Each $32 \times 32$ tile is decomposed into four $16 \times 16$ faces: Faces 0 &amp; 2 mapped to Worker 0 (BRISC) and Faces 1 &amp; 3 mapped to Worker 1 (NCRISC).</li>
-  <li><strong>Panel D: Circulant Contiguity &amp; 512-Bit L1 DMA:</strong> Highlights the fundamental mathematical property $\Delta v / \Delta c = +1$: across consecutive check nodes, the required variable nodes form a contiguous 128-byte memory slice across the 4-codeword quartet, transferred in exactly 2 clock cycles by the 512-bit DMA bus.</li>
-  <li><strong>Panel E: Five Workers in Harmony &amp; Vertical SIMD:</strong> Details the parallel execution flow across BRISC (Faces 0 &amp; 2 DMA), NCRISC (Faces 1 &amp; 3 DMA), and TRISC1 (SFPU Vector Approximate-Min*). Because data lands in vertical SIMD orientation, zero SFPU transpositions (<code>SFPTRANSP</code>) are required during check compute!</li>
-  <li><strong>Panel F: Full-Mesh Scaling (440 Tensix Cores):</strong> Demonstrates spatial scaling across 4 Blackhole processors, achieving sustained 4.91 &ndash; 5.15 Gsps with a 94.2% compute duty cycle.</li>
+  <li><strong>Panel D: Circulant Contiguity &amp; 512-Bit L1 DMA:</strong> Highlights the fundamental mathematical property $\Delta v / \Delta c = +1$: across consecutive check nodes, the required variable nodes form a contiguous 128-byte memory slice across the 4-codeword quartet, transferred in a single 2-cycle 512-bit DMA burst.</li>
+  <li><strong>Panel E: Five Workers in Harmony &amp; Vertical SIMD:</strong> Details the parallel execution flow across BRISC (Faces 0 &amp; 2 DMA), NCRISC (Faces 1 &amp; 3 DMA), and TRISC1 (SFPU Vector Approximate-Min\*). Because data lands in vertical SIMD orientation (Faces 0 &amp; 1 holding Edges 0..2, Faces 2 &amp; 3 holding Edges 3..5), <strong>zero SFPU transpositions (<code>SFPTRANSP</code>)</strong> are required during check compute!</li>
+  <li><strong>Panel F: Full-Mesh Scaling (440 Tensix Cores):</strong> Demonstrates spatial scaling across 4 Blackhole processors, achieving sustained 5.29 Gsps (1,350 MHz) to 5.48 Gsps (1,400 MHz).</li>
 </ul>
 
 <h3>2.3 Breaking the 3,300-Cycle Memory Barrier via Circulant Contiguity ($\Delta v / \Delta c = +1$)</h3>
@@ -423,18 +413,18 @@ Consequently, the required variable nodes for an entire 32-check tile form <stro
 $$16 \text{ nodes/face} \times 4 \text{ codewords} \times 2 \text{ bytes/word} = 128 \text{ bytes}$$
 </p>
 <p>
-Because the Blackhole L1 NOC DMA bus transfers <strong>64 bytes (512 bits) per clock cycle</strong>, reading or writing this entire 128-byte 4-codeword slice takes:
+Because the Blackhole L1 NOC DMA bus transfers <strong>64 bytes (512 bits) per clock cycle</strong>, reading or writing a 128-byte 4-codeword slice takes only:
 </p>
 <p style="text-align: center; margin: 4px 0;">
 $$\frac{128\text{ bytes}}{64\text{ bytes/cycle}} = 2\text{ clock cycles}$$
 </p>
 <p>
-This collapses Gather latency from 1,550 cycles to 12 cycles, and Scatter latency from 1,750 cycles to 12 cycles, instantly elevating the TRISC1 compute duty cycle from 26.8% to <strong>94.2%</strong>!
+Combined with stateful one-packet NOC transactions (<code>noc_async_read_one_packet_with_state</code> / <code>noc_async_write_one_packet_with_state&lt;false&gt;</code>) and inline 8-byte word copies (<code>copy_words_8b</code>) for wrapped circulant boundaries, total Stage 1 Gather across all 6 check edges and synchronization barriers requires only <strong>636.0 cycles/tile</strong> and Stage 5 Scatter requires only <strong>744.0 cycles/tile</strong>.
 </p>
 
 <h3>2.4 Tensix Tile and Face Formation &amp; Memory Map</h3>
 <p>
-The Blackhole Tensix compute pipeline is face-aligned ($32 \times 32$ tile split into four $16 \times 16$ sub-tiles: Faces 0, 1, 2, 3). In the Circulant DMA architecture, each check update processes 8 check nodes simultaneously across a quartet of 4 independent codewords ($4 \times 8 = 32$ check-codeword evaluations).
+The Blackhole Tensix compute pipeline is face-aligned ($32 \times 32$ tile split into four $16 \times 16$ sub-tiles: Faces 0, 1, 2, 3). In the Circulant DMA architecture, each tile processes <strong>32 check nodes</strong> simultaneously across a quartet of <strong>4 independent codewords</strong> ($32 \times 4 = 128$ check-codeword evaluations per tile). Edges 0..2 are placed in Faces 0 &amp; 1 (<code>f_low</code>), while Edges 3..5 are placed in Faces 2 &amp; 3 (<code>f_high</code>):
 </p>
 
 <pre><code>┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -442,11 +432,11 @@ The Blackhole Tensix compute pipeline is face-aligned ($32 \times 32$ tile split
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ TILE (32x32 elements, 1024 bfloat16 words)                                                             │
 │ ┌──────────────────────────────────────┬──────────────────────────────────────┐                        │
-│ │ FACE 0 (Rows 0..15, Cols 0..15)      │ FACE 1 (Rows 0..15, Cols 16..31)     │                        │
+│ │ FACE 0 (Checks 0..15, Edges 0..2)    │ FACE 1 (Checks 16..31, Edges 0..2)   │                        │
 │ │ Worker 0 (BRISC) Gather/Scatter      │ Worker 1 (NCRISC) Gather/Scatter     │                        │
 │ │ Registers: dst_reg[0..7]             │ Registers: dst_reg[8..15]            │                        │
 │ ├──────────────────────────────────────┼──────────────────────────────────────┤                        │
-│ │ FACE 2 (Rows 16..31, Cols 0..15)     │ FACE 3 (Rows 16..31, Cols 16..31)    │                        │
+│ │ FACE 2 (Checks 0..15, Edges 3..5)    │ FACE 3 (Checks 16..31, Edges 3..5)   │                        │
 │ │ Worker 0 (BRISC) Gather/Scatter      │ Worker 1 (NCRISC) Gather/Scatter     │                        │
 │ │ Registers: dst_reg[16..23]           │ Registers: dst_reg[24..31]           │                        │
 │ └──────────────────────────────────────┴──────────────────────────────────────┘                        │
@@ -456,8 +446,8 @@ The Blackhole Tensix compute pipeline is face-aligned ($32 \times 32$ tile split
   <thead>
     <tr>
       <th>Tile Sub-Face</th>
-      <th>Check Nodes ($k$)</th>
-      <th>SFPU Vector Lanes</th>
+      <th>Check Nodes &amp; Edges</th>
+      <th>Active Registers / Scratch</th>
       <th>Managing RISC-V Worker</th>
       <th>DEST Register Allocation (16-bit FP Mode)</th>
     </tr>
@@ -465,31 +455,31 @@ The Blackhole Tensix compute pipeline is face-aligned ($32 \times 32$ tile split
   <tbody>
     <tr>
       <td><strong>Face 0</strong></td>
-      <td>Checks $0 \dots 3$</td>
-      <td>Lanes $0 \dots 15$</td>
+      <td>Checks $0 \dots 15$, Edges $0 \dots 2$</td>
+      <td>Regs <code>0..5</code> (Edges), <code>6..7</code> (Scratch)</td>
       <td>Worker 0 (BRISC)</td>
-      <td><code>dst_reg[0..7]</code> ($R_{\text{new}}$) &amp; <code>dst_reg[32..39]</code> ($L_{\text{new}}$)</td>
+      <td><code>dst_reg[0..7]</code> ($L_v \to Q_d \to R_{\text{new}}$) &amp; <code>dst_reg[32..39]</code> ($R_{\text{old}} \to L_{\text{new}}$)</td>
     </tr>
     <tr>
       <td><strong>Face 1</strong></td>
-      <td>Checks $4 \dots 7$</td>
-      <td>Lanes $16 \dots 31$</td>
+      <td>Checks $16 \dots 31$, Edges $0 \dots 2$</td>
+      <td>Regs <code>8..13</code> (Edges), <code>14..15</code> (Scratch)</td>
       <td>Worker 1 (NCRISC)</td>
-      <td><code>dst_reg[8..15]</code> ($R_{\text{new}}$) &amp; <code>dst_reg[40..47]</code> ($L_{\text{new}}$)</td>
+      <td><code>dst_reg[8..15]</code> ($L_v \to Q_d \to R_{\text{new}}$) &amp; <code>dst_reg[40..47]</code> ($R_{\text{old}} \to L_{\text{new}}$)</td>
     </tr>
     <tr>
       <td><strong>Face 2</strong></td>
-      <td>Checks $0 \dots 3$</td>
-      <td>Lanes $0 \dots 15$</td>
+      <td>Checks $0 \dots 15$, Edges $3 \dots 5$</td>
+      <td>Regs <code>16..21</code> (Edges), <code>22..23</code> (Scratch)</td>
       <td>Worker 0 (BRISC)</td>
-      <td><code>dst_reg[16..23]</code> ($R_{\text{new}}$) &amp; <code>dst_reg[48..55]</code> ($L_{\text{new}}$)</td>
+      <td><code>dst_reg[16..23]</code> ($L_v \to Q_d \to R_{\text{new}}$) &amp; <code>dst_reg[48..55]</code> ($R_{\text{old}} \to L_{\text{new}}$)</td>
     </tr>
     <tr>
       <td><strong>Face 3</strong></td>
-      <td>Checks $4 \dots 7$</td>
-      <td>Lanes $16 \dots 31$</td>
+      <td>Checks $16 \dots 31$, Edges $3 \dots 5$</td>
+      <td>Regs <code>24..29</code> (Edges), <code>30..31</code> (Scratch)</td>
       <td>Worker 1 (NCRISC)</td>
-      <td><code>dst_reg[24..31]</code> ($R_{\text{new}}$) &amp; <code>dst_reg[56..63]</code> ($L_{\text{new}}$)</td>
+      <td><code>dst_reg[24..31]</code> ($L_v \to Q_d \to R_{\text{new}}$) &amp; <code>dst_reg[56..63]</code> ($R_{\text{old}} \to L_{\text{new}}$)</td>
     </tr>
   </tbody>
 </table>
@@ -505,7 +495,7 @@ The complete internal microarchitecture of a single Tenstorrent QuietBox 2 Tensi
 <div class="figure-box">
   <img class="figure-img" src="{{DATAFLOW_B64}}" alt="Tenstorrent QuietBox 2 Tensix Core LDPC Dataflow and Memory Architecture">
   <div class="figure-caption">
-    <strong>Figure 2:</strong> Tensix Core LDPC Vertical Layered Architecture (Replicated &times; 440 Copies Across Full Mesh, 1,760 Codewords Parallel): 1.5 MB L1 SRAM Storage (CB_VNODE, CB_R_MSG, CB_TELEMETRY), 5 RISC-V Workers (BRISC, NCRISC, TRISC0, TRISC1, TRISC2), Circular Buffers, 512-Bit L1 NOC DMA Burst Engine, 64 DEST Registers, and SFPU Parallel Binary Tree with Full Extrinsics and Belief Damping ($\beta = 0.9375$). Data flows <strong>down on the left</strong> (Vnode &amp; Edge Ingest/Staging) and <strong>up on the right</strong> (Pack, Commit &amp; Writeback).
+    <strong>Figure 2:</strong> Tensix Core LDPC Vertical Layered Architecture (Replicated &times; 440 Copies Across Full Mesh, 5.29 &ndash; 5.48 Gsps Sustained): 1.5 MB L1 SRAM Storage (CB_VNODE, CB_R_MSG, CB_TELEMETRY), 5 RISC-V Workers (BRISC, NCRISC, TRISC0, TRISC1, TRISC2), Circular Buffers, Stateful 512-Bit L1 NOC DMA Engine, 64 DEST Registers, and Zero-Transpose 32-Lane SFPU Pairwise Tree with Intrinsic Belief Damping ($\beta = 0.9375$). Data flows <strong>down on the left</strong> (Vnode &amp; Edge Ingest/Staging) and <strong>up on the right</strong> (Pack, Commit &amp; Writeback).
   </div>
 </div>
 
@@ -515,39 +505,33 @@ The complete internal microarchitecture of a single Tenstorrent QuietBox 2 Tensi
     <ul>
       <li><code>CB_VNODE</code> (CB 0, 20 KB): Variable Node Posterior LLR Beliefs for all 2,560 nodes packed across 4 codewords (8 bytes/node). Maintains the evolving in-place posterior sum $L_v = L_v^{\mathrm{ch}} + \sum R$. Because $\Delta v / \Delta c = +1$, consecutive check rows access contiguous 128-byte memory slices in L1 SRAM.</li>
       <li><code>CB_R_MSG</code> (CB 1, 80 KB): 40-Tile Check Message Circular FIFO storing all 7,680 check-to-variable messages $\times$ 4 codewords in native bfloat16 format. Supplies $R_{\mathrm{old}}$ to TRISC0 (Unpack) and receives $R_{\mathrm{new}}$ from TRISC2 (Pack).</li>
-      <li><code>CB_TELEMETRY</code> (CB 24, 4 KB): Hardware mailboxes storing <code>active_mask</code> [3:0], locked iteration counts (<code>cw_iters</code>), and microsecond-precision hardware cycle timers (Gather, Unpack, Math, Pack, Scatter). Implements strict convergence latching with zero post-convergence error measurement.</li>
+      <li><code>CB_TELEMETRY</code> (CB 24, 4 KB): Hardware mailboxes storing <code>active_mask</code> [3:0], locked iteration counts (<code>cw_iters</code>), and gapless hardware wall-clock cycle timestamps (<code>T0..T5</code> for Gather, Unpack, Math, Pack, Scatter). Implements strict convergence latching with zero post-convergence error measurement.</li>
     </ul>
   </li>
-  <li><strong>Layer 2: Gather / Scatter &amp; Data Movement Plane (Couriers &amp; 512-Bit NOC DMA Engine):</strong>
+  <li><strong>Layer 2: Gather / Scatter &amp; Data Movement Plane (Couriers &amp; Stateful 512-Bit NOC DMA Engine):</strong>
     <ul>
-      <li><strong>Worker 0 (BRISC):</strong> Dedicated courier for Checks $0 \dots 3$ (Faces 0 &amp; 2, SFPU vector lanes $0 \dots 15$). In Stage 1 Gather, transfers three 128-byte slices (384 bytes) to Face 0/2 via 512-bit NOC DMA bursts (2 cycles/slice). In Stage 5 Scatter, executes blind unmasked DMA writeback to <code>CB_VNODE</code>. On Tile 39, executes the hardware parity check ($H \cdot c^T = 0$).</li>
-      <li><strong>Worker 1 (NCRISC):</strong> Dedicated courier for Checks $4 \dots 7$ (Faces 1 &amp; 3, SFPU vector lanes $16 \dots 31$). Executes parallel 512-bit DMA Gather/Scatter and coordinates lockstep barrier flags (<code>GATHER_DONE</code>, <code>SCATTER_DONE</code>).</li>
-      <li><strong>512-Bit L1 NOC DMA Bus:</strong> Delivers 64 bytes/cycle burst throughput ($128\text{ B} \div 64\text{ B/cyc} = \mathbf{2\text{ clock cycles}}$), eliminating the 3,300-cycle pointer chasing bottleneck.</li>
+      <li><strong>Worker 0 (BRISC):</strong> Dedicated courier for Checks $0 \dots 15$ (Face 0 Edges $0 \dots 2$ and Face 2 Edges $3 \dots 5$). In Stage 1 Gather (<code>636.0 cyc/tile</code>), transfers three 128-byte slices (384 bytes) per face via stateful one-packet 512-bit NOC DMA bursts and inline 8-byte wrap copies. In Stage 5 Scatter (<code>744.0 cyc/tile</code>), executes blind unmasked DMA writeback to <code>CB_VNODE</code>. On Tile 39, signals <code>SCATTER_DONE_W0</code> immediately before scanning the 1,024 information nodes so <code>NCRISC</code> teardown overlaps the parity scan.</li>
+      <li><strong>Worker 1 (NCRISC):</strong> Dedicated courier for Checks $16 \dots 31$ (Face 1 Edges $0 \dots 2$ and Face 3 Edges $3 \dots 5$). Executes parallel stateful 512-bit DMA Gather/Scatter, records gapless <code>T0..T5</code> cycle telemetry, and evaluates the check-node syndrome latch ($H \cdot \hat{\mathbf{c}}^T = \mathbf{0}$).</li>
+      <li><strong>Stateful 512-Bit L1 NOC DMA Bus:</strong> Delivers 64 bytes/cycle burst throughput ($128\text{ B} \div 64\text{ B/cyc} = \mathbf{2\text{ clock cycles}}$), eliminating the 3,300-cycle pointer chasing bottleneck.</li>
     </ul>
   </li>
   <li><strong>Layer 3: Scratch Pads &amp; Staging Circular Buffers (Double-Buffered Tile Pages):</strong>
     <ul>
       <li><code>CB_SCRATCH_GATHER</code> (CB 2, 4 KB): Double-buffered staging page storing four 512-byte faces (2 KB/page) assembled by BRISC and NCRISC in vertical SIMD orientation.</li>
       <li><code>CB_SCRATCH_SCATTER</code> (CB 3, 4 KB): Double-buffered staging page receiving freshly packed $L_{\mathrm{new}}$ beliefs from TRISC2. Read concurrently by BRISC and NCRISC for DMA writeback.</li>
-      <li><strong>Mandatory Lockstep Invariant:</strong> Guarantees strict sequential stop-and-wait processing ($\text{Gather} \to \text{Unpack} \to \text{Compute} \to \text{Pack} \to \text{Scatter}$) to eliminate Read-After-Write hazards across overlapping variable nodes. With 512-bit DMA (12c Gather + 16c Unpack + 912c Compute + 16c Pack + 12c Scatter = 968c total), this achieves a stellar <strong>94.2% Compute Duty Cycle</strong>!</li>
+      <li><strong>Gapless Lockstep Pipeline (<code>T0 &rarr; T5 = 3,481.0 cyc/tile</code>):</strong> Enforces strict sequential stop-and-wait processing ($\text{Gather } 636.0\text{c} \to \text{Unpack } 126.5\text{c} \to \text{Math } 1,764.5\text{c} \to \text{Pack } 209.9\text{c} \to \text{Scatter } 744.0\text{c}$) to eliminate Read-After-Write hazards across overlapping variable nodes while sustaining <strong>5.29 &ndash; 5.48 Gsps</strong> across the 440-core mesh.</li>
     </ul>
   </li>
   <li><strong>Layer 4: Unpack / Pack Orchestration (Workers 2 &amp; 4):</strong>
     <ul>
-      <li><strong>Worker 2 (TRISC0 - Unpack Engine):</strong> Directs dual unpack from <code>CB_SCRATCH_GATHER</code> ($L_v$ Vnode beliefs into DEST Tile 1) and <code>CB_R_MSG</code> FIFO ($R_{\mathrm{old}}$ Edge messages into DEST Tile 0). Zero SFPU transpositions are required due to vertical SIMD alignment.</li>
-      <li><strong>Worker 4 (TRISC2 - Pack Engine):</strong> Reads completed check results and posterior beliefs from DEST registers, packing Tile 0 ($R_{\mathrm{new}}$ Edge messages) into <code>CB_R_MSG</code> FIFO and Tile 1 ($L_{\mathrm{new}}$ Vnode beliefs) into <code>CB_SCRATCH_SCATTER</code>, signaling <code>PACK_DONE</code> to release scatter couriers.</li>
+      <li><strong>Worker 2 (TRISC0 - Unpack Engine, <code>126.5 cyc/tile</code>):</strong> Directs dual hardware unpack from <code>CB_SCRATCH_GATHER</code> ($L_v$ Vnode beliefs into DEST Tile 0 <code>dst_reg[0..31]</code>) and <code>CB_R_MSG</code> FIFO ($R_{\mathrm{old}}$ Edge messages into DEST Tile 1 <code>dst_reg[32..63]</code>). Zero SFPU transpositions are required due to vertical SIMD alignment.</li>
+      <li><strong>Worker 4 (TRISC2 - Pack Engine, <code>209.9 cyc/tile</code>):</strong> Reads completed check results and posterior beliefs from DEST registers, packing Tile 0 ($R_{\mathrm{new}}$ Edge messages) into <code>CB_R_MSG</code> FIFO and Tile 1 ($L_{\mathrm{new}}$ Vnode beliefs) into <code>CB_SCRATCH_SCATTER</code>.</li>
     </ul>
   </li>
-  <li><strong>Layer 5 (Bottom): Compute Engine &amp; Tensix DEST Registers (Worker 3: TRISC1):</strong>
+  <li><strong>Layer 5 (Bottom): Compute Engine &amp; Tensix DEST Registers (Worker 3: TRISC1, <code>1,764.5 cyc/tile</code>):</strong>
     <ul>
-      <li><strong>Tensix DEST Registers (64 &times; 16-bit FP):</strong> Tile 0 (<code>dst_reg[0..31]</code>) holds outgoing check messages $R_{\mathrm{new}}$ across Faces 0..3; Tile 1 (<code>dst_reg[32..63]</code>) holds updated variable beliefs $L_{\mathrm{new}}$ across Faces 0..3, with exact RNE mantissa rounding and belief damping ($\beta = 0.9375$).</li>
-      <li><strong>Worker 3 (TRISC1 - SFPU Vector Engine):</strong> Executes 32-lane vectorized parallel binary tree Approximate-Min* algorithm: 1. Prior subtraction ($q_d = L_v - R_{\mathrm{old}}$ in-place) &rarr; 2. Subvector transposition (<code>swap_subvec16</code> pairwise alignment) &rarr; 3. Parallel tree pairwise accumulation ($M_{01}, M_{23}, M_{45}$ in full FP32 LRegs) &rarr; 4. Full extrinsics generation ($R_{\text{mag}}(d)$ strictly excludes edge $d$) &rarr; 5. Intrinsic belief damping ($\beta = 0.9375 = 15/16$) for error floor trapping set suppression &rarr; 6. Posterior update ($L_{\mathrm{new}} = q_d + R_{\mathrm{new}}$).</li>
-    </ul>
-  </li>
-  <li><strong>Data Flow Directionality (Left Down &bull; Right Up):</strong>
-    <ul>
-      <li><strong>Left Side Highway (Flowing Down):</strong> <em>Vnode Data Lane</em> streams $L_v$ beliefs down from <code>CB_VNODE</code> through Gather couriers, staging scratchpad, TRISC0 Unpack, and into DEST Tile 1. <em>Edge Data Lane</em> streams $R_{\mathrm{old}}$ check messages from <code>CB_R_MSG</code> down bypassing staging directly into TRISC0 Unpack and DEST Tile 0.</li>
-      <li><strong>Right Side Highway (Flowing Up):</strong> <em>Vnode Commit Lane</em> carries fresh $L_{\mathrm{new}}$ beliefs up from TRISC2 Pack into <code>CB_SCRATCH_SCATTER</code>, then up through Scatter couriers via 512-bit DMA writeback into <code>CB_VNODE</code>. <em>Edge Commit Lane</em> carries fresh $R_{\mathrm{new}}$ check messages up from TRISC2 Pack bypassing staging directly into <code>CB_R_MSG</code> FIFO for the subsequent iteration.</li>
+      <li><strong>Tensix DEST Registers (64 &times; 16-bit FP):</strong> Tile 0 (<code>dst_reg[0..31]</code>) computes $Q_d = L_v - R_{\mathrm{old}}$ in-place and stores outgoing check messages $R_{\mathrm{new}}$ across Faces 0..3; Tile 1 (<code>dst_reg[32..63]</code>) holds incoming $R_{\mathrm{old}}$ and receives updated variable beliefs $L_{\mathrm{new}} = Q_d + R_{\mathrm{new}}$ across Faces 0..3.</li>
+      <li><strong>Worker 3 (TRISC1 - SFPU Vector Engine):</strong> Executes the zero-transpose 32-lane vectorized pairwise tree Approximate-Min\* algorithm: 1. Prior subtraction ($q_d = \text{round\_bf16\_fast}(L_v - R_{\mathrm{old}})$ in-place in Tile 0) &rarr; 2. Fused single-load Sign-Parity XOR &amp; pairwise $\operatorname{AMin}^*$ tree ($M_{03}, M_{14}, M_{25}$ in face scratch regs <code>6..7</code>) &rarr; 3. Zero <code>SFPTRANSP</code> vertical pairing across Face 0/2 and Face 1/3 &rarr; 4. Full extrinsics generation ($R_{\text{mag}}(d)$ strictly excludes edge $d$) &rarr; 5. Intrinsic belief damping ($\beta = 0.9375 = 15/16$) and exact RNE rounding (<code>round_bf16</code>) on $R_{\mathrm{new}}$ &rarr; 6. Posterior update ($L_{\mathrm{new}} = \text{round\_bf16\_fast}(q_d + R_{\mathrm{new}})$ in Tile 1).</li>
     </ul>
   </li>
 </ul>
@@ -561,26 +545,13 @@ $$\min^*(a, b) = \ln\left(e^{-a} + e^{-b}\right) = \min(a, b) - \ln\left(1 + e^{
 where $\Delta = |a - b|$ and $g(\Delta) = \ln(1 + e^{-\Delta})$.
 </p>
 
-<h3>3.1 True Recursive Formulation (Zero Multi-Element Sorting)</h3>
+<h3>3.1 True Recursive Formulation &amp; Zero-Transpose 32-Lane SFPU Pairwise Tree</h3>
 <p>
-Unlike conventional decoders that require multi-element sorting networks or full look-up tables, Dr. Jones' true recursive formulation eliminates sorting branches entirely:
+Unlike conventional decoders that require multi-element sorting networks or full look-up tables, Dr. Jones' true recursive formulation eliminates sorting branches entirely. On the 32-lane Tensix SFPU, <code>compute_tile_deg6</code> and <code>compute_tile_deg3</code> evaluate $\operatorname{AMin}^*$ vertically across all 32 lanes using a <strong>fused pairwise prefix/suffix tree</strong>:
 </p>
 <ol>
-  <li><strong>Precursor Minimum Edge Search:</strong> Identify the minimum incoming edge magnitude and index:
-    $$d_{\min} = \arg\min_{d} |q_d|, \quad q_{\min} = |q_{d_{\min}}|$$
-  </li>
-  <li><strong>Recursive Partial Accumulation ($M_{\text{others}}$):</strong> Accumulate all edges <em>excluding</em> $d_{\min}$ using the binary operator $\operatorname{AMin}^*(a, b) = \min(a, b) - g(|a - b|)$:
-    $$M_{\text{others}} = \sideset{}{^*}\min_{k \ne d_{\min}} |q_k|$$
-  </li>
-  <li><strong>All-Inclusive Metric Formation ($M_{\text{all}}$):</strong> Combine $M_{\text{others}}$ with the isolated minimum magnitude $q_{\min}$ using a single final binary $\operatorname{AMin}^*$:
-    $$M_{\text{all}} = \operatorname{AMin}^*(M_{\text{others}}, q_{\min})$$
-  </li>
-  <li><strong>Branchless Check Message Assignment:</strong> Exactly <strong>two outgoing check magnitudes</strong> exist for the entire check node:
-    $$r_{\text{mag}}(d) = \begin{cases} M_{\text{others}}, & d = d_{\min} \\ M_{\text{all}}, & d \ne d_{\min} \end{cases}$$
-  </li>
-  <li><strong>Sign Product Accumulation:</strong> Parity sign is accumulated branchlessly:
-    $$S_{\text{total}} = \prod_{d=0}^{d_c - 1} \operatorname{sgn}(q_d), \quad \operatorname{sgn}(r_d) = S_{\text{total}} \cdot \operatorname{sgn}(q_d)$$
-  </li>
+  <li><strong>Fused Single-Load Sign Parity &amp; Pairwise Reduction:</strong> Each edge pair $(q_0, q_3)$, $(q_1, q_4)$, and $(q_2, q_5)$ is loaded once from <code>dst_reg</code> to simultaneously accumulate the 32-lane bitwise sign XOR $S_{\text{total}} = \bigoplus_{d} \operatorname{sgn}(q_d)$ and compute pairwise magnitudes $M_{03} = \operatorname{AMin}^*(|q_0|, |q_3|)$, $M_{14} = \operatorname{AMin}^*(|q_1|, |q_4|)$, and $M_{25} = \operatorname{AMin}^*(|q_2|, |q_5|)$, staged in face scratch registers <code>6..7</code>.</li>
+  <li><strong>Cross-Pair Extrinsic Synthesis &amp; Intrinsic Damping ($\beta = 0.9375$):</strong> Outgoing check magnitudes for edge pair $(0, 3)$ combine $M_{\text{oth},03} = \operatorname{AMin}^*(M_{14}, M_{25})$ with $|q_3|$ and $|q_0|$ respectively, scaled by $\beta = 0.9375 = 15/16$, signed via <code>sfpi::copysgn</code>, and rounded via exact RNE (<code>round_bf16</code>) before updating $L_{\text{new}} = \text{round\_bf16\_fast}(q_d + r_{\text{out}})$.</li>
 </ol>
 
 <h3>3.2 2-Region Piecewise Linear Correction $g(\Delta)$</h3>
@@ -597,35 +568,83 @@ This achieves <strong>97.8% of full continuous belief propagation coding gain</s
 <!-- Section 4 -->
 <h2>4. Hardware Operation: Microarchitecture &amp; Invariants</h2>
 
+<h3>4.1 Hardware-Measured Per-Tile Pipeline Breakdown (<code>T0 &rarr; T5</code>)</h3>
+<p>
+In row-layered Gauss-Seidel decoding, <strong>779 out of 780 tile pairs share variable nodes</strong>. Locking the tile loop in strict sequential stop-and-wait order ($\text{Gather} \to \text{Unpack} \to \text{Math} \to \text{Pack} \to \text{Scatter}$) eliminates Read-After-Write (RAW) graph hazards. Measured on Core <code>(0,0)</code> via gapless hardware wall-clock cycle timestamps (<code>T0</code> through <code>T5</code>), the 4-stage kernel optimization campaign reduced exact per-tile turnaround by <strong>375.7 cycles/tile (-9.74%)</strong>:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Pipeline Stage</th>
+      <th>Pre-Opt Baseline (<code>cyc/tile</code>)</th>
+      <th>Optimized (<code>cyc/tile</code>)</th>
+      <th>Delta</th>
+      <th>Key Microarchitectural Optimization</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Stage 1: Gather (<code>T0 &rarr; T1</code>)</strong></td>
+      <td><code>722.4</code></td>
+      <td><strong><code>636.0</code></strong></td>
+      <td><code>-86.4 (-12.0%)</code></td>
+      <td>Stateful one-packet NOC DMA (<code>noc_async_read_one_packet_with_state</code>) + inline 8-byte wrap copy</td>
+    </tr>
+    <tr>
+      <td><strong>Stage 2: Unpack (<code>T1 &rarr; T2</code>)</strong></td>
+      <td><code>124.8</code></td>
+      <td><strong><code>126.5</code></strong></td>
+      <td><code>+1.7</code></td>
+      <td>Hardware Unpacker (<code>CB_SCRATCH_GATHER</code> &amp; <code>CB_R_MSG</code> &rarr; <code>dst_reg</code>)</td>
+    </tr>
+    <tr>
+      <td><strong>Stage 3: Math (<code>T2 &rarr; T3</code>)</strong></td>
+      <td><code>1,875.3</code></td>
+      <td><strong><code>1,764.5</code></strong></td>
+      <td><code>-110.8 (-5.9%)</code></td>
+      <td>Fused Sign-Parity XOR &amp; Pairwise $\operatorname{AMin}^*$ loads + mask-free <code>round_bf16_fast</code> + dead-store removal</td>
+    </tr>
+    <tr>
+      <td><strong>Stage 4: Pack (<code>T3 &rarr; T4</code>)</strong></td>
+      <td><code>209.4</code></td>
+      <td><strong><code>209.9</code></strong></td>
+      <td><code>+0.5</code></td>
+      <td>Hardware Packer (<code>dst_reg</code> &rarr; <code>CB_SCRATCH_SCATTER</code> &amp; <code>CB_R_MSG</code>)</td>
+    </tr>
+    <tr>
+      <td><strong>Stage 5: Scatter (<code>T4 &rarr; T5</code>)</strong></td>
+      <td><code>924.8</code></td>
+      <td><strong><code>744.0</code></strong></td>
+      <td><code>-180.8 (-19.5%)</code></td>
+      <td>Stateful NOC write + decoupled Tile 39 <code>BRISC</code> parity scan (<code>SCATTER_DONE_W0</code> signaled before scan)</td>
+    </tr>
+    <tr>
+      <td><strong>Exact Tile Turnaround (<code>T0 &rarr; T5</code>)</strong></td>
+      <td><strong><code>3,856.7</code></strong></td>
+      <td><strong><code>3,481.0</code></strong></td>
+      <td><strong><code>-375.7 (-9.7%)</code></strong></td>
+      <td>Plus runtime <code>divu</code>/<code>remu</code> elimination across all 3 RISC-V cores</td>
+    </tr>
+  </tbody>
+</table>
+
 <div class="two-col">
   <div>
-    <h3>4.1 Strict Stop-and-Wait Pipeline Locking</h3>
+    <h3>4.2 Blind DMA Scatter &amp; Decoupled Parity Scan</h3>
     <p>
-      In row-layered Gauss-Seidel decoding, <strong>779 out of 780 tile pairs share variable nodes</strong>. If Tile $k+1$ is gathered while Tile $k$ computes or scatters, Tile $k+1$ gathers stale LLRs before Tile $k$ commits updates (RAW data hazard), causing an artificial error floor at $\approx 65\%$ FER.
-    </p>
-    <p>
-      <strong>Mandatory Invariant:</strong> The tile loop is locked in strict sequential stop-and-wait order ($\text{Gather} \to \text{Compute} \to \text{Scatter}$). Because 512-bit DMA requires only 12 cycles for gather and 12 cycles for scatter:
-      $$\text{Duty Cycle} = \frac{912\text{c Compute}}{12\text{c} + 16\text{c} + 912\text{c} + 16\text{c} + 12\text{c}} = 94.2\%$$
+      <strong>1. Immediate Convergence Latching:</strong> At Tile 39, Worker 1 evaluates check syndromes ($H\mathbf{c}^T = \mathbf{0}$) while Worker 0 scans information bits. Converged codewords are permanently locked at 0 errors.
+      <br><strong>2. Blind DMA Scatter &amp; Overlapped Teardown:</strong> Workers execute unmasked 512-bit DMA scatter across all 4 codewords unconditionally, and <code>BRISC</code> signals <code>SCATTER_DONE_W0</code> before its Tile 39 info-bit scan (`-109.4 cyc/tile`).
     </p>
   </div>
   <div>
-    <h3>4.2 Unconditional Blind DMA Scatter</h3>
+    <h3>4.3 Dual-Tier RNE &amp; 1,400 MHz Clock Boost</h3>
     <p>
-      Trying to conditionally mask converged codewords in L1 SRAM via scalar read-modify-write loops doubled Stage 5 Scatter turnaround from $720\text{c}$ to $1,492\text{c}$ (and $2,150\text{c}$ in masked iterations).
-    </p>
-    <p>
-      <strong>Dual Architectural Invariant:</strong>
-      <br>1. <em>Immediate Convergence Latching:</em> At Tile 39, Worker 0 scans parity. As soon as $H\mathbf{c}^T = \mathbf{0}$, the codeword's state is locked, active bit cleared, and 0 errors latched permanently.
-      <br>2. <em>Blind DMA Scatter:</em> Workers continue blind 512-bit DMA scatter across all 4 codewords unconditionally, cutting scatter latency by $>50\%$.
+      <strong>Dual-Tier RNE:</strong> Live LReg check messages use masked RNE (<code>round_bf16</code>: <code>u &amp;= 0xFFFF0000U</code>) while direct 16-bit <code>dst_reg</code> stores use mask-free <code>round_bf16_fast</code> (`-80.6 math cyc/tile` with zero bit difference).
+      <br><strong>1,400 MHz ARC Boost:</strong> <code>tools/set_blackhole_clk.py</code> locks all 4 ASICs to <code>AICLK_FMAX_MAX = 1,400 MHz</code> via <code>FORCE_AICLK (0x33)</code> (+3.7% throughput).
     </p>
   </div>
 </div>
-
-<h3>4.3 The Zero-Live-LReg Rule for <code>SFPTRANSP</code> (<code>swap_subvec16</code>)</h3>
-<p>
-The Tensix TRISC SFPU vector registers ($L_0 \dots L_7$) are transient micro-op staging latches, not a general-purpose register file. The native instruction <code>SFPTRANSP</code> (<code>sfpi::subvec_transp</code>) hard-wires directly to $\{L_0 \dots L_3\}$ and destroys $\{L_4 \dots L_7\}$ as internal crossbar latches. Because the GCC toolchain backend (<code>riscv-tt-elf-gcc</code>) does not model this destruction, any live <code>sfpi::vFloat</code> variable during <code>swap_subvec16</code> will be silently corrupted. 
-<br><strong>Rule:</strong> <code>swap_subvec16</code> must execute as the first statement of an operational block directly from DEST memory before declaring live arithmetic variables.
-</p>
 
 <!-- Section 5 -->
 <div class="page-break"></div>
@@ -633,7 +652,7 @@ The Tensix TRISC SFPU vector registers ($L_0 \dots L_7$) are transient micro-op 
 
 <h3>5.1 Sustained Mesh Throughput Progression</h3>
 <p>
-Throughput progression across 440 Tensix cores on physical Blackhole silicon running full 200-iteration Monte Carlo sweeps:
+Throughput progression across 440 Tensix cores on physical Blackhole silicon running full 200-iteration Monte Carlo sweeps ($10^{10}\text{ blocks} = 20.48\text{ Trillion}$ channel symbols):
 </p>
 
 <table>
@@ -642,9 +661,9 @@ Throughput progression across 440 Tensix cores on physical Blackhole silicon run
       <th>Engine Architecture</th>
       <th>Codewords / Core</th>
       <th>Active Workers / Core</th>
-      <th>Memory Transfer Mechanism</th>
+      <th>Memory &amp; Compute Mechanism</th>
       <th>Sustained Throughput</th>
-      <th>Wall-Clock Time to $10^{10}$ Blocks</th>
+      <th>Wall Time to $10^{10}$ Blocks</th>
     </tr>
   </thead>
   <tbody>
@@ -654,7 +673,7 @@ Throughput progression across 440 Tensix cores on physical Blackhole silicon run
       <td>1 (TRISC0)</td>
       <td>RV32 scalar <code>lw</code>/<code>sw</code> loads</td>
       <td>$28.2\text{ Msps}$</td>
-      <td>$14.7\text{ days}$</td>
+      <td>$8.4\text{ days}$</td>
     </tr>
     <tr>
       <td><strong>5-Worker Concurrent (Unpacked)</strong></td>
@@ -662,7 +681,7 @@ Throughput progression across 440 Tensix cores on physical Blackhole silicon run
       <td>5 Workers</td>
       <td>Unpacked L1 memory bus contention</td>
       <td>$79.8\text{ Msps}$</td>
-      <td>$5.2\text{ days}$</td>
+      <td>$3.0\text{ days}$</td>
     </tr>
     <tr>
       <td><strong>5-Worker Packed Scalar</strong></td>
@@ -670,15 +689,31 @@ Throughput progression across 440 Tensix cores on physical Blackhole silicon run
       <td>5 Workers</td>
       <td>32-bit packed dual-CW scalar transfers</td>
       <td>$166.4\text{--}173.9\text{ Msps}$</td>
-      <td>$\approx 2.3\text{ days}$</td>
+      <td>$1.4\text{ days}$</td>
     </tr>
     <tr>
-      <td><strong>Circulant DMA 4-CW Engine [Current Build]</strong></td>
+      <td><strong>Circulant DMA 4-CW (Pre-Opt 1,350 MHz)</strong></td>
+      <td>4</td>
+      <td>3 (B/N/T1)</td>
+      <td>Standard 512-bit NOC DMA (<code>3,856.7 cyc/tile</code>)</td>
+      <td>$4,910.8\text{ Msps}$ ($4.91\text{ Gsps}$)</td>
+      <td>$69.5\text{ minutes}$</td>
+    </tr>
+    <tr>
+      <td><strong>Circulant DMA 4-CW (Optimized 1,350 MHz)</strong></td>
       <td><strong>4</strong></td>
-      <td><strong>3 (BRISC/NCRISC/TRISC1)</strong></td>
-      <td><strong>Native 512-bit L1 NOC DMA bursts</strong></td>
-      <td><strong>4,910.8 Msps (4.91 Gsps sustained, 5.15 Gsps peak)</strong></td>
-      <td><strong>&approx; 35 minutes (29.5&times; speedup)</strong></td>
+      <td><strong>3 (B/N/T1)</strong></td>
+      <td><strong>Stateful 512-bit DMA + Fused SFPU (<code>3,481.0 cyc/tile</code>)</strong></td>
+      <td><strong>5,287.3 Msps (5.29 Gsps)</strong></td>
+      <td><strong>64.6 minutes (187.5&times;)</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Circulant DMA 4-CW (Optimized 1,400 MHz)</strong></td>
+      <td><strong>4</strong></td>
+      <td><strong>3 (B/N/T1)</strong></td>
+      <td><strong>Stateful 512-bit DMA + Fused SFPU + 1,400 MHz Boost</strong></td>
+      <td><strong>5,484.5 Msps (5.48 Gsps / 2.74 Gbps info)</strong></td>
+      <td><strong>62.2 minutes (194.5&times;)</strong></td>
     </tr>
   </tbody>
 </table>
@@ -839,13 +874,13 @@ Throughput progression across 440 Tensix cores on physical Blackhole silicon run
     </tr>
     <tr>
       <td><strong>2.50</strong></td>
-      <td><strong>Circulant DMA 4CW</strong></td>
-      <td><strong>10,000,000,000</strong></td>
-      <td><strong>18</strong></td>
-      <td><strong>$1.80 \times 10^{-9}$</strong></td>
-      <td>$[1.07 - 2.84] \times 10^{-9}$</td>
-      <td><strong>$1.00 \times 10^{-10}$</strong></td>
-      <td><strong>Completed (10.0B Target)</strong></td>
+      <td><strong>Circulant DMA 4CW (4x 10B Aggregate)</strong></td>
+      <td><strong>40,000,004,320</strong></td>
+      <td><strong>61</strong></td>
+      <td><strong>$1.53 \times 10^{-9}$</strong></td>
+      <td>$[1.17 - 1.96] \times 10^{-9}$</td>
+      <td><strong>$8.54 \times 10^{-11}$</strong></td>
+      <td><strong>Completed (5.48 Gsps @ 1.4 GHz)</strong></td>
     </tr>
     <tr>
       <td><strong>2.50</strong></td>
@@ -880,6 +915,80 @@ Throughput progression across 440 Tensix cores on physical Blackhole silicon run
   </tbody>
 </table>
 
+<h3>5.3 Multi-Run 40-Billion-Block Statistical Certification at $E_b/N_0 = 2.50\text{ dB}$</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Certification Run ($E_b/N_0 = 2.50\text{ dB}$)</th>
+      <th>ASIC Clock</th>
+      <th>Blocks Simulated</th>
+      <th>Frame Errors (FE)</th>
+      <th>Bit Errors (BE)</th>
+      <th>FER</th>
+      <th>BER ($K=1024$)</th>
+      <th>Sustained Throughput</th>
+      <th>Wall Time ($10^{10}$ Blks)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Run 1 (Pre-Opt Baseline)</strong></td>
+      <td><code>1,350 MHz</code></td>
+      <td><code>10,000,000,000</code></td>
+      <td><code>18</code></td>
+      <td><code>2,568</code></td>
+      <td>$1.80 \times 10^{-9}$</td>
+      <td>$2.51 \times 10^{-10}$</td>
+      <td><code>4,910.8 Msps (4.91 Gsps)</code></td>
+      <td><code>69.5 min (4,170.5 s)</code></td>
+    </tr>
+    <tr>
+      <td><strong>Run 2 (Pre-Opt Baseline, Seed 1001)</strong></td>
+      <td><code>1,350 MHz</code></td>
+      <td><code>10,000,001,440</code></td>
+      <td><code>12</code></td>
+      <td><code>1,622</code></td>
+      <td>$1.20 \times 10^{-9}$</td>
+      <td>$1.58 \times 10^{-10}$</td>
+      <td><code>4,910.2 Msps (4.91 Gsps)</code></td>
+      <td><code>69.5 min (4,171.0 s)</code></td>
+    </tr>
+    <tr>
+      <td><strong>Run 3 (Optimized Kernel, Seed 20001)</strong></td>
+      <td><code>1,350 MHz</code></td>
+      <td><code>10,000,001,440</code></td>
+      <td><code>15</code></td>
+      <td><code>2,065</code></td>
+      <td>$1.50 \times 10^{-9}$</td>
+      <td>$2.02 \times 10^{-10}$</td>
+      <td><strong><code>5,287.3 Msps (5.29 Gsps)</code></strong></td>
+      <td><code>64.6 min (3,873.5 s)</code></td>
+    </tr>
+    <tr>
+      <td><strong>Run 4 (Optimized Kernel, Random Seed)</strong></td>
+      <td><strong><code>1,400 MHz</code></strong></td>
+      <td><code>10,000,001,440</code></td>
+      <td><code>16</code></td>
+      <td><code>2,293</code></td>
+      <td>$1.60 \times 10^{-9}$</td>
+      <td>$2.24 \times 10^{-10}$</td>
+      <td><strong><code>5,484.5 Msps (5.48 Gsps)</code></strong></td>
+      <td><strong><code>62.2 min (3,734.2 s)</code></strong></td>
+    </tr>
+    <tr>
+      <td><strong>Combined 4-Run Aggregate</strong></td>
+      <td>&mdash;</td>
+      <td><strong><code>40,000,004,320</code></strong></td>
+      <td><strong><code>61</code></strong></td>
+      <td><strong><code>8,548</code></strong></td>
+      <td><strong>$1.525 \times 10^{-9}$</strong></td>
+      <td><strong>$2.087 \times 10^{-10}$</strong></td>
+      <td>&mdash;</td>
+      <td>&mdash;</td>
+    </tr>
+  </tbody>
+</table>
+
 <!-- Section 6 -->
 <div class="page-break"></div>
 <h2>6. Research Roadmap: High-Speed Trapping-Set Mitigation Experiments</h2>
@@ -890,25 +999,25 @@ In conventional CPU-based LDPC research, investigating trapping sets at $10^{-9}
 </p>
 
 <p>
-With the QuietBox 2 sustained throughput of <strong>5.15 Gsps (2,514,648 blocks/second)</strong>:
+With the QuietBox 2 sustained throughput of <strong>5.485 Gsps (2,677,976 blocks/second at 1,400 MHz)</strong>:
 </p>
 <ul>
-  <li>Simulating $10^9$ blocks requires only <strong>397 seconds (&approx; 6.6 minutes)</strong>.</li>
-  <li>Simulating $10^{10}$ blocks requires only <strong>&approx; 35 minutes</strong>.</li>
-  <li>The QuietBox 2 functions as an <strong>Automated Trapping-Set Capture and Surgical Intervention Laboratory</strong>.</li>
+  <li>Simulating $10^9$ blocks requires only <strong>373.4 seconds (&approx; 6.2 minutes)</strong>.</li>
+  <li>Simulating $10^{10}$ blocks ($20.48\text{ Trillion}$ symbols) requires only <strong>62.2 minutes (3,734 seconds)</strong>.</li>
+  <li>Combined with deterministic PRNG replay (<code>--seed &lt;N&gt;</code>), the QuietBox 2 functions as an <strong>Automated Trapping-Set Capture and Surgical Intervention Laboratory</strong>.</li>
 </ul>
 
 <pre><code>┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                        AUTOMATED TRAPPING-SET CAPTURE &amp; SURGICAL INTERVENTION                          │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ STAGE 1: HIGH-SPEED HARVESTING                                                                         │
-│ ├── 440 Tensix Cores run standard Circulant DMA engine at 5.15 Gsps                                    │
+│ ├── 440 Tensix Cores run standard Circulant DMA engine at 5.29 - 5.48 Gsps                             │
 │ └── Inline parity check flags unsatisfied syndrome (H c^T != 0) at iter 200                            │
 │                                                                                                        │
 │ STAGE 2: DETERMINISTIC TRAP-LATCHING                                                                   │
 │ ├── Core latches initial Channel LLR vector y_trap and PRNG seed state                                 │
 │ ├── Unsatisfied check bitmask recorded: identifies exact graphical (a, b) trapping set nodes           │
-│ └── Codeword transmitted to host or dedicated On-Chip Rescue Routine                                   │
+│ └── Codeword replayed deterministically (--seed) or diverted to On-Chip Rescue Routine                 │
 │                                                                                                        │
 │ STAGE 3: MULTI-PASS SURGICAL ALGORITHMIC INTERVENTIONS                                                 │
 │ ├── Pass A: Schedule Layer Shuffling (Dynamic Permutation pi(Tiles))                                   │
@@ -945,7 +1054,7 @@ Damping attenuates oscillations between check nodes, allowing marginal beliefs t
 <h4>Vector 4: Selective Trapping-Node Channel Erasure &amp; Pinning</h4>
 <p>
 Unsatisfied check nodes directly identify the core variable nodes participating in the trapping set. Often, 1 or 2 variable nodes with mildly deceptive channel noise deceive neighboring check nodes into error.
-<br><strong>Experiment:</strong> Identify unsatisfied checks from Worker 0's parity register, map them to connected variable nodes $V_{\text{trap}}$, temporarily set their channel observations to neutral ($L_v^{\text{ch}} \gets 0$, complete erasure), and iterate 10 additional times. The clean surrounding graph forces the erased nodes to correct polarities.
+<br><strong>Experiment:</strong> Identify unsatisfied checks from Worker 1's parity register, map them to connected variable nodes $V_{\text{trap}}$, temporarily set their channel observations to neutral ($L_v^{\text{ch}} \gets 0$, complete erasure), and iterate 10 additional times. The clean surrounding graph forces the erased nodes to correct polarities.
 </p>
 
 <h4>Vector 5: Hardware LUT AMIN\* Curvature Morphing (<code>SFPLUTFP32</code>)</h4>
@@ -956,10 +1065,10 @@ The piecewise-linear correction function $g(\Delta)$ governs the degree of optim
 <h4>Vector 6: Pipelined Dual-Tier "Fast-Path / Trap-Rescue" Architecture</h4>
 <div class="callout callout-purple">
   <div class="callout-title">&star; Production Architecture: Fast-Path + Rescue Routine</div>
-  Rather than slowing down the entire 5.15 Gsps decoder to execute complex rescue operations on all codewords, implement a dual-tier pipelined engine:
+  Rather than slowing down the entire 5.48 Gsps decoder to execute complex rescue operations on all codewords, implement a dual-tier pipelined engine:
   <br>&bull; <strong>Tier 1 (Fast Path):</strong> All 4-codeword quartets execute the standard Circulant DMA engine for <strong>30 iterations</strong> (&gt;99.9999% of all codewords converge within 30 iterations).
   <br>&bull; <strong>Tier 2 (Rescue Path):</strong> The &lt;0.0001% of codewords that fail to satisfy parity at iteration 30 are diverted to an on-core rescue loop applying schedule shuffling, noise dithering, and damping.
-  <br>&bull; <strong>Throughput Impact:</strong> Because fewer than 1 in 100,000 codewords enter Tier 2, <strong>&gt;99.9% of the 5.15 Gsps sustained throughput is preserved</strong>, while the asymptotic error floor is suppressed by 1 to 2 orders of magnitude!
+  <br>&bull; <strong>Throughput Impact:</strong> Because fewer than 1 in 100,000 codewords enter Tier 2, <strong>&gt;99.9% of the 5.48 Gsps sustained throughput is preserved</strong>, while the asymptotic error floor is suppressed by 1 to 2 orders of magnitude!
 </div>
 
 <!-- Section 7 & 8 -->
@@ -971,12 +1080,12 @@ The piecewise-linear correction function $g(\Delta)$ governs the degree of optim
 <pre><code>source /home/ttuser/.tenstorrent-venv/bin/activate &amp;&amp; tt-smi -r 0,1,2,3</code></pre>
 
 <p>
-<strong>Simulation-First Gatekeeper Protocol:</strong> Never run unverified kernels on physical hardware. Always debug, trace, and co-verify 100% bit-exact correctness against the golden CPU model under <code>ttsim</code> (<code>test_kernel_ttsim.cpp</code>) before dispatching to silicon.
+<strong>Simulation-First Gatekeeper Protocol:</strong> Never run unverified kernels on physical hardware. Always debug, trace, and co-verify 100% bit-exact correctness against the golden CPU model under <code>ttsim</code> (<code>tests/test_circulant_dma_stepper.cpp</code>) before dispatching to silicon.
 </p>
 
 <hr style="border: 0; border-top: 1px solid #cbd5e1; margin: 16px 0 10px 0;">
 <div style="font-size: 7.5pt; color: #64748b; text-align: center;">
-  Tenstorrent QuietBox 2 AR4JA LDPC Decoder Engine &bull; Document Version 1.0 &bull; October 2026
+  Tenstorrent QuietBox 2 AR4JA LDPC Decoder Engine &bull; Document Version 2.0 &bull; October 2026
 </div>
 
 </body>
@@ -1033,18 +1142,11 @@ def main():
         if res.returncode == 0 and pdf_path.exists() and pdf_path.stat().st_size > 0:
             print(f"[SUCCESS] PDF generated successfully: {pdf_path} ({pdf_path.stat().st_size} bytes)")
             
-            # Copy to MD_files and mirror to Z: drive
+            # Copy to MD_files in Z:\LDPC_QB2_GA\docs\MD_files
             md_pdf = md_files_dir / pdf_path.name
             with open(pdf_path, "rb") as sf, open(md_pdf, "wb") as df:
                 df.write(sf.read())
             print(f"[COPY] Mirrored to: {md_pdf}")
-
-            z_docs = Path("Z:/LDPC_QB2_GA/docs")
-            if z_docs.exists():
-                z_pdf = z_docs / pdf_path.name
-                with open(pdf_path, "rb") as sf, open(z_pdf, "wb") as df:
-                    df.write(sf.read())
-                print(f"[COPY] Mirrored to Z: drive: {z_pdf}")
         else:
             print(f"[ERROR] Edge returned code {res.returncode}: {res.stderr}")
     else:
