@@ -111,7 +111,11 @@ sfpi_inline sfpi::vFloat round_bf16_rne(sfpi::vFloat val) {
 #define round_bf16(v) round_bf16_rne(v)
 
 sfpi_inline sfpi::vFloat round_bf16_fast(sfpi::vFloat val) {
-  return round_bf16_rne(val);
+  sfpi::vUInt u = sfpi::as<sfpi::vUInt>(val);
+  sfpi::vUInt lsb = (u >> 16) & 1U;
+  sfpi::vUInt bias = lsb + 0x7FFFU;
+  u += bias;
+  return sfpi::as<sfpi::vFloat>(u);
 }
 
 
