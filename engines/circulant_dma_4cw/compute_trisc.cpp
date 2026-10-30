@@ -451,16 +451,6 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::dst_reg[r5] = r_out5;
       }
     }
-
-    // Zero out unused scratch registers (regs 6, 7 of each face)
-    sfpi::dst_reg[f_low  + 6] = 0.0f;
-    sfpi::dst_reg[f_low  + 7] = 0.0f;
-    sfpi::dst_reg[f_high + 6] = 0.0f;
-    sfpi::dst_reg[f_high + 7] = 0.0f;
-    sfpi::dst_reg[32 + f_low  + 6] = 0.0f;
-    sfpi::dst_reg[32 + f_low  + 7] = 0.0f;
-    sfpi::dst_reg[32 + f_high + 6] = 0.0f;
-    sfpi::dst_reg[32 + f_high + 7] = 0.0f;
   }
 #endif
 
@@ -621,11 +611,6 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
       sfpi::dst_reg[r0] = sfpi::vFloat(sfpi::dst_reg[sc1]);
       sfpi::dst_reg[r1] = sfpi::vFloat(sfpi::dst_reg[32 + sc0]);
     }
-
-    sfpi::dst_reg[base_r + 6] = 0.0f;
-    sfpi::dst_reg[base_r + 7] = 0.0f;
-    sfpi::dst_reg[32 + base_r + 6] = 0.0f;
-    sfpi::dst_reg[32 + base_r + 7] = 0.0f;
   }
 #endif
 
