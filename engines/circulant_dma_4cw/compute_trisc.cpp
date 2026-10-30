@@ -572,22 +572,17 @@ uint32_t __attribute__((noinline)) compute_tile_deg3(uint32_t cb_in,
         sfpi::dst_reg[r2] = round_bf16_fast(sfpi::vFloat(sfpi::dst_reg[r2]) - sfpi::vFloat(sfpi::dst_reg[32 + r2]));
       }
 
-      // Stage 1: Sign parity stored into scratch sc0
-      {
-        sfpi::vInt s0 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r0]));
-        sfpi::vInt s1 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r1]));
-        sfpi::vInt s2 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>((s0 ^ s1) ^ s2);
-      }
-
-      // Stage 2: Outgoing check messages with Intrinsic Damping (beta = 0.9375 = 15/16)
+      // Stage 1 & Edge 0 (Fused): Single-load Sign Parity + Edge 0 Outgoing Message
       const sfpi::vFloat v_damping = sfpi::vFloat(sfpi::sFloat16b(0.9375f));
-
-      // Edge 0: computes r_out0, writes L_new to dst_reg[32 + r0], stages r_out0 into sc1
       {
-        sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
-        sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(m1, m2) * v_damping;
+        sfpi::vFloat q1 = sfpi::dst_reg[r1];
+        sfpi::vFloat q2 = sfpi::dst_reg[r2];
+        {
+          sfpi::vFloat q0 = sfpi::dst_reg[r0];
+          sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>(
+              (sfpi::as<sfpi::vInt>(q0) ^ sfpi::as<sfpi::vInt>(q1)) ^ sfpi::as<sfpi::vInt>(q2));
+        }
+        sfpi::vFloat r_mag0 = sfpi_amin_star_branchless(sfpi::abs(q1), sfpi::abs(q2)) * v_damping;
 
         sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[sc0]));
         sfpi::vFloat q0     = sfpi::dst_reg[r0];
