@@ -372,32 +372,23 @@ uint32_t __attribute__((noinline)) compute_tile_deg6(uint32_t cb_in,
         sfpi::dst_reg[r5] = round_bf16_fast(sfpi::vFloat(sfpi::dst_reg[r5]) - sfpi::vFloat(sfpi::dst_reg[32 + r5]));
       }
 
-      // Stage 1: Native 1-Cycle Integer XOR Sign Parity -> stored in dst_reg[sc0]
+      // Stage 1 & 2 (Fused): Single-load Sign Parity XOR + Pairwise Tree Approximate-Min*
       {
-        sfpi::vInt s0 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r0]));
-        sfpi::vInt s3 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r3]));
-        sfpi::vInt s1 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r1]));
-        sfpi::vInt s4 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r4]));
-        sfpi::vInt s2 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::vInt s5 = sfpi::as<sfpi::vInt>(sfpi::vFloat(sfpi::dst_reg[r5]));
-        sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>(((s0 ^ s3) ^ (s1 ^ s4)) ^ (s2 ^ s5));
-      }
+        sfpi::vFloat q0 = sfpi::dst_reg[r0];
+        sfpi::vFloat q3 = sfpi::dst_reg[r3];
+        sfpi::vInt s_tot = sfpi::as<sfpi::vInt>(q0) ^ sfpi::as<sfpi::vInt>(q3);
+        sfpi::dst_reg[sc1] = sfpi_amin_star_branchless(sfpi::abs(q0), sfpi::abs(q3)); // m03 in sc1
 
-      // Stage 2: Pairwise Tree Approximate-Min* stored in DEST scratch
-      {
-        sfpi::vFloat m0 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r0]));
-        sfpi::vFloat m3 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r3]));
-        sfpi::dst_reg[sc1] = sfpi_amin_star_branchless(m0, m3); // m03 in sc1
-      }
-      {
-        sfpi::vFloat m1 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r1]));
-        sfpi::vFloat m4 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r4]));
-        sfpi::dst_reg[sc2] = sfpi_amin_star_branchless(m1, m4); // m14 in sc2
-      }
-      {
-        sfpi::vFloat m2 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r2]));
-        sfpi::vFloat m5 = sfpi::abs(sfpi::vFloat(sfpi::dst_reg[r5]));
-        sfpi::dst_reg[sc3] = sfpi_amin_star_branchless(m2, m5); // m25 in sc3
+        sfpi::vFloat q1 = sfpi::dst_reg[r1];
+        sfpi::vFloat q4 = sfpi::dst_reg[r4];
+        s_tot ^= (sfpi::as<sfpi::vInt>(q1) ^ sfpi::as<sfpi::vInt>(q4));
+        sfpi::dst_reg[sc2] = sfpi_amin_star_branchless(sfpi::abs(q1), sfpi::abs(q4)); // m14 in sc2
+
+        sfpi::vFloat q2 = sfpi::dst_reg[r2];
+        sfpi::vFloat q5 = sfpi::dst_reg[r5];
+        s_tot ^= (sfpi::as<sfpi::vInt>(q2) ^ sfpi::as<sfpi::vInt>(q5));
+        sfpi::dst_reg[sc0] = sfpi::as<sfpi::vFloat>(s_tot);
+        sfpi::dst_reg[sc3] = sfpi_amin_star_branchless(sfpi::abs(q2), sfpi::abs(q5)); // m25 in sc3
       }
 
       // Stage 3: Outgoing check messages with Intrinsic Damping (beta = 0.9375 = 15/16)
