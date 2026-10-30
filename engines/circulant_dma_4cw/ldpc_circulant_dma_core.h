@@ -389,6 +389,18 @@ inline void copy_128b(void* dst, const void* src) {
     }
 }
 
+inline void copy_words_8b(void* dst, const void* src, uint32_t len_bytes) {
+    auto* d = reinterpret_cast<uint32_t*>(dst);
+    const auto* s = reinterpret_cast<const uint32_t*>(src);
+    const uint32_t words = len_bytes >> 2;
+    for (uint32_t i = 0; i < words; i += 2) {
+        uint32_t w0 = s[i];
+        uint32_t w1 = s[i + 1];
+        d[i]     = w0;
+        d[i + 1] = w1;
+    }
+}
+
 inline void gather_slice_l1(uint32_t dest_addr, const QC_LDPC_4CW::CirculantSliceDesc& desc, const char* vnode_base) {
 #if (defined(COMPILE_FOR_BRISC) || defined(COMPILE_FOR_NCRISC))
     const uint32_t src_a = reinterpret_cast<uint32_t>(vnode_base) + desc.offset_a;
@@ -399,8 +411,8 @@ inline void gather_slice_l1(uint32_t dest_addr, const QC_LDPC_4CW::CirculantSlic
             copy_128b(reinterpret_cast<char*>(dest_addr), reinterpret_cast<const char*>(src_a));
         }
     } else {
-        std::memcpy(reinterpret_cast<char*>(dest_addr), reinterpret_cast<const char*>(src_a), desc.len_a);
-        std::memcpy(reinterpret_cast<char*>(dest_addr) + desc.len_a, vnode_base + desc.offset_b, desc.len_b);
+        copy_words_8b(reinterpret_cast<char*>(dest_addr), reinterpret_cast<const char*>(src_a), desc.len_a);
+        copy_words_8b(reinterpret_cast<char*>(dest_addr) + desc.len_a, vnode_base + desc.offset_b, desc.len_b);
     }
 #else
     char* dest = reinterpret_cast<char*>(dest_addr);
@@ -408,8 +420,8 @@ inline void gather_slice_l1(uint32_t dest_addr, const QC_LDPC_4CW::CirculantSlic
     if (__builtin_expect(desc.len_b == 0, 1)) {
         copy_128b(dest, src_a);
     } else {
-        std::memcpy(dest, src_a, desc.len_a);
-        std::memcpy(dest + desc.len_a, vnode_base + desc.offset_b, desc.len_b);
+        copy_words_8b(dest, src_a, desc.len_a);
+        copy_words_8b(dest + desc.len_a, vnode_base + desc.offset_b, desc.len_b);
     }
 #endif
 }
@@ -424,8 +436,8 @@ inline void scatter_slice_l1(const QC_LDPC_4CW::CirculantSliceDesc& desc, uint32
             copy_128b(reinterpret_cast<char*>(dst_a), reinterpret_cast<const char*>(src_addr));
         }
     } else {
-        std::memcpy(reinterpret_cast<char*>(dst_a), reinterpret_cast<const char*>(src_addr), desc.len_a);
-        std::memcpy(reinterpret_cast<char*>(vnode_base) + desc.offset_b, reinterpret_cast<const char*>(src_addr) + desc.len_a, desc.len_b);
+        copy_words_8b(reinterpret_cast<char*>(dst_a), reinterpret_cast<const char*>(src_addr), desc.len_a);
+        copy_words_8b(reinterpret_cast<char*>(vnode_base) + desc.offset_b, reinterpret_cast<const char*>(src_addr) + desc.len_a, desc.len_b);
     }
 #else
     const char* src = reinterpret_cast<const char*>(src_addr);
@@ -433,8 +445,8 @@ inline void scatter_slice_l1(const QC_LDPC_4CW::CirculantSliceDesc& desc, uint32
     if (__builtin_expect(desc.len_b == 0, 1)) {
         copy_128b(dst_a, src);
     } else {
-        std::memcpy(dst_a, src, desc.len_a);
-        std::memcpy(vnode_base + desc.offset_b, src + desc.len_a, desc.len_b);
+        copy_words_8b(dst_a, src, desc.len_a);
+        copy_words_8b(vnode_base + desc.offset_b, src + desc.len_a, desc.len_b);
     }
 #endif
 }
