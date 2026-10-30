@@ -164,14 +164,12 @@ void kernel_main() {
         noc_async_read_one_packet_set_state(get_noc_addr(0), 128);
         noc_async_write_one_packet_set_state<false>(get_noc_addr(0), 128);
 
+        uint32_t t_step = 0;
+        uint32_t iter = 0;
+
         // Strict Sequential Lockstep Step Loop: Gather -> Compute -> Scatter
         for (uint32_t step = 0; step < max_steps; ++step) {
             uint32_t bar = batch * max_steps + step + 1;
-            uint32_t t_step = step % num_tiles;
-            uint32_t iter = step / num_tiles;
-
-            sync_flags[SyncSlot::DEBUG_NCRISC_STEP] = (step << 8) | 1;
-            active_mask = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
 
             // ------------------------------------------------------------------
             // Phase 1: GATHER Stage for Tile t_step (Face 1 & Face 3)
@@ -182,7 +180,7 @@ void kernel_main() {
             }
             uint32_t scratch_in_addr = sync_flags[SyncSlot::SCRATCH_GATHER_PTR];
 
-            if (active_mask != 0) {
+            {
                 uint32_t t_g0 = get_wall_clock();
                 #pragma GCC unroll 3
                 for (uint32_t d = 0; d < 3; ++d) {
@@ -222,7 +220,7 @@ void kernel_main() {
             // ------------------------------------------------------------------
             WAYPOINT("N_SC");
             uint32_t t_s0 = get_wall_clock();
-            if (active_mask != 0) {
+            {
                 #pragma GCC unroll 3
                 for (uint32_t d = 0; d < 3; ++d) {
                     scatter_slice_l1(QC_LDPC_4CW::TILE_SLICES_W1_F1[t_step][d], scratch_out_addr + 512 + d * 128, vnode_ptr);
@@ -286,7 +284,9 @@ void kernel_main() {
             WAYPOINT("N_SD");
 
             // Early termination check at iteration boundary
-            if (t_step == num_tiles - 1) {
+            if (++t_step == num_tiles) {
+                t_step = 0;
+                ++iter;
                 if (sync_flags[SyncSlot::EARLY_TERMINATION] != 0) {
                     break;
                 }

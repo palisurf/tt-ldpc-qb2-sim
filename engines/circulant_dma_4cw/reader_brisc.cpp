@@ -87,13 +87,11 @@ void kernel_main() {
         uint32_t vnode_l1 = sync_flags[SyncSlot::VNODE_L1_ADDR];
         char* vnode_ptr = reinterpret_cast<char*>(vnode_l1);
 
+        uint32_t t_step = 0;
+
         // Strict Sequential Lockstep Step Loop: Gather -> Compute -> Scatter
         for (uint32_t step = 0; step < max_steps; ++step) {
             uint32_t bar = batch * max_steps + step + 1;
-            uint32_t t_step = step % num_tiles;
-
-            sync_flags[SyncSlot::DEBUG_BRISC_STEP] = (step << 8) | 1;
-            uint8_t active_mask = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
 
             // ------------------------------------------------------------------
             // Phase 1: GATHER Stage for Tile t_step (Face 0 & Face 2)
@@ -108,7 +106,7 @@ void kernel_main() {
             asm volatile("fence rw, rw" ::: "memory");
             WAYPOINT("B_GT");
 
-            if (active_mask != 0) {
+            {
                 uint32_t t_g0 = get_wall_clock();
                 #pragma GCC unroll 3
                 for (uint32_t d = 0; d < 3; ++d) {
@@ -151,7 +149,7 @@ void kernel_main() {
             // ------------------------------------------------------------------
             WAYPOINT("B_SC");
             uint32_t t_s0 = get_wall_clock();
-            if (active_mask != 0) {
+            {
                 #pragma GCC unroll 3
                 for (uint32_t d = 0; d < 3; ++d) {
                     scatter_slice_l1(QC_LDPC_4CW::TILE_SLICES_W0_F0[t_step][d], scratch_out_addr + 0 + d * 128, vnode_ptr);
@@ -164,6 +162,7 @@ void kernel_main() {
             // Information Node Parity Scan (Tile 39)
 #if !LDPC_TEST_PASSTHROUGH_MODE
             if (t_step == num_tiles - 1) {
+                uint8_t active_mask = static_cast<uint8_t>(sync_flags[SyncSlot::ACTIVE_MASK]);
                 uint32_t mask_err01 = ((active_mask & 1) ? 0x00008000 : 0) | ((active_mask & 2) ? 0x80000000 : 0);
                 uint32_t mask_err23 = ((active_mask & 4) ? 0x00008000 : 0) | ((active_mask & 8) ? 0x80000000 : 0);
 
@@ -206,7 +205,8 @@ void kernel_main() {
             }
 
             // Early termination check at iteration boundary
-            if (t_step == num_tiles - 1) {
+            if (++t_step == num_tiles) {
+                t_step = 0;
                 if (sync_flags[SyncSlot::EARLY_TERMINATION] != 0) {
                     break;
                 }

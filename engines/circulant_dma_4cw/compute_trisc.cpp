@@ -812,21 +812,19 @@ void kernel_main() {
       asm volatile("" ::: "memory");
     }
 
+    uint32_t t_step = 0;
+    uint32_t iter = 0;
+
     for (uint32_t step = 0; step < max_steps; ++step) {
       uint32_t bar = batch * max_steps + step + 1;
-      uint32_t t_step = step % num_tiles;
-      uint32_t iter = step / num_tiles;
 
 #ifdef TRISC_UNPACK
-      sync_flags[SyncSlot::DEBUG_TRISC0_STEP] = (step << 8) | 1;
       WAYPOINT("U_CP");
 #endif
 #ifdef TRISC_PACK
-      sync_flags[SyncSlot::DEBUG_TRISC2_STEP] = (step << 8) | 1;
       WAYPOINT("P_CP");
 #endif
 #ifdef TRISC_MATH
-      sync_flags[SyncSlot::DEBUG_TRISC1_STEP] = (step << 8) | 1;
       WAYPOINT("M_CP");
 #endif
 
@@ -858,7 +856,9 @@ void kernel_main() {
 #endif
 
       // Iteration boundary early termination check (Tile 39)
-      if (t_step == num_tiles - 1) {
+      if (++t_step == num_tiles) {
+        t_step = 0;
+        ++iter;
         while (sync_flags[SyncSlot::SCATTER_DONE_W1] < bar) {
           asm volatile("" ::: "memory");
         }
