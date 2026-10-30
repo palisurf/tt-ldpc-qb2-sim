@@ -675,6 +675,8 @@ void kernel_main() {
   (void)start_batch;
   uint32_t core_id         = get_arg_val<uint32_t>(8);
   (void)core_id;
+  uint32_t prng_seed_id    = get_arg_val<uint32_t>(9);
+  if (prng_seed_id == 0) prng_seed_id = invocation_id;
 
   if (invocation_id == 0) invocation_id = 1;
   uint32_t epoch = invocation_id << 16;
@@ -739,7 +741,7 @@ void kernel_main() {
   float sigma_val = uint_as_float(sigma_bits);
 
   Xoshiro128Plus rng_core;
-  uint32_t seed_master = 0x12345678U + (invocation_id * 1013904223U);
+  uint32_t seed_master = 0x12345678U + (prng_seed_id * 1013904223U);
   rng_core.init(seed_master);
   for (uint32_t c = 0; c < core_id; ++c) {
     rng_core.long_jump();
@@ -752,7 +754,7 @@ void kernel_main() {
     uint32_t active_cb_vnode = cb_vnode_a;
 #if !LDPC_TEST_PASSTHROUGH_MODE
     uint32_t seed_batch = rng_core.next();
-    generate_channel_tiles(active_cb_vnode, mu_val, sigma_val, benchmark_mode, invocation_id, seed_batch);
+    generate_channel_tiles(active_cb_vnode, mu_val, sigma_val, benchmark_mode, prng_seed_id, seed_batch);
     rng_core.jump();
 #endif
 

@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <thread>
 #include <atomic>
+#include <random>
 
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
@@ -69,6 +70,23 @@ static uint32_t get_unique_invocation_id() {
     return id;
 }
 
+static void save_invocation_id(uint32_t id) {
+    const char* path = "/tmp/tt_circulant_invocation_id";
+    std::ofstream fout(path);
+    if (fout.is_open()) {
+        fout << id;
+        fout.close();
+    }
+}
+
+static uint32_t generate_random_seed_id() {
+    std::random_device rd;
+    uint32_t val = (rd() ^ static_cast<uint32_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count())) & 0x3FFFFFFFU;
+    if (val <= 1) val = 2;
+    return val;
+}
+
 // ------------------------------------------------------------------------------
 int run_circulant_dma_simulation(
     double eb_n0_db,
@@ -81,10 +99,18 @@ int run_circulant_dma_simulation(
     uint64_t min_fe = 25,
     uint32_t chunk_batches_per_core = 2500,
     const std::string& csv_filename = "",
-    uint32_t max_steps_override = 0
+    uint32_t max_steps_override = 0,
+    uint32_t user_seed = 0,
+    bool random_seed = false
 ) {
     if (invocation_id <= 1) {
         invocation_id = get_unique_invocation_id();
+    }
+    uint32_t base_seed_id = invocation_id;
+    if (user_seed > 0) {
+        base_seed_id = user_seed;
+    } else if (random_seed) {
+        base_seed_id = generate_random_seed_id();
     }
 
     auto mesh_device = single_core 
@@ -105,6 +131,9 @@ int run_circulant_dma_simulation(
               << " | Target FE: " << min_fe << std::endl;
     std::cout << " Invocation ID: " << invocation_id << " (Epoch: 0x" 
               << std::hex << (invocation_id << 16) << std::dec << ")" << std::endl;
+    std::cout << " Noise Seed ID: " << base_seed_id
+              << (user_seed > 0 ? " (User-Specified Deterministic Seed)" : (random_seed ? " (Randomly Drawn Seed)" : " (Linked to Invocation ID)"))
+              << " [Replay with: --seed " << base_seed_id << "]" << std::endl;
     if (benchmark_mode)  std::cout << " Mode: SILICON THROUGHPUT BENCHMARK (sigma=0)" << std::endl;
     if (passthrough_mode) std::cout << " Mode: PASSTHROUGH MEMORY GATHER/SCATTER VERIFICATION" << std::endl;
     std::cout << "=======================================================" << std::endl;
@@ -204,7 +233,7 @@ int run_circulant_dma_simulation(
                 std::vector<uint32_t> c_args = {
                     chunk_batches_per_core, max_iterations, num_tiles,
                     mu_u32, sigma_bits, invocation_id,
-                    max_steps_override, 0u, global_core_id
+                    max_steps_override, 0u, global_core_id, base_seed_id
                 };
                 SetRuntimeArgs(program, compute, c, c_args);
             }
@@ -268,6 +297,8 @@ int run_circulant_dma_simulation(
 
         uint32_t cur_invocation_id = (invocation_id + chunk_idx) & 0x7FFF;
         if (cur_invocation_id <= 1) cur_invocation_id = 2;
+        save_invocation_id(cur_invocation_id);
+        uint32_t cur_seed_id = base_seed_id + chunk_idx;
 
         auto& programs = workload.get_programs();
 
@@ -296,7 +327,7 @@ int run_circulant_dma_simulation(
                 std::vector<uint32_t> c_args = {
                     cur_batches, max_iterations, num_tiles,
                     mu_u32, sigma_bits, cur_invocation_id,
-                    max_steps_override, 0u, global_core_id
+                    max_steps_override, 0u, global_core_id, cur_seed_id
                 };
                 SetRuntimeArgs(program, ch.compute, c, c_args);
             }
@@ -499,6 +530,8 @@ int main(int argc, char** argv) {
     uint32_t chunk_batches = 2500; // 2,500 batches/core = 10k CWs/core = 4.4M CWs/chunk across 440 cores
     std::string csv_path = "";
     uint32_t max_steps = 0;
+    uint32_t user_seed = 0;
+    bool random_seed = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -510,6 +543,17 @@ int main(int argc, char** argv) {
         else if (arg == "--chunk-batches" && i + 1 < argc) chunk_batches = std::stoul(argv[++i]);
         else if (arg == "--out" && i + 1 < argc) csv_path = argv[++i];
         else if (arg == "--max-steps" && i + 1 < argc) max_steps = std::stoul(argv[++i]);
+        else if (arg == "--seed" && i + 1 < argc) {
+            std::string s_arg = argv[++i];
+            if (s_arg == "random" || s_arg == "rand") {
+                random_seed = true;
+            } else {
+                user_seed = static_cast<uint32_t>(std::stoul(s_arg));
+            }
+        }
+        else if (arg == "--random-seed") {
+            random_seed = true;
+        }
     }
 
     if (argc > 1 && argv[1][0] != '-') eb_n0_db = std::stod(argv[1]);
@@ -518,6 +562,6 @@ int main(int argc, char** argv) {
 
     return run_circulant_dma_simulation(
         eb_n0_db, max_blocks, max_iterations, single_core, benchmark, passthrough,
-        1, min_fe, chunk_batches, csv_path, max_steps
+        1, min_fe, chunk_batches, csv_path, max_steps, user_seed, random_seed
     );
 }

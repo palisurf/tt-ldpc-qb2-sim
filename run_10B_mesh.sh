@@ -22,6 +22,7 @@ EBN0="${1:-2.50}"
 MAX_BLOCKS="${2:-10000000000}"
 MAX_ITER="${3:-200}"
 MIN_FE="${4:-1000000}"
+SEED_OPT="${5:---random-seed}"
 LOG_FILE="sim_10B_ebn0_${EBN0}_$( [ "$BH_AICLK" -gt 0 ] && echo "${BH_AICLK}MHz" || echo "1350MHz" ).log"
 
-stdbuf -oL -eL ./engines/circulant_dma_4cw/ldpc_sim_circulant_dma "$EBN0" "$MAX_BLOCKS" "$MAX_ITER" --min-fe "$MIN_FE" 2>&1 | tee "$LOG_FILE"
+stdbuf -oL -eL ./engines/circulant_dma_4cw/ldpc_sim_circulant_dma "$EBN0" "$MAX_BLOCKS" "$MAX_ITER" --min-fe "$MIN_FE" $SEED_OPT 2>&1 | tee "$LOG_FILE"
