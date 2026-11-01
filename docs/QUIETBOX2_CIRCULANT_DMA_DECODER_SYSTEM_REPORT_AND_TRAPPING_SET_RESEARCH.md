@@ -46,7 +46,7 @@ Crucially, this sustained multi-gigabit throughput transforms LDPC error floor r
 ## 2. Quasi-Cyclic Circulant Structure, Matrix Sparsity (Spy Plot), and Tile/Face Formation
 
 ### 2.1 The CCSDS AR4JA Protograph & Circulant Geometry
-The target code is the standard Consultative Committee for Space Data Systems (CCSDS) Accumulate-Repeat-4-Jacobi-Accumulate (AR4JA) Rate-1/2 code defined in the CCSDS 131.0-B-5 Blue Book:
+The target code is the standard Consultative Committee for Space Data Systems (CCSDS) Accumulate-Repeat-4-Jagged-Accumulate (AR4JA) Rate-1/2 code defined in the CCSDS 131.0-B-5 Blue Book:
 - **Block Length ($N$):** 2,560 variable nodes (LLR beliefs).
 - **Information Bits ($K$):** 1,024 bits.
 - **Parity Constraints ($M$):** 1,536 check nodes.

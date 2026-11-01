@@ -10,10 +10,11 @@
 
 > [!TIP]
 > ### 📄 Comprehensive System Architecture & Research Report
-> For a complete, ground-truth technical reference covering the full 5.29–5.48 Gsps circulant DMA architecture, quasi-cyclic parity-check matrix decomposition ($H$ spy plot and Tensix tile/face formation), physical silicon performance metrics down to $8 \times 10^{-10}$ FER, and high-speed trapping-set mitigation research:
+> For the complete 23-page LaTeX technical monograph covering the 5.29–5.485 Gsps Circulant DMA 4-Codeword architecture, QuietBox 2 hardware and SWaP-C economics (`$9,999`), Tensix tile/face formation and processor utilization, universal support for all 9 CCSDS AR4JA codes with Rate-4/5 mother-code circulant descriptive compression, 40-billion-block ($81.92\text{ trillion}$ symbol) deep error-floor certification down to $8 \times 10^{-10}$ FER, and global NASA Deep Space Network (DSN) Time-Division Multiplexing (TDM):
 > 
-> - 📥 **Download Publication PDF:** [**`QuietBox 2 AR4JA LDPC Decoder System Report.pdf`**](docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.pdf)
-> - 📖 **Read Online Markdown:** [**`QuietBox 2 AR4JA LDPC Decoder System Report.md`**](docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.md)
+> - 📥 **Download Comprehensive Monograph (PDF):** [**`QuietBox 2 AR4JA LDPC Comprehensive Architecture & DSN TDM Report.pdf`**](docs/QUIETBOX2_AR4JA_LDPC_COMPREHENSIVE_ARCHITECTURE_AND_DSN_TDM_REPORT.pdf)
+> - 📜 **LaTeX Source:** [**`QUIETBOX2_AR4JA_LDPC_COMPREHENSIVE_ARCHITECTURE_AND_DSN_TDM_REPORT.tex`**](docs/QUIETBOX2_AR4JA_LDPC_COMPREHENSIVE_ARCHITECTURE_AND_DSN_TDM_REPORT.tex)
+> - 📖 **Companion Online Markdown Summary:** [**`QuietBox 2 AR4JA LDPC Decoder System Report.md`**](docs/QUIETBOX2_CIRCULANT_DMA_DECODER_SYSTEM_REPORT_AND_TRAPPING_SET_RESEARCH.md)
 
 ---
 

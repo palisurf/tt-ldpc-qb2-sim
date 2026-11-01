@@ -355,7 +355,7 @@ This report provides an exhaustive, ground-truth operational reference for the p
 
 <h3>2.1 The CCSDS AR4JA Protograph &amp; Circulant Geometry</h3>
 <p>
-The target code is the standard Consultative Committee for Space Data Systems (CCSDS) Accumulate-Repeat-4-Jacobi-Accumulate (AR4JA) Rate-1/2 code defined in the CCSDS 131.0-B-5 Blue Book:
+The target code is the standard Consultative Committee for Space Data Systems (CCSDS) Accumulate-Repeat-4-Jagged-Accumulate (AR4JA) Rate-1/2 code defined in the CCSDS 131.0-B-5 Blue Book:
 </p>
 <ul>
   <li><strong>Block Length ($N$):</strong> 2,560 variable nodes (LLR beliefs).</li>
